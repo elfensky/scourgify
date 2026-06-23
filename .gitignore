@@ -1,16 +1,13 @@
-# Personal review maps — derived from YOUR Calibre library (tags/fandoms/characters/etc.).
-# Generated locally by generate_maps.py / generate_followups.py; kept local, untracked.
-*_map.csv
-*_rebuild.csv
-*_proposal.csv
-*_fandom_aware.csv
-_*.csv
-
-# Bundled GENERIC defaults SHIP with the tool — keep them tracked.
+# Personal review maps & intermediates — derived from YOUR Calibre library.
+# Ignore ALL CSVs by default; the bundled generic defaults/ are the only tracked CSVs.
+*.csv
 !defaults/*.csv
 
 # Calibre DB snapshots / backups
 *.db
+
+# Generated per-user config is fine to ship as a default, but ignore local overrides
+overrides/
 
 # Python / OS cruft
 __pycache__/
