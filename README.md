@@ -1,11 +1,14 @@
-# Calibre fanfiction library — cleanup toolkit
+# calibre-wrangler
 
-Scripts + review maps used to normalize the FanFicFare-imported library at
-`/Users/andrei/Library/Mobile Documents/com~apple~CloudDocs/Calibre/fanfiction`
-(tags, genres, fandoms, characters, relationships, status, authors, series, publisher).
+The tag-wrangler / canonizer for your fanfiction library — normalize and consolidate **tags,
+fandoms, characters, relationships, genres, series and authors** in a
+[FanFicFare](https://github.com/JimmXinu/FanFicFare)-imported [Calibre](https://calibre-ebook.com)
+library. Audit-first, dry-run, reversible.
 
-All the heavy cleanup has already been applied. Keep this folder as the audit trail + for
-re-running if the library drifts (e.g. after a bulk FanFicFare metadata re-fetch).
+Standalone Python scripts run via `calibre-debug -e <script>.py`, driven by editable CSV "decision
+maps" you review before anything is written. Point them at your library with the `CALIBRE_LIBRARY`
+environment variable. The transforms are idempotent — keep the folder as an audit trail and re-run
+after new downloads.
 
 ---
 
