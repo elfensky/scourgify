@@ -60,6 +60,7 @@ def load_maps(cfg):
         if r.get("fandom"): m["char_fd"][(r["variant"], r["fandom"])] = r["canonical"]
         else: m["char"][r["variant"]] = r["canonical"]
     m["fan"] = {r["alias"]: r["canonical"] for r in both("fandoms.csv")}
+    m["fanvals"] = {norm(v) for v in m["fan"].values()}
     m["trope"] = {r["variant"]: (r["canonical"], r.get("route", "tag")) for r in both("tropes.csv")}
     m["gsplit"] = {r["combined"]: r["atoms"].split("|") for r in both("genres_split.csv")}
     m["gcanon"] = {r["variant"]: r["canonical"] for r in both("genres_canon.csv")}
@@ -109,10 +110,11 @@ def transform(d, m, beh, cols):
     nG = set(); extra_tags = set()
     for g in G0:
         for atom in (m["gsplit"].get(g, [g])):
-            a = m["gcanon"].get(atom, atom)
-            if norm(a) in m["gallow"]: nG.add(a)
-            elif "genres" in cols and norm(a) in {norm(x) for x in m["fan"].values()}: nF.add(a)  # misfiled fandom
-            else: extra_tags.add(a)                                                                # freeform -> tag
+            a = m["gcanon"].get(atom, atom); na = norm(a)
+            if na in m["gallow"] or any(na.startswith(x + " ") for x in m["gallow"] if len(x) >= 4):
+                nG.add(a)                                       # allowlisted genre or a subtype of one (AU - Canon Divergence)
+            elif na in m["fanvals"]: nF.add(a)                  # misfiled fandom
+            else: extra_tags.add(a)                             # freeform -> tag
     # tags: junk drop / trope route / surface-fold / ascii / redundancy-strip
     nT = set(extra_tags)
     homes = {norm(x) for x in nF | nC | nG | R | (set(st) if isinstance(st, list) else {st} if st else set())}
@@ -187,6 +189,28 @@ def audit(cfg, m):
         if present.get(k): print(f"{k:14}{len(before[k]):>9}{len(after[k]):>9}{len(after[k])-len(before[k]):>8}")
     print(f"\nSAFETY  books losing last fandom: {lostF}   losing last character: {lostC}")
     print("OK — no data loss." if lostF == lostC == 0 else "WARNING: review the losses above before apply.")
+    # concrete examples — which rules actually fire on THIS library's values
+    def ex(items, n=10): return "  " + (", ".join(items[:n]) + (f"  …(+{len(items)-n} more)" if len(items) > n else "")) if items else ""
+    print("\n--- examples of what would change (sampled from your values) ---")
+    if "characters" in before:
+        fc = [f"{v}→{m['char'][v]}" for v in sorted(before["characters"]) if v in m["char"] and m["char"][v] != v]
+        if fc: print(f"characters fold ({len(fc)}):{ex(fc)}")
+    if "fandoms" in before:
+        ff = [f"{v}→{m['fan'][v] or 'DROP'}" for v in sorted(before["fandoms"]) if v in m["fan"] and m["fan"][v] != v]
+        if ff: print(f"fandoms canon ({len(ff)}):{ex(ff)}")
+    if "genres" in before:
+        gm = [f"{v}→{'|'.join(m['gsplit'][v]) if v in m['gsplit'] else m['gcanon'].get(v, v)}" for v in sorted(before["genres"]) if v in m["gsplit"] or v in m["gcanon"]]
+        def _kept(v):
+            na = norm(m["gcanon"].get(v, v))
+            return na in m["gallow"] or any(na.startswith(x + " ") for x in m["gallow"] if len(x) >= 4)
+        gmv = [v for v in sorted(before["genres"]) if v not in m["gsplit"] and not _kept(v) and norm(v) not in m["fanvals"]]
+        if gm: print(f"genres split/canon ({len(gm)}):{ex(gm)}")
+        if gmv: print(f"genres → tags (not in allowlist) ({len(gmv)}):{ex(gmv)}")
+    if "tags" in before:
+        drops = [v for v in sorted(before["tags"]) if is_junk(v, m)]
+        folds = [f"{v}→{m['trope'][v][0]}" for v in sorted(before["tags"]) if v in m["trope"] and m["trope"][v][0] != v]
+        if drops: print(f"tags drop ({len(drops)}):{ex(drops)}")
+        if folds: print(f"tags fold/route ({len(folds)}):{ex(folds)}")
 
 # ---------------- APPLY / SETUP (Calibre API) ----------------
 def with_api():

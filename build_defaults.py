@@ -24,22 +24,38 @@ def write_txt(name, header, lines):
 
 # preference folds to EXCLUDE from generic defaults (user's taste, belong in config, not facts)
 PREF_FOLDS = {("erotica", "Smut"), ("adult", "Mature"), ("sex", "Smut"), ("adult", "Smut")}
+import re, unicodedata
+def afold(s):  # transliterate smart quotes / accents to plain ASCII (canonical targets should be ASCII)
+    s = s.replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"').replace("…", "...").replace("–", "-").replace("—", "-")
+    return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
+ACRO = re.compile(r"^([A-Za-z]\.){2,}$")   # stylized acronym like J.A.R.V.I.S. — don't de-stylize
 
 # ---- characters.csv : variant,canonical,fandom  (fandom blank = global; set = homonym-scoped) ----
 chars = []
 for r in rows("characters_map.csv"):
     d = r.get("decision", "")
     if d.startswith("merge→") and r.get("confidence") == "high":
-        chars.append([r["value"], d.split("→", 1)[1], ""])
+        canon = d.split("→", 1)[1]
+        if ACRO.match(r["value"]) and not ACRO.match(canon): continue   # keep J.A.R.V.I.S., don't fold to "Jarvis"
+        chars.append([r["value"], canon, ""])
 for r in rows("characters_fandom_aware.csv"):
     if r.get("fullname") and r.get("confidence") in ("high", "medium") \
        and r.get("fandom") not in ("", "(no fandom)") and r["fullname"] != r["abbrev"]:
         chars.append([r["abbrev"], r["fullname"], r["fandom"]])
 n_chars = write_csv("characters.csv", ["variant", "canonical", "fandom"], chars)
 
-# ---- fandoms.csv : alias,canonical (casing / JP->EN / "X SI"->X / franchise dup) ----
-fan = [[r["fandom"], r["target"]] for r in rows("fandoms_consolidate_map.csv")
-       if r.get("action") in ("merge", "to_real") and r.get("target")]
+# ---- fandoms.csv : alias,canonical (casing / JP->EN / "X SI"->X). Resolve chains & cycles to one canonical. ----
+raw = {}
+for r in rows("fandoms_consolidate_map.csv"):
+    if r.get("action") in ("merge", "to_real") and r.get("target"): raw[r["fandom"]] = r["target"]
+def resolve_fan(a):
+    seen = [a]; cur = a
+    while raw.get(cur) and raw[cur] not in seen:
+        cur = raw[cur]; seen.append(cur)
+    if raw.get(cur) and raw[cur] in seen:                 # 2+ cycle -> pick the longest (most formal) name
+        return max(seen[seen.index(raw[cur]):], key=len)
+    return cur
+fan = [[a, afold(resolve_fan(a))] for a in raw if afold(resolve_fan(a)) and afold(resolve_fan(a)) != a]
 n_fan = write_csv("fandoms.csv", ["alias", "canonical"], fan)
 
 # ---- tropes.csv : variant,canonical,route  (route = tag|genre|character|fandom) ----
@@ -47,12 +63,14 @@ trop = []
 for r in rows("freeform_trope_map.csv"):
     a, t = r.get("action"), r.get("target", "")
     if not t: continue
-    if a == "fold" and (r["tag"].strip().lower(), t) not in PREF_FOLDS: trop.append([r["tag"], t, "tag"])
+    if a == "fold":
+        t2 = afold(t)                                      # canonical target must be ASCII (no smart-quote reversals)
+        if t2 and t2 != r["tag"] and (r["tag"].strip().lower(), t) not in PREF_FOLDS: trop.append([r["tag"], t2, "tag"])
     elif a == "to_genres": trop.append([r["tag"], t, "genre"])
     elif a == "to_characters": trop.append([r["tag"], t, "character"])
     elif a == "to_fandoms": trop.append([r["tag"], t, "fandom"])
 for r in rows("tags_surface_dupes.csv"):
-    canon = r.get("decision") or r.get("proposed_canonical", "")
+    canon = afold(r.get("decision") or r.get("proposed_canonical", ""))
     for part in r.get("variants", "").split(";"):
         v = part.rsplit("(", 1)[0].strip()
         if v and canon and v != canon: trop.append([v, canon, "tag"])
