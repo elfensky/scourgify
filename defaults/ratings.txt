@@ -1,0 +1,19 @@
+# Content-rating / warning vocabulary (kept as tags).
+NSFW
+SFW
+Explicit
+Mature
+Teen
+General Audiences
+Smut
+Lemon
+Lime
+PWP
+Fluff
+Gore
+Graphic Violence
+Erotica
+Adult
+Underage
+Non-Con
+Dub-Con

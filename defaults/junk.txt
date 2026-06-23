@@ -1,0 +1,280 @@
+# Tags to DROP. plain line = case-insensitive exact match; 're:<regex>' = case-insensitive regex search.
+re:no beta
+re:cross-?posted on
+re:\bto be added\b
+re:do ?n.?t copy
+re:do not copy
+re:author regrets (nothing|everything)
+re:more tags
+re:will add more tags
+re:like men$
+2
+2Booty
+A Company Story
+Abandoned Work - Unfinished and Discontinued
+Active Discussion Makes The Author Happy
+Active Discussion Makes The Qm Happy
+Additional Warnings In Author's Note
+Ahistorical use of war fans
+Ai As A Beta
+Ai Assisted Writing
+Ai-Assisted
+also
+Analysis Feeds The Qm
+Anime
+Anime & Comics
+Anime & Manga
+Anime/Manga
+anyway
+as usual
+Audience Participation Encouraged
+Author Appreciates Constructive Critisism
+Author Can't Write Smut
+Author Enjoys Discussion
+Author Enjoys Feedback
+Author Is An Unreliable Shit
+Author Is Sleep Deprived
+Author Likes Feedback
+Author Lives Off Feedback And Discussion
+Avengers: Endgame (Movie) Spoilers
+Bad Tropes
+Beccabestgirl
+Believe it!
+Betaed
+Black Air Force Energy
+Blonde
+Books
+but not really
+Canals
+Canon - Book
+Challenge
+Challenges
+Co-Authored
+Coffee
+Come At Me Bro
+Comics
+Comment Whore
+Comments And Interaction Give Me Life
+Comments Are Appreciated
+Comments Feed Me
+Comments Feed The Muse
+Comments Make Me Happy
+Comments Make The Author Happy
+Comments Stave Off The Author's Depression
+Comments Sustain Me
+Comments Welcome
+Commission Work
+Community: artword
+Company Fucks Everyone
+Confusion
+Conversation Makes Author Happy
+Crime Time Is Fun Times
+Cross-Posted on FanFiction.Net
+Crosspost
+Daughters are for headpats
+Dead
+Disccusion Makes Author Happy
+DISCONTINUED
+Discussion = Author Feels Validated
+Discussion And Comments Make The Author Happy
+Discussion Encouraged
+Discussion Feeds Me
+Discussion Feeds The Writer
+Discussion Helps
+Discussion Is Awesome
+Discussion Is The Best Thing Since Sliced Bread
+Discussion Makes Author Happy
+Discussion Makes The Author Happy
+Discussion Welcome
+do not copy to another site
+Do not repost
+Don't copy to another site
+Don't Like Don't Read
+Don't Try This At Home
+Dragonstone
+During years at Hogwarts
+Dxd Lore Is A Cesspool Of Unspeakable Horrors
+DxD Start
+Engagement Feeds The Muse
+English Is Not A Native Language
+English Is Not My Mother
+Epic
+eventually
+Everything Will Be Fine
+Everything Will Be Fire
+F
+Fan Fiction
+Fan Translation
+Fanart
+fanfic
+Fanfiction
+Feedback Appreciated
+Feedback Is Fuel For The Muse
+Feedback Makes The Author Happy
+Fiction
+Finished
+First Fic
+Fluffy Fluffy Tail
+France
+Fuck It We Ball
+Fuck Mike Pence
+Fuck You Murphy
+Fun
+Games
+happiness
+Harry Potter FanFiction
+hema
+Hestia Is Bestia
+How Do I Tag
+I Am The One Who Cucks
+I Don't Even Know
+I Don't Know What I'M Doing
+i guess
+I Have No Idea What I Am Doing
+I Have No Idea What I'M Doing
+I Regret Nothing
+I Tried
+I Wrote This Instead of Sleeping
+I'm Bad At Tagging
+Idk What To Tag
+infinity war arc but better
+Infrequent Updates
+Inspired by Fanfiction
+Irregular Updates
+It Gets Better
+kind of
+Kinda
+Language
+Laughter
+Let's Have Fun
+Light Novel
+lol
+long chapters
+Lots of it
+Madlad
+Main Character is ...
+Manga
+Manhwa/Korean Comics/만화
+Maybe - Freeform
+maybe...
+Memes
+Misc
+Misc. Games
+Mistakes
+Monthly Updates
+Morals What Morals?
+More characters to be added
+More Tags As I Think Of Them
+Movies
+Mtl Translation
+Multi
+Multi Dimensional Nonsense
+Multi-Themes
+Musical References
+My First Fanfic
+NaNoWriMo
+Nature
+New Author
+No Beta
+No Beta We Die In The Trenches
+no beta we die like men
+No Beta we Die like Starks
+no beta we just die
+no canals
+No Clue Why I Wrote This
+None
+Noodly
+Not Beta Read
+Novel
+Ntr Is Shit
+Oc Donut Steel
+Oh God What Am I Doing?
+Old Fic
+Omake's Welcome
+Omakes Are Welcome
+On Hiatus
+Ongoing
+Op Forgets Tags Are A Thing
+Originally Posted on FanFiction.Net
+Originally Posted on Tumblr
+Other
+Other Additional Tags to Be Added
+Other Ships Not Mentioned in Tags
+Other then Harry Potter
+Panic
+Patreon
+Patreon Exclusive
+Please Be Gentle
+Plot More Than "Plot"
+Podfic Available
+Possible Bad Memeing
+puns
+Rating May Change
+Really
+Rocks Fall Everyone Dies
+Sequel
+seriously
+Shade Is Fluff
+Shade Is Love
+Shadenight123
+shogi
+Short Chapters
+Slow To Update
+Slow Updates
+Somewhat
+Sorry Not Sorry
+Sort Of
+Spoilers
+Spoilers for Code Geass: Lelouch of the Rebellion R2
+Sporadic Updates
+Story
+Tag1
+Tags Added As Needed
+Tags Added As Nessessary
+Tags Are Hard
+Tags May Change
+Tags to be added
+The Author Regrets Everything
+The Author Regrets Nothing
+The author's therapy session
+The Most Ridiculous Masochist In Japan
+The Writer Likes Good Debates.
+These Hands
+This Can Only End Well
+This Is All Strypgia's Fault
+This Is Why We Can't Have Nice Things
+Time Line
+Timeline What Timeline
+Too Biggus Dickus
+Touch Fluffy Tail
+Translation Available
+TV & Movies
+Violence Is Always The Answer
+Violence Is The Question And The Answer Is Yes
+Votes
+Voting
+Waifu Catalog Is Not Used Optimally
+Waifu For The Waifu Throne
+Walking Tall
+Warnings May Change
+Well - Freeform
+What Am I Doing?
+What Could Possibly Go Wrong?
+Why Am I Doing This?
+why am i writing this
+Why Did I Write This?
+Wiki Warrior
+WIP
+Wordcount: 30.000-50.000
+Work In Progress
+Worst President Ever!
+Wow
+WT - What Timeline?
+X-Over
+X-overs
+yes
+Yo Dawg I Heard You Like Cringe
+You can't fix what aint broke
+You Have Been Warned
+Your Comments Fuel Me
+YS

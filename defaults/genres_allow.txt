@@ -1,0 +1,38 @@
+# Canonical genre vocabulary (one per line). Values here stay in #genres; freeform values not here move to tags.
+Adventure
+Romance
+Drama
+Humor
+Angst
+Hurt/Comfort
+Friendship
+Family
+Fantasy
+Sci-Fi
+Supernatural
+Mystery
+Horror
+Tragedy
+Parody
+Suspense
+Crime
+Spiritual
+General
+Action
+Crossover
+Alternate Universe
+Reincarnation
+Time Travel
+Isekai
+Slice of Life
+Comedy
+War
+LitRPG
+Historical
+Mecha
+Space Opera
+Steampunk
+Cyberpunk
+Dark Fantasy
+Urban Fantasy
+Western
