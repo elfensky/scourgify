@@ -25,7 +25,8 @@ def load_config():
     cfg = {"columns": {"fandoms": "#fandoms", "characters": "#characters", "relationships": "#relationships",
                        "genres": "#genres", "status": "#status", "tags": "tags"},
            "behavior": {"fold_characters": True, "ascii_only_tags": True, "au_as": "genre", "crossover_as": "genre",
-                        "reincarnation_as": "genre", "time_travel_as": "genre", "fold_ratings": False, "keep_categories": True},
+                        "reincarnation_as": "genre", "time_travel_as": "genre", "fold_ratings": False,
+                        "keep_categories": True, "tropes_as": "tag"},
            "overrides": {"dir": "overrides"}}
     p = os.path.join(HERE, "config.toml")
     if os.path.exists(p):
@@ -82,6 +83,16 @@ def is_junk(t, m):
     if t.strip().lower() in m["junk_exact"]: return True
     return any(rx.search(t) for rx in m["junk_rx"])
 
+def build_tagcanon(spellings, m):
+    """norm -> canonical spelling: most-common spelling per normalized form; bundled tropes canonical wins."""
+    spell = collections.Counter(spellings)
+    bynorm = collections.defaultdict(list)
+    for t, ct in spell.items(): bynorm[norm(t)].append((ct, t))
+    tc = {nm: max(lst)[1] for nm, lst in bynorm.items()}     # max by (count, spelling)
+    for v, (cn, rt) in m["trope"].items():
+        if rt == "tag": tc[norm(cn)] = cn
+    return tc
+
 # route for a trope, honoring config (au/crossover/etc. genre-vs-tag toggle)
 def trope_route(canon, route, beh):
     key = {"alternate universe": "au_as", "crossover": "crossover_as",
@@ -90,9 +101,10 @@ def trope_route(canon, route, beh):
     return route
 
 # ---------------- the transform (per book) ----------------
-def transform(d, m, beh, cols, known_chars=frozenset()):
+def transform(d, m, beh, cols, known_chars=frozenset(), tagcanon=None):
     """d: dict col_key -> list[str] for configured columns. Returns (newd, lost_fandom, lost_char).
-    known_chars: normalized set of character names in the library (to rescue chars misfiled in #genres)."""
+    known_chars: normalized set of character names in the library (to rescue chars misfiled in #genres).
+    tagcanon: norm -> canonical spelling map for generic normalize-merge of tag variants."""
     F = set(d.get("fandoms", [])); C = set(d.get("characters", [])); G0 = list(d.get("genres", []))
     R = set(d.get("relationships", [])); T = list(d.get("tags", [])); st = d.get("status", [])
     had_F, had_C = bool(F), bool(C)
@@ -127,12 +139,14 @@ def transform(d, m, beh, cols, known_chars=frozenset()):
             if route == "genre": nG.add(canon)
             elif route == "fandom": nF.add(m["fan"].get(canon, canon))
             elif route == "character": nC.add(canon)
+            elif beh.get("tropes_as") == "genre" and norm(canon) not in m["rating"]: nG.add(canon)  # fold tropes into #genres (ratings stay tags)
             else: nT.add(canon)                       # tag fold
             continue
         if not beh.get("keep_categories", True) and norm(t) in {"multi", "gen", "f m", "m m", "f f", "other"}: continue
         tt = ascii_fold(t) if beh["ascii_only_tags"] else t
         if norm(tt) in homes: continue                # redundant: already in a structured column -> strip
         nT.add(tt)
+    if tagcanon: nT = {tagcanon.get(norm(t), t) for t in nT}      # generic normalize-merge to canonical spelling
     newd = {"fandoms": sorted(nF), "characters": sorted(nC), "genres": sorted(nG),
             "relationships": sorted(R), "tags": sorted(nT)}
     if st: newd["status"] = st
@@ -177,10 +191,11 @@ def audit(cfg, m):
     before = {k: set() for k in cols}; after = {k: set() for k in cols}
     lostF = lostC = 0; allb = set(perbook) | {r[0] for r in c.execute("SELECT id FROM books")}
     known_chars = {norm(v) for bb in perbook for v in perbook[bb].get("characters", [])}
+    tagcanon = build_tagcanon((t for bb in perbook for t in perbook[bb].get("tags", [])), m)
     for b in allb:
         d = {k: perbook[b].get(k, []) for k in cols}
         for k in cols: before[k].update(d.get(k, []))
-        nd, lf, lc = transform(d, m, beh, cols, known_chars); lostF += lf; lostC += lc
+        nd, lf, lc = transform(d, m, beh, cols, known_chars, tagcanon); lostF += lf; lostC += lc
         for k in cols:
             if k in nd: after[k].update(nd[k])
     print("=" * 60); print("calibre-wrangler AUDIT (read-only, no changes)"); print("=" * 60)
@@ -229,9 +244,10 @@ def apply_changes(cfg, m, do_write):
         return list(x) if isinstance(x, (tuple, list, set, frozenset)) else ([x] if x else [])
     changes = collections.defaultdict(dict); lostF = lostC = 0
     kc = cols.get("characters"); known_chars = {norm(v) for v in api.all_field_names(kc)} if kc and kc != "tags" else set()
+    tagcanon = build_tagcanon((t for b in api.all_book_ids() for t in fv("tags", b)), m) if cols.get("tags") else None
     for b in api.all_book_ids():
         d = {k: fv(lab, b) for k, lab in cols.items()}
-        nd, lf, lc = transform(d, m, beh, cols, known_chars); lostF += lf; lostC += lc
+        nd, lf, lc = transform(d, m, beh, cols, known_chars, tagcanon); lostF += lf; lostC += lc
         for k, lab in cols.items():
             if k in nd and tuple(sorted(nd[k])) != tuple(sorted(d.get(k, []))):
                 changes[lab][b] = tuple(nd[k])
@@ -258,6 +274,7 @@ def write_config(colmap):
           'time_travel_as   = "genre"',
           "fold_ratings     = false    # Erotica->Smut, Adult->Mature",
           "keep_categories  = true     # keep Multi/Gen/F-M tags (false drops them)",
+          'tropes_as        = "tag"    # fold recognized tropes (SI/OC, Fix-It…) into #genres? "genre" or "tag"',
           "", "[overrides]",
           "# folder of user files (same formats as defaults/) that extend & win over the defaults",
           'dir = "overrides"', ""]

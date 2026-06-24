@@ -19,6 +19,7 @@ reincarnation_as = "genre"
 time_travel_as   = "genre"
 fold_ratings     = false    # Erotica->Smut, Adult->Mature
 keep_categories  = true     # keep Multi/Gen/F-M tags (false drops them)
+tropes_as        = "tag"    # fold recognized tropes (SI/OC, Fix-It…) into #genres? "genre" or "tag"
 
 [overrides]
 # folder of user files (same formats as defaults/) that extend & win over the defaults
