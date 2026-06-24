@@ -80,13 +80,25 @@ class Gemini:
     def __init__(self):
         self.key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
         if not self.key: raise SystemExit("gemini engine needs GEMINI_API_KEY (or GOOGLE_API_KEY).")
-        self.model = MODEL or "gemini-2.0-flash"
+        self.model = MODEL or "gemini-2.5-flash"
     def ask(self, prompt):
         import urllib.request
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.key}"
         body = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode()
         req = urllib.request.Request(url, data=body, headers={"content-type": "application/json"})
         return json.load(urllib.request.urlopen(req))["candidates"][0]["content"]["parts"][0]["text"]
+
+PROP = f"{HERE}/classify_proposal.csv"
+
+if APPLY:                                      # apply the reviewed proposal — no LLM calls
+    from calibre.library import db as DB_
+    api = DB_(LIB).new_api
+    chg = {}
+    for r in csv.DictReader(open(PROP)):
+        b = int(r["book_id"]); tags = [t for t in r["added_tags"].split("; ") if t.strip()]
+        if tags: chg[b] = tuple(sorted(set(api.field_for("tags", b)) | set(tags)))
+    api.set_field("tags", chg)
+    raise SystemExit(f"WROTE: added vocab tags to {len(chg)} books from {os.path.basename(PROP)}.")
 
 # ---- gather sparse books (read-only) ----
 con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True); c = con.cursor()
@@ -99,27 +111,33 @@ titles = {b: t for b, t in c.execute("SELECT id, title FROM books")}
 if LIMIT: targets = targets[:LIMIT]
 print(f"engine={ENGINE}  sparse books to classify (< {MIN_TAGS} tags, has description): {len(targets)}")
 
+import time
 eng = {"apple": Apple, "claude": Claude, "openai": OpenAI, "gemini": Gemini}[ENGINE]()
-proposal = {}
+def ask_retry(prompt, tries=4):
+    for k in range(tries):
+        try: return eng.ask(prompt)
+        except Exception:
+            if k == tries - 1: return ""       # give up on this one book, keep going
+            time.sleep(2 ** k)                 # backoff on rate-limit / transient errors
+proposal, done = {}, set()
+if os.path.exists(PROP) and "--fresh" not in sys.argv:        # resume: skip books already proposed
+    for r in csv.DictReader(open(PROP)):
+        proposal[int(r["book_id"])] = [t for t in r["added_tags"].split("; ") if t.strip()]; done.add(int(r["book_id"]))
+    if done: print(f"  resuming: {len(done)} already proposed (pass --fresh to restart)")
+def dump():
+    with open(PROP, "w", newline="") as f:
+        w = csv.writer(f); w.writerow(["book_id", "title", "added_tags"])
+        for b, tg in proposal.items(): w.writerow([b, titles.get(b, ""), "; ".join(tg)])
+fails = 0
 for i, (b, d) in enumerate(targets):
-    tags = parse_tags(eng.ask(prompt_for(d)))
+    if b in done: continue
+    out = ask_retry(prompt_for(d))
+    if not out: fails += 1
+    tags = parse_tags(out)
     if tags: proposal[b] = tags
-    if (i + 1) % 25 == 0 or i + 1 == len(targets): print(f"  {i+1}/{len(targets)} …")
-with open(f"{HERE}/classify_proposal.csv", "w", newline="") as f:
-    w = csv.writer(f); w.writerow(["book_id", "title", "added_tags"])
-    for b, tags in proposal.items(): w.writerow([b, titles.get(b, ""), "; ".join(tags)])
+    if (i + 1) % 50 == 0 or i + 1 == len(targets): dump(); print(f"  {i+1}/{len(targets)} … {len(proposal)} tagged, {fails} failed")
+dump()
 print(f"proposed tags for {len(proposal)} books -> classify_proposal.csv")
 print("samples:")
 for b, tags in list(proposal.items())[:10]: print(f"   #{b} {titles.get(b,'')[:34]:34} += {', '.join(tags)}")
-
-if APPLY:
-    from calibre.library import db as DB_
-    api = DB_(LIB).new_api
-    chg = {}
-    for b, tags in proposal.items():
-        cur = api.field_for("tags", b)
-        chg[b] = tuple(sorted(set(cur) | set(tags)))
-    api.set_field("tags", chg)
-    print(f"\nWROTE: added vocab tags to {len(chg)} books.")
-else:
-    print("\nDry run — review classify_proposal.csv. To write: calibre-debug -e classify.py -- --apply (Calibre closed).")
+print("\nReview classify_proposal.csv, then: calibre-debug -e classify.py -- --apply  (Calibre closed)")
