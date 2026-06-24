@@ -23,6 +23,8 @@ LIMIT = int(argval("--limit", "0"))
 MIN_TAGS = int(argval("--min-tags", "2"))
 MODEL = argval("--model", "")            # override per-engine default model
 BATCH = int(argval("--batch", "0"))      # process only N new books per run (0 = all); re-run resumes
+WORKERS = int(argval("--workers", "8"))  # concurrent API requests (cloud engines are I/O-bound)
+if ENGINE == "apple": WORKERS = 1        # apple = one subprocess pipe, not thread-safe
 
 VOCAB = [l.strip() for l in open(f"{HERE}/defaults/classify_vocab.txt") if l.strip() and not l.startswith("#")]
 VLOW = {v.lower(): v for v in VOCAB}
@@ -129,16 +131,21 @@ def dump():
     with open(PROP, "w", newline="") as f:
         w = csv.writer(f); w.writerow(["book_id", "title", "added_tags"])
         for b, tg in proposal.items(): w.writerow([b, titles.get(b, ""), "; ".join(tg)])
+from concurrent.futures import ThreadPoolExecutor, as_completed
+todo = [(b, d) for b, d in targets if b not in done]
+if BATCH: todo = todo[:BATCH]
+def work(b, d):
+    out = ask_retry(prompt_for(d)); return b, (out == ""), parse_tags(out)   # main thread owns proposal/dump
 fails = nproc = 0
-for b, d in targets:
-    if b in done: continue
-    out = ask_retry(prompt_for(d))
-    if not out: fails += 1
-    tags = parse_tags(out)
-    if tags: proposal[b] = tags
-    nproc += 1
-    if nproc % 50 == 0: dump(); print(f"  +{nproc} this run, {len(done)+nproc}/{len(targets)} total … {len(proposal)} tagged, {fails} failed")
-    if BATCH and nproc >= BATCH: print(f"  batch limit {BATCH} reached — re-run to continue (resumes automatically)"); break
+print(f"  {len(todo)} to do this run, {WORKERS} concurrent")
+with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+    futs = [ex.submit(work, b, d) for b, d in todo]
+    for fut in as_completed(futs):
+        b, failed, tags = fut.result()
+        if failed: fails += 1
+        if tags: proposal[b] = tags
+        nproc += 1
+        if nproc % 50 == 0: dump(); print(f"  +{nproc}/{len(todo)} this run, {len(done)+nproc}/{len(targets)} total … {len(proposal)} tagged, {fails} failed")
 dump()
 print(f"proposed tags for {len(proposal)} books -> classify_proposal.csv")
 print("samples:")
