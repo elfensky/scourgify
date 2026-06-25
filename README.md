@@ -130,8 +130,10 @@ calibre-debug -e wrangle.py -- apply            # pre-apply; review, then add --
 ---
 
 ## Content-based tagging — `classify.py`
-Reads each **sparse** book's description (`#comments`) and asks an LLM which tags from a **controlled
-vocabulary** (`defaults/classify_vocab.txt`) apply — enriching tags without inventing noise.
+Reads each book's description (`#comments`) and produces **two outputs**: (1) `added_tags` — tags chosen
+from the **controlled vocabulary** (`defaults/classify_vocab.txt`), which get applied; and (2) `proposed_new`
+— short novel tags *not* in the vocab, aggregated by frequency into `classify_newtags_ranked.csv` so you can
+review and **promote** the recurring ones into the vocab. Grows the tag set deliberately, without freeform noise.
 
 ```bash
 python3 classify.py --engine apple --limit 50        # propose -> classify_proposal.csv (dry-run, read-only)
