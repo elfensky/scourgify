@@ -127,7 +127,30 @@ tagn = {b: 0 for (b,) in c.execute("SELECT id FROM books")}
 for (b,) in c.execute("SELECT book FROM books_tags_link"): tagn[b] = tagn.get(b, 0) + 1
 desc = {b: t for b, t in c.execute("SELECT book, text FROM comments")}
 def strip_html(s): return re.sub(r"<[^>]+>", " ", s or "").strip()
-targets = [(b, strip_html(desc[b])) for b in tagn if tagn[b] < MIN_TAGS and desc.get(b) and strip_html(desc[b])]
+TEXTFALLBACK = "--text-fallback" in sys.argv     # when the description is thin, sample the epub prose instead
+epubpath = {}
+if TEXTFALLBACK:
+    bp = {b: p for b, p in c.execute("SELECT id, path FROM books")}
+    for b, name in c.execute("SELECT book, name FROM data WHERE format='EPUB'"):
+        epubpath[b] = os.path.join(LIB, bp[b], name + ".epub")
+def epub_text(path, limit=4000):
+    import zipfile
+    try:
+        z = zipfile.ZipFile(path); out = []
+        for n in z.namelist():
+            if not n.lower().endswith((".xhtml", ".html", ".htm")): continue
+            t = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", z.read(n).decode("utf-8", "ignore"))).strip()
+            if len(t) > 200: out.append(t)                 # skip nav/title pages
+            if sum(len(x) for x in out) > limit: break
+        return " ".join(out)[:limit]
+    except Exception: return ""
+def text_for(b):
+    d = strip_html(desc.get(b, ""))
+    if len(d) >= 80 or not TEXTFALLBACK: return d
+    et = epub_text(epubpath.get(b, ""))
+    return (d + " " + et).strip() if et else d
+targets = [(b, text_for(b)) for b in tagn if tagn[b] < MIN_TAGS]
+targets = [(b, t) for b, t in targets if t and len(t) >= 40]
 titles = {b: t for b, t in c.execute("SELECT id, title FROM books")}
 if LIMIT: targets = targets[:LIMIT]
 print(f"engine={ENGINE}  books to process (< {MIN_TAGS} tags, has description): {len(targets)}")
@@ -148,9 +171,9 @@ def ask_retry(prompt, tries=4):
 proposal, done = {}, set()                     # book -> (vocab_tags, proposed_new_tags)
 if os.path.exists(PROP) and "--fresh" not in sys.argv:        # resume: skip books already in proposal
     for r in csv.DictReader(open(PROP)):
-        proposal[int(r["book_id"])] = ([t for t in r.get("added_tags", "").split("; ") if t.strip()],
-                                        [t for t in r.get("proposed_new", "").split("; ") if t.strip()])
-        done.add(int(r["book_id"]))
+        at = [t for t in r.get("added_tags", "").split("; ") if t.strip()]
+        proposal[int(r["book_id"])] = (at, [t for t in r.get("proposed_new", "").split("; ") if t.strip()])
+        if at or not TEXTFALLBACK: done.add(int(r["book_id"]))   # with --text-fallback, retry books that still have no vocab tag
     if done: print(f"  resuming: {len(done)} already in proposal (pass --fresh to restart)")
 def dump():
     with open(PROP, "w", newline="") as f:
