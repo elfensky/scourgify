@@ -28,6 +28,7 @@ BATCH = int(argval("--batch", "0"))      # process only N new books per run (0 =
 WORKERS = int(argval("--workers", "8"))  # concurrent API requests (cloud engines are I/O-bound)
 if ENGINE == "apple": WORKERS = 1        # apple = one subprocess pipe, not thread-safe
 MAXTAGS = int(argval("--max-tags", "6"))
+TIMEOUT = int(argval("--timeout", "60"))   # per-request HTTP timeout (s) so a hung call can't stall a worker
 
 VOCAB = [l.strip() for l in open(f"{HERE}/defaults/classify_vocab.txt") if l.strip() and not l.startswith("#")]
 VLOW = {v.lower(): v for v in VOCAB}
@@ -73,7 +74,7 @@ class Claude:
                            "messages": [{"role": "user", "content": prompt}]}).encode()
         req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=body,
             headers={"x-api-key": self.key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
-        return json.load(urllib.request.urlopen(req))["content"][0]["text"]
+        return json.load(urllib.request.urlopen(req, timeout=TIMEOUT))["content"][0]["text"]
 class OpenAI:
     def __init__(self):
         self.key = os.environ.get("OPENAI_API_KEY")
@@ -85,8 +86,12 @@ class OpenAI:
                            "messages": [{"role": "user", "content": prompt}]}).encode()
         req = urllib.request.Request("https://api.openai.com/v1/chat/completions", data=body,
             headers={"Authorization": f"Bearer {self.key}", "content-type": "application/json"})
-        return json.load(urllib.request.urlopen(req))["choices"][0]["message"]["content"]
+        return json.load(urllib.request.urlopen(req, timeout=TIMEOUT))["choices"][0]["message"]["content"]
 class Gemini:
+    # personal fanfic library: don't let safety filters drop mature/dark stories (the tag list itself lists such terms)
+    SAFE = [{"category": c, "threshold": "BLOCK_NONE"} for c in
+            ("HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
+             "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT")]
     def __init__(self):
         self.key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
         if not self.key: raise SystemExit("gemini engine needs GEMINI_API_KEY (or GOOGLE_API_KEY).")
@@ -94,9 +99,14 @@ class Gemini:
     def ask(self, prompt):
         import urllib.request
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.key}"
-        body = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode()
+        body = json.dumps({"contents": [{"parts": [{"text": prompt}]}], "safetySettings": self.SAFE}).encode()
         req = urllib.request.Request(url, data=body, headers={"content-type": "application/json"})
-        return json.load(urllib.request.urlopen(req))["candidates"][0]["content"]["parts"][0]["text"]
+        r = json.load(urllib.request.urlopen(req, timeout=TIMEOUT))
+        cands = r.get("candidates")
+        if not cands: raise RuntimeError("blocked:" + str(r.get("promptFeedback", {}).get("blockReason")))
+        parts = cands[0].get("content", {}).get("parts")
+        if not parts: raise RuntimeError("nocontent:" + str(cands[0].get("finishReason")))
+        return parts[0]["text"]
 
 PROP = f"{HERE}/classify_proposal.csv"
 RANK = f"{HERE}/classify_newtags_ranked.csv"
@@ -125,11 +135,15 @@ print(f"engine={ENGINE}  books to process (< {MIN_TAGS} tags, has description): 
 import time
 eng = {"apple": Apple, "claude": Claude, "openai": OpenAI, "gemini": Gemini}[ENGINE]()
 def ask_retry(prompt, tries=4):
+    err = ""
     for k in range(tries):
-        try: return eng.ask(prompt)
-        except Exception:
-            if k == tries - 1: return ""       # give up on this one book, keep going
-            time.sleep(2 ** k)                 # backoff on rate-limit / transient errors
+        try: return eng.ask(prompt), ""
+        except RuntimeError as e:              # deterministic content block (no candidates) — retrying is futile
+            return "", str(e)[:140]
+        except Exception as e:                 # transient (HTTP 429/503, network) — back off and retry
+            err = f"{type(e).__name__}: {e}"[:140]
+            if k == tries - 1: return "", err
+            time.sleep(2 ** k)
 
 proposal, done = {}, set()                     # book -> (vocab_tags, proposed_new_tags)
 if os.path.exists(PROP) and "--fresh" not in sys.argv:        # resume: skip books already in proposal
@@ -147,18 +161,25 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 todo = [(b, d) for b, d in targets if b not in done]
 if BATCH: todo = todo[:BATCH]
 def work(b, d):
-    out = ask_retry(prompt_for(d)); vt, nt = parse_resp(out); return b, (out == ""), vt, nt
-fails = nproc = 0
+    out, err = ask_retry(prompt_for(d)); vt, nt = parse_resp(out); return b, err, vt, nt
+fails = nproc = 0; failures = []
 print(f"  {len(todo)} to do this run, {WORKERS} concurrent")
 with ThreadPoolExecutor(max_workers=WORKERS) as ex:
     futs = [ex.submit(work, b, d) for b, d in todo]
     for fut in as_completed(futs):
-        b, failed, vt, nt = fut.result()
-        if failed: fails += 1
+        b, err, vt, nt = fut.result()
+        if err: fails += 1; failures.append((b, err))
         if vt or nt: proposal[b] = (vt, nt)
         nproc += 1
         if nproc % 50 == 0: dump(); print(f"  +{nproc}/{len(todo)} this run, {len(done)+nproc}/{len(targets)} total … {sum(1 for v in proposal.values() if v[0])} tagged, {fails} failed")
 dump()
+if failures:
+    with open(f"{HERE}/classify_failures.csv", "w", newline="") as f:
+        w = csv.writer(f); w.writerow(["book_id", "title", "reason"])
+        for b, e in failures: w.writerow([b, titles.get(b, ""), e])
+    bytype = collections.Counter(e.split(":")[0].split(" ")[0] for _, e in failures)
+    print(f"failures: {len(failures)} -> classify_failures.csv  by type: {dict(bytype)}")
+    print("  (recover blocked books with a no-policy engine: python3 classify.py --engine apple)")
 
 ranked = collections.Counter()
 for vt, nt in proposal.values():
