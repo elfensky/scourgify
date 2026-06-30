@@ -226,31 +226,53 @@ def fff_columns_from_prefs(get_pref):
 def col_key_label(cfg):
     return {k: v for k, v in cfg["columns"].items() if v}     # col_key -> calibre label
 
-def audit(cfg, m):
-    beh = cfg["behavior"]; cols = col_key_label(cfg)
+def read_library(cfg):
+    """Read all configured columns per book via read-only sqlite. -> (cols, perbook, present, nb, allb)."""
+    cols = col_key_label(cfg)
     con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True); c = con.cursor()
-    def cid(label):
-        r = c.execute("SELECT id,is_multiple FROM custom_columns WHERE label=?", (label.lstrip("#"),)).fetchone()
-        return r
-    # per-book values per configured column
-    perbook = collections.defaultdict(lambda: collections.defaultdict(list))
-    present = {}
+    perbook = collections.defaultdict(lambda: collections.defaultdict(list)); present = {}
     for key, label in cols.items():
         if label == "tags":
             present[key] = True
             for b, v in c.execute("SELECT l.book,t.name FROM books_tags_link l JOIN tags t ON t.id=l.tag"): perbook[b][key].append(v)
             continue
-        r = cid(label)
+        r = c.execute("SELECT id,is_multiple FROM custom_columns WHERE label=?", (label.lstrip("#"),)).fetchone()
         if not r: present[key] = False; continue
-        present[key] = True; i, mult = r
+        present[key] = True; i = r[0]
         has_link = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (f"books_custom_column_{i}_link",)).fetchone()
-        if has_link:
-            for b, v in c.execute(f"SELECT x.book,v.value FROM books_custom_column_{i}_link x JOIN custom_column_{i} v ON v.id=x.value"): perbook[b][key].append(v)
-        else:
-            for b, v in c.execute(f"SELECT book,value FROM custom_column_{i}"): perbook[b][key].append(v)
+        q = (f"SELECT x.book,v.value FROM books_custom_column_{i}_link x JOIN custom_column_{i} v ON v.id=x.value" if has_link
+             else f"SELECT book,value FROM custom_column_{i}")
+        for b, v in c.execute(q): perbook[b][key].append(v)
     nb = c.execute("SELECT count(*) FROM books").fetchone()[0]
+    allb = set(perbook) | {r[0] for r in c.execute("SELECT id FROM books")}
+    return cols, perbook, present, nb, allb
+
+def _calibre_open():
+    import subprocess, shutil
+    if not shutil.which("pgrep"): return False
+    out = subprocess.run(["pgrep", "-fl", "calibre"], capture_output=True, text=True).stdout
+    return any("calibre" in l.lower() and not any(x in l for x in ("calibre-debug", "pgrep", "wrangle", "_writer", "classify"))
+               for l in out.splitlines())
+
+def run_writer(ops):
+    """Apply a list of write-ops through Calibre by shelling out to `calibre-debug -e _writer.py`."""
+    import json, tempfile, subprocess, shutil
+    ops = [o for o in ops if o.get("op") != "set_field" or o.get("values")]
+    if not ops: print("  (nothing to write)"); return
+    if _calibre_open(): raise SystemExit("Calibre is running — close it first (it locks metadata.db), then re-run.")
+    cb = shutil.which("calibre-debug") or "/Applications/calibre.app/Contents/MacOS/calibre-debug"
+    if not (shutil.which("calibre-debug") or os.path.exists(cb)): raise SystemExit("calibre-debug not found (install Calibre's CLI tools).")
+    f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False); json.dump(ops, f); f.close()
+    print("  → writing via calibre-debug …")
+    rc = subprocess.run([cb, "-e", os.path.join(HERE, "_writer.py"), "--", f.name], env={**os.environ, "CALIBRE_LIBRARY": LIB}).returncode
+    os.unlink(f.name)
+    if rc != 0: raise SystemExit(f"writer failed (exit {rc})")
+
+def audit(cfg, m):
+    beh = cfg["behavior"]
+    cols, perbook, present, nb, allb = read_library(cfg)
     before = {k: set() for k in cols}; after = {k: set() for k in cols}
-    lostF = lostC = 0; allb = set(perbook) | {r[0] for r in c.execute("SELECT id FROM books")}
+    lostF = lostC = 0
     known_chars = {norm(v) for bb in perbook for v in perbook[bb].get("characters", [])}
     tagcanon = build_tagcanon((t for bb in perbook for t in perbook[bb].get("tags", [])), m)
     for b in allb:
@@ -314,34 +336,27 @@ def audit(cfg, m):
         if drops: print(f"tags drop ({len(drops)}):{ex(drops)}")
         if folds: print(f"tags fold/route ({len(folds)}):{ex(folds)}")
 
-# ---------------- APPLY / SETUP (Calibre API) ----------------
-def with_api():
-    from calibre.library import db as DB_
-    return DB_(LIB).new_api
-
+# ---------------- APPLY (standalone: compute via sqlite, write via calibre-debug helper) ----------------
 def apply_changes(cfg, m, do_write):
-    beh = cfg["behavior"]; cols = col_key_label(cfg); api = with_api()
-    def fv(label, b):
-        x = api.field_for("tags" if label == "tags" else label, b)
-        return list(x) if isinstance(x, (tuple, list, set, frozenset)) else ([x] if x else [])
+    beh = cfg["behavior"]
+    cols, perbook, present, nb, allb = read_library(cfg)
+    known_chars = {norm(v) for bb in perbook for v in perbook[bb].get("characters", [])}
+    tagcanon = build_tagcanon((t for bb in perbook for t in perbook[bb].get("tags", [])), m)
     changes = collections.defaultdict(dict); lostF = lostC = 0
-    kc = cols.get("characters"); known_chars = {norm(v) for v in api.all_field_names(kc)} if kc and kc != "tags" else set()
-    tagcanon = build_tagcanon((t for b in api.all_book_ids() for t in fv("tags", b)), m) if cols.get("tags") else None
-    for b in api.all_book_ids():
-        d = {k: fv(lab, b) for k, lab in cols.items()}
+    for b in allb:
+        d = {k: perbook[b].get(k, []) for k in cols}
         nd, lf, lc = transform(d, m, beh, cols, known_chars, tagcanon); lostF += lf; lostC += lc
         for k, lab in cols.items():
             if k in nd and tuple(sorted(nd[k])) != tuple(sorted(d.get(k, []))):
-                changes[lab][b] = tuple(nd[k])
+                changes[lab][b] = sorted(nd[k])
     print("APPLY" if do_write else "PRE-APPLY (no write)")
     for lab, ch in changes.items(): print(f"  {lab:14} books changed: {len(ch)}")
     print(f"  SAFETY losing last fandom: {lostF} | character: {lostC}")
-    assert lostF == 0 and lostC == 0, "ABORT: data loss detected"
+    if lostF or lostC: raise SystemExit("ABORT: data loss detected")
     if do_write:
-        for lab, ch in changes.items(): api.set_field(lab, ch)
-        print("WROTE.")
+        run_writer([{"op": "set_field", "field": lab, "values": {str(b): v for b, v in ch.items()}} for lab, ch in changes.items()])
     else:
-        print("Re-run with -- --apply to write (Calibre must be closed).")
+        print("Re-run: python3 wrangle.py apply --apply   (Calibre closed; writes shell out to calibre-debug)")
 
 def write_config(colmap, beh=None):
     b = beh or {}                                     # preserve existing toggles on re-run; defaults on first run
@@ -386,24 +401,26 @@ def _ask(prompt, default=True):
     return default
 
 def setup(cfg):
-    try: from calibre.library import db as _DB
-    except ImportError: raise SystemExit("Run setup via Calibre's Python:  calibre-debug -e wrangle.py -- setup   (Calibre must be closed)")
-    legacy = _DB(LIB); api = legacy.new_api          # legacy object can create_custom_column
+    import subprocess, shutil, json as _json
     print("=" * 64); print("  calibre-wrangler — setup & health check"); print("=" * 64)
     if not _interactive(): print("(non-interactive — taking recommended defaults; run in a terminal to choose per item)")
+    ops = []                                          # column/pref writes queued here, applied via calibre-debug at the end
+    con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
 
     # [1] library
     print("\n[1] Library");  print(f"  {OK} metadata.db  ({LIB})")
 
     # [2] FanFicFare: installed? configured? known gotchas?
     print("\n[2] FanFicFare")
-    try: installed = bool(__import__("calibre.customize.ui", fromlist=["find_plugin"]).find_plugin("FanFicFare"))
+    try:
+        out = subprocess.run(["calibre-customize", "-l"], capture_output=True, text=True, timeout=30).stdout if shutil.which("calibre-customize") else ""
+        installed = ("fanficfare" in out.lower()) if out else None
     except Exception: installed = None
     print(f"  {OK} plugin installed" if installed else
           f"  {BAD} plugin NOT installed (Calibre → Preferences → Plugins → Get new plugins → FanFicFare)" if installed is False else
           f"  {WARN} couldn't query plugins (continuing)")
-    try: settings = api.pref("namespaced:FanFicFarePlugin:settings") or {}
-    except Exception: settings = {}
+    row = con.execute("SELECT val FROM preferences WHERE key='namespaced:FanFicFarePlugin:settings'").fetchone()
+    settings = _json.loads(row[0]) if row else {}
     fff = settings.get("custom_cols") or {}
     if not settings:
         print(f"  {WARN} no FanFicFare config for this library yet — configure FFF + import a story, then re-run setup")
@@ -422,24 +439,21 @@ def setup(cfg):
             s["personal.ini"] = "\n".join(l for l in s.get("personal.ini", "").splitlines() if l.strip().lower() != "include_in_series:category")
             if fff.get("#fandoms") == "series": s.setdefault("custom_cols", {})["#fandoms"] = "category"
             s.setdefault("custom_cols_newonly", {})["#genres"] = True
-            api.set_pref("namespaced:FanFicFarePlugin:settings", s); print(f"  {OK} FanFicFare config updated")
+            ops.append({"op": "set_pref", "key": "namespaced:FanFicFarePlugin:settings", "value": s}); print(f"  {OK} queued FanFicFare config fix")
 
     # [3] columns: the engine's 5 + the datetime markers staleness/classify need
     print("\n[3] Columns")
-    have = set(api.field_metadata.all_field_keys())
+    have = {"#" + l for (l,) in con.execute("SELECT label FROM custom_columns")} | {"tags"}
     REC = [("#fandoms", "Fandoms", "text", True), ("#characters", "Characters", "text", True),
            ("#relationships", "Relationships", "text", True), ("#genres", "Genres", "text", True),
            ("#status", "Status", "text", False), ("#updated", "Updated", "datetime", False),
            ("#wrangled", "Wrangled", "datetime", False)]
-    created = False
     for label, name, dt, mult in REC:
         if label in have: print(f"  {OK} {label}"); continue
         why = "  (staleness + classify --incremental need this)" if label in ("#updated", "#wrangled") else ""
         if _ask(f"  {BAD} {label} missing — create '{name}' ({dt}{', multiple' if mult else ''}){why}?"):
-            legacy.create_custom_column(label.lstrip("#"), name, dt, mult); created = True
+            ops.append({"op": "create_column", "label": label.lstrip("#"), "name": name, "datatype": dt, "is_multiple": mult}); have.add(label); print(f"      queued {label}")
         else: print(f"      skipped {label}")
-    if created:
-        legacy = _DB(LIB); api = legacy.new_api; have = set(api.field_metadata.all_field_keys())  # reopen to see new columns
 
     # [4] config.toml column map (FFF field -> our key, else adopt existing labels)
     print("\n[4] config.toml")
@@ -459,15 +473,19 @@ def setup(cfg):
     odir = os.path.join(HERE, cfg["overrides"].get("dir", "overrides"))
     print("\n[5] Overrides");  print(f"  {OK} {odir}" if os.path.isdir(odir) else f"  {WARN} no overrides/ dir (optional — add your own maps here; they win over defaults/)")
 
+    if ops:
+        print(f"\n[6] Applying {len(ops)} change(s) to Calibre (via calibre-debug)")
+        run_writer(ops)
     print("\n" + "-" * 64)
     print("Setup complete. Next:")
-    print("  python3 wrangle.py audit                      # read-only dry-run of all passes")
-    print("  calibre-debug -e wrangle.py -- apply --apply  # write (Calibre closed; back up metadata.db first)")
-    print("  python3 classify.py --incremental             # content-tag new/updated books (cheap)")
+    print("  python3 wrangle.py audit          # read-only dry-run of all passes")
+    print("  python3 wrangle.py apply --apply  # write changes (Calibre closed; backs up first)")
+    print("  python3 classify.py --incremental # content-tag new/updated books (cheap)")
 
 # ---------------- main ----------------
-cfg = load_config(); maps = load_maps(cfg)
-if CMD == "audit": audit(cfg, maps)
-elif CMD == "apply": apply_changes(cfg, maps, "--apply" in sys.argv)
-elif CMD == "setup": setup(cfg)
-else: print("commands:\n  setup  — interactive health check + configure (FanFicFare, columns, config.toml) [calibre-debug]\n  audit  — read-only dry-run of every pass (plain python3)\n  apply  — write changes; add --apply [calibre-debug, Calibre closed]")
+if __name__ == "__main__":
+    cfg = load_config(); maps = load_maps(cfg)
+    if CMD == "audit": audit(cfg, maps)
+    elif CMD == "apply": apply_changes(cfg, maps, "--apply" in sys.argv)
+    elif CMD == "setup": setup(cfg)
+    else: print("commands (run under plain python3; writes auto-shell to calibre-debug):\n  setup  — interactive health check + configure (FanFicFare, columns, config.toml)\n  audit  — read-only dry-run of every pass\n  apply  — write changes; add --apply (Calibre closed)")

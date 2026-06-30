@@ -5,7 +5,7 @@
                      classify_newtags_ranked.csv for review, so the vocabulary grows cleanly (promote -> vocab).
 
   python3 classify.py [--engine apple|claude|openai|gemini] [--incremental] [--workers N] [--batch N] [--fresh]
-  calibre-debug -e classify.py -- --apply        # apply 'added_tags' + stamp #wrangled (Calibre CLOSED)
+  python3 classify.py --apply                    # apply 'added_tags' + stamp #wrangled (Calibre CLOSED; writes shell to calibre-debug)
 
 Engines (--engine):  apple = on-device Apple Foundation Models via ./afm (free; macOS 26+).
           claude = Anthropic (ANTHROPIC_API_KEY) | openai = OpenAI (OPENAI_API_KEY) | gemini = Google (GEMINI_API_KEY).
@@ -123,22 +123,24 @@ class Gemini:
 PROP = f"{HERE}/classify_proposal.csv"
 RANK = f"{HERE}/classify_newtags_ranked.csv"
 
-if APPLY:                                      # apply 'added_tags' + stamp the per-book #wrangled marker — no LLM calls
-    from calibre.library import db as DB_
-    from calibre.utils.date import now as cal_now
-    legacy = DB_(LIB); api = legacy.new_api
-    if "#wrangled" not in api.field_metadata.all_field_keys():        # auto-create the marker once
-        legacy.create_custom_column("wrangled", "Wrangled", "datetime", False)
-        legacy = DB_(LIB); api = legacy.new_api                       # reopen so the new column is visible
-        api.set_field("#wrangled", {b: cal_now() for b in api.all_book_ids()})  # bootstrap: existing library = wrangled as of now
-        print("created #wrangled column + backfilled existing books")
+if APPLY:                                      # apply 'added_tags' + stamp #wrangled — standalone, no LLM calls
+    from wrangle import run_writer                                    # writes shell out to calibre-debug
+    rcon = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    cur = collections.defaultdict(list)
+    for b, t in rcon.execute("SELECT l.book, t.name FROM books_tags_link l JOIN tags t ON t.id=l.tag"): cur[b].append(t)
+    have_wrangled = bool(rcon.execute("SELECT 1 FROM custom_columns WHERE label='wrangled'").fetchone())
     chg = {}
     for r in csv.DictReader(open(PROP)):
         b = int(r["book_id"]); tags = [t for t in r.get("added_tags", "").split("; ") if t.strip()]
-        if tags: chg[b] = tuple(sorted(set(api.field_for("tags", b)) | set(tags)))
-    api.set_field("tags", chg)
-    ts = cal_now(); api.set_field("#wrangled", {b: ts for b in chg})   # stamp the books just tagged
-    raise SystemExit(f"WROTE: tags to {len(chg)} books + stamped #wrangled ({os.path.basename(PROP)}).")
+        if tags: chg[str(b)] = sorted(set(cur.get(b, [])) | set(tags))   # union with current tags
+    ops = []
+    if not have_wrangled:                                             # first run: create + backfill whole library as wrangled-now
+        ops.append({"op": "create_column", "label": "wrangled", "name": "Wrangled", "datatype": "datetime", "is_multiple": False})
+        ops.append({"op": "stamp_now", "field": "#wrangled", "books": None})
+    ops.append({"op": "set_field", "field": "tags", "values": chg})
+    ops.append({"op": "stamp_now", "field": "#wrangled", "books": [int(b) for b in chg]})
+    run_writer(ops)
+    raise SystemExit(f"applied tags to {len(chg)} books + stamped #wrangled ({os.path.basename(PROP)}).")
 
 # ---- gather books (read-only) ----
 con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True); c = con.cursor()
@@ -277,4 +279,4 @@ if RICH and ranked:
 else:
     print("top new-tag candidates:")
     for t, cnt in ranked.most_common(25): print(f"  {cnt:4}  {t}")
-print("\nApply vocab tags with: calibre-debug -e classify.py -- --apply   (Calibre closed)")
+print("\nApply vocab tags with: python3 classify.py --apply   (Calibre closed)")
