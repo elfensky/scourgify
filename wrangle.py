@@ -94,6 +94,10 @@ def load_maps(cfg):
     m["trope"] = resolve_trope_chains({v: (cn, rt) for v, cn, rt in
         (read_tropes(os.path.join(DEF, "tropes.csv")) + read_tropes(os.path.join(odir, "tropes.csv")))})
     m["fan_block"] = {norm(x) for x in read_lines(os.path.join(DEF, "fandom_blocklist.txt")) + read_lines(os.path.join(odir, "fandom_blocklist.txt")) if x and not x.startswith("#")}  # values that are never fandoms
+    m["decompose"] = {}                          # one contextual value -> parts in several columns (e.g. "Fate SI" -> Type-Moon + SI/OC)
+    for r in both("decompose.csv"):
+        m["decompose"][norm(r["value"])] = {k: [x.strip() for x in (r.get(k) or "").split(";") if x.strip()]
+                                             for k in ("fandoms", "characters", "tags", "genres")}
     m["gsplit"] = {r["combined"]: r["atoms"].split("|") for r in both("genres_split.csv")}
     m["gcanon"] = {r["variant"]: r["canonical"] for r in both("genres_canon.csv")}
     m["gallow"] = {norm(x) for x in read_lines(os.path.join(DEF, "genres_allow.txt")) + read_lines(os.path.join(odir, "genres_allow.txt")) if x and not x.startswith("#")}
@@ -139,6 +143,17 @@ def transform(d, m, beh, cols, known_chars=frozenset(), tagcanon=None):
     F = set(d.get("fandoms", [])); C = set(d.get("characters", [])); G0 = list(d.get("genres", []))
     R = set(d.get("relationships", [])); T = list(d.get("tags", [])); st = d.get("status", [])
     had_F, had_C = bool(F), bool(C)
+    # decompose contextual compounds (e.g. "Fate SI" -> fandom Type-Moon + tag SI/OC) before normal routing
+    seedF, seedC, seedG, seedT = set(), set(), set(), set()
+    if m.get("decompose"):
+        def _dec(vals):
+            keep = []
+            for v in vals:
+                p = m["decompose"].get(norm(v))
+                if p: seedF.update(p["fandoms"]); seedC.update(p["characters"]); seedG.update(p["genres"]); seedT.update(p["tags"])
+                else: keep.append(v)
+            return keep
+        F = set(_dec(F)); G0 = _dec(G0); T = _dec(T)
     # fandoms: alias -> canonical (drop if mapped to empty)
     nF = set()
     for f in F:
@@ -147,12 +162,14 @@ def transform(d, m, beh, cols, known_chars=frozenset(), tagcanon=None):
         if norm(tgt) in m["fan_block"]:                       # a curated non-fandom (kink/rating/status/meta) -> tag pipeline routes it
             T.append(tgt); continue
         nF.add(tgt)
+    nF |= {m["fan"].get(f, f) for f in seedF}                  # decomposed fandoms
     # characters: fold abbrev/case -> full (global, then fandom-scoped)
     nC = set()
     for ch in C:
         if beh["fold_characters"]:
             ch = m["char"].get(ch) or next((m["char_fd"][(ch, fd)] for fd in nF if (ch, fd) in m["char_fd"]), ch)
         nC.add(ch)
+    nC |= seedC                                                # decomposed characters
     # genres: split -> canon -> allowlist(keep) else move to tags
     nG = set(); extra_tags = set()
     for g in G0:
@@ -163,8 +180,9 @@ def transform(d, m, beh, cols, known_chars=frozenset(), tagcanon=None):
             elif na in m["fanvals"]: nF.add(a)                  # misfiled fandom
             elif na in known_chars: nC.add(a)                   # misfiled character (e.g. Akeno Himejima in #genres)
             else: extra_tags.add(a)                             # freeform -> tag
+    nG |= seedG                                                 # decomposed genres
     # tags: junk drop / trope route / surface-fold / ascii / redundancy-strip
-    nT = set(extra_tags)
+    nT = set(extra_tags) | seedT                                # decomposed tags
     homes = {norm(x) for x in nF | nC | nG | R | (set(st) if isinstance(st, list) else {st} if st else set())}
     for t in T:
         if is_junk(t, m): continue
@@ -254,15 +272,25 @@ def audit(cfg, m):
         ff = [f"{v}→{m['fan'][v] or 'DROP'}" for v in sorted(before["fandoms"]) if v in m["fan"] and m["fan"][v] != v]
         if ff: print(f"fandoms canon ({len(ff)}):{ex(ff)}")
     if "genres" in before:
-        gm = [f"{v}→{'|'.join(m['gsplit'][v]) if v in m['gsplit'] else m['gcanon'].get(v, v)}" for v in sorted(before["genres"]) if v in m["gsplit"] or v in m["gcanon"]]
+        dkey = lambda v: norm(v) in m["decompose"]
+        gm = [f"{v}→{'|'.join(m['gsplit'][v]) if v in m['gsplit'] else m['gcanon'].get(v, v)}" for v in sorted(before["genres"]) if (v in m["gsplit"] or v in m["gcanon"]) and not dkey(v)]
         def _kept(v):
             na = norm(m["gcanon"].get(v, v))
             return na in m["gallow"] or any(na.startswith(x + " ") for x in m["gallow"] if len(x) >= 4)
-        gch = [v for v in sorted(before["genres"]) if v not in m["gsplit"] and not _kept(v) and norm(v) not in m["fanvals"] and norm(v) in known_chars]
-        gmv = [v for v in sorted(before["genres"]) if v not in m["gsplit"] and not _kept(v) and norm(v) not in m["fanvals"] and norm(v) not in known_chars]
+        gch = [v for v in sorted(before["genres"]) if v not in m["gsplit"] and not _kept(v) and norm(v) not in m["fanvals"] and norm(v) in known_chars and not dkey(v)]
+        gmv = [v for v in sorted(before["genres"]) if v not in m["gsplit"] and not _kept(v) and norm(v) not in m["fanvals"] and norm(v) not in known_chars and not dkey(v)]
         if gm: print(f"genres split/canon ({len(gm)}):{ex(gm)}")
         if gch: print(f"genres → characters ({len(gch)}):{ex(gch)}")
         if gmv: print(f"genres → tags (not in allowlist) ({len(gmv)}):{ex(gmv)}")
+    if m.get("decompose"):
+        de = []
+        for k in ("fandoms", "genres", "tags"):
+            for v in sorted(before.get(k, set())):
+                p = m["decompose"].get(norm(v))
+                if not p: continue
+                bits = [c + "=" + "/".join(p[c]) for c in ("fandoms", "characters", "tags", "genres") if p[c]]
+                de.append(v + " → " + ", ".join(bits))
+        if de: print(f"decompose ({len(de)}):{ex(de)}")
     if "tags" in before:
         drops = [v for v in sorted(before["tags"]) if is_junk(v, m)]
         folds = [f"{v}→{m['trope'][v][0]}" for v in sorted(before["tags"]) if v in m["trope"] and m["trope"][v][0] != v]
