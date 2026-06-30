@@ -22,6 +22,10 @@ installed and configured**, flagging + offering to fix the known gotchas (fandom
 incremental classification), creating any that are missing; and writes `config.toml` (preserving your
 behavior toggles). Safe to re-run anytime.
 
+*Optional:* `pip install rich` for progress bars (long `classify.py` runs) and tables (`audit` before/after,
+candidate lists). Without it everything still works in plain text — rich is never a hard dependency, and Calibre's
+bundled Python (which runs `setup`/`apply`) doesn't have it, so those stay plain.
+
 The engine reads:
 - **`defaults/`** — bundled, generic fanfic knowledge (FFN `Harry P.`→`Harry Potter`, JP→English
   fandom titles, `no beta we die like…` = junk, …). Ships with the tool; not specific to anyone.

@@ -7,6 +7,12 @@ Set CALIBRE_LIBRARY to your library folder first, then:
   calibre-debug -e wrangle.py -- apply        # write changes  (Calibre must be CLOSED)
 """
 import os, sys, re, csv, sqlite3, collections
+try:                                   # rich is optional (present in system python3 for `audit`; absent under calibre-debug)
+    from rich.console import Console
+    from rich.table import Table
+    _con = Console(); RICH = True
+except ImportError:
+    RICH = False
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEF = os.path.join(HERE, "defaults")
@@ -257,11 +263,22 @@ def audit(cfg, m):
     print(f"books: {nb}   columns active: {', '.join(f'{k}->{v}' for k, v in cols.items() if present.get(k))}")
     miss = [k for k in cols if not present.get(k)]
     if miss: print(f"MISSING columns (run `setup`): {miss}")
-    print(f"\n{'column':14}{'before':>9}{'after':>9}{'delta':>8}")
-    for k in cols:
-        if present.get(k): print(f"{k:14}{len(before[k]):>9}{len(after[k]):>9}{len(after[k])-len(before[k]):>8}")
-    print(f"\nSAFETY  books losing last fandom: {lostF}   losing last character: {lostC}")
-    print("OK — no data loss." if lostF == lostC == 0 else "WARNING: review the losses above before apply.")
+    rows = [(k, len(before[k]), len(after[k]), len(after[k]) - len(before[k])) for k in cols if present.get(k)]
+    if RICH:
+        t = Table(title="proposed changes (distinct values per column)")
+        t.add_column("column"); t.add_column("before", justify="right"); t.add_column("after", justify="right"); t.add_column("delta", justify="right")
+        for k, b, a, d in rows:
+            t.add_row(k, str(b), str(a), f"[red]{d}[/red]" if d < 0 else f"[green]+{d}[/green]" if d > 0 else "0")
+        _con.print(t)
+    else:
+        print(f"\n{'column':14}{'before':>9}{'after':>9}{'delta':>8}")
+        for k, b, a, d in rows: print(f"{k:14}{b:>9}{a:>9}{d:>8}")
+    safe_ok = lostF == lostC == 0
+    if RICH:
+        _con.print(f"\n[bold]SAFETY[/bold]  losing last fandom: {lostF}   losing last character: {lostC}   " + ("[green]✓ no data loss[/green]" if safe_ok else "[red]⚠ review losses[/red]"))
+    else:
+        print(f"\nSAFETY  books losing last fandom: {lostF}   losing last character: {lostC}")
+        print("OK — no data loss." if safe_ok else "WARNING: review the losses above before apply.")
     # concrete examples — which rules actually fire on THIS library's values
     def ex(items, n=10): return "  " + (", ".join(items[:n]) + (f"  …(+{len(items)-n} more)" if len(items) > n else "")) if items else ""
     print("\n--- examples of what would change (sampled from your values) ---")
@@ -348,18 +365,32 @@ def write_config(colmap, beh=None):
           'dir = "overrides"', ""]
     open(os.path.join(HERE, "config.toml"), "w").write("\n".join(L))
 
-OK, WARN, BAD = "✓", "⚠", "✗"     # ✓ ⚠ ✗
-def _yn(prompt, yes, default=True):
-    if yes: return True
-    a = input(f"{prompt} [{'Y/n' if default else 'y/N'}] ").strip().lower()
-    return a in ("", "y", "yes") if default else a in ("y", "yes")
+OK, WARN, BAD = "✓", "⚠", "✗"     # status glyphs (plain; no color dependency)
+def _interactive():
+    # interactive iff stdin AND stderr are TTYs and nothing forces otherwise (pattern from lintle's term.py):
+    # prevents an invisible-prompt hang when output is piped/redirected or under CI / --yes.
+    if os.environ.get("CI") or os.environ.get("NONINTERACTIVE") or "--yes" in sys.argv or "-y" in sys.argv:
+        return False
+    try: return sys.stdin.isatty() and sys.stderr.isatty()
+    except Exception: return False
+def _ask(prompt, default=True):
+    """y/n prompt; off a TTY (pipe / CI / --yes) take the default instead of blocking. 3 retries; EOF -> default."""
+    if not _interactive(): return default
+    for _ in range(3):
+        try: a = input(f"{prompt} [{'Y/n' if default else 'y/N'}] ").strip().lower()
+        except EOFError: return default
+        if a == "": return default
+        if a in ("y", "yes"): return True
+        if a in ("n", "no"): return False
+        print("  please answer y or n.")
+    return default
 
 def setup(cfg):
     try: from calibre.library import db as _DB
     except ImportError: raise SystemExit("Run setup via Calibre's Python:  calibre-debug -e wrangle.py -- setup   (Calibre must be closed)")
     legacy = _DB(LIB); api = legacy.new_api          # legacy object can create_custom_column
-    yes = ("--yes" in sys.argv) or ("-y" in sys.argv)
     print("=" * 64); print("  calibre-wrangler — setup & health check"); print("=" * 64)
+    if not _interactive(): print("(non-interactive — taking recommended defaults; run in a terminal to choose per item)")
 
     # [1] library
     print("\n[1] Library");  print(f"  {OK} metadata.db  ({LIB})")
@@ -386,7 +417,7 @@ def setup(cfg):
         if no.get("#genres") is not True: issues.append("#genres not newonly-protected  (a metadata re-fetch would re-pollute your cleaned genres)")
         for i in issues: print(f"  {WARN} {i}")
         if not issues: print(f"  {OK} config looks correct (no known gotchas)")
-        elif _yn("  → Fix these now (map #fandoms←category, drop include_in_series, protect #genres)?", yes):
+        elif _ask("  → Fix these now (map #fandoms←category, drop include_in_series, protect #genres)?"):
             import copy; s = copy.deepcopy(settings)
             s["personal.ini"] = "\n".join(l for l in s.get("personal.ini", "").splitlines() if l.strip().lower() != "include_in_series:category")
             if fff.get("#fandoms") == "series": s.setdefault("custom_cols", {})["#fandoms"] = "category"
@@ -404,7 +435,7 @@ def setup(cfg):
     for label, name, dt, mult in REC:
         if label in have: print(f"  {OK} {label}"); continue
         why = "  (staleness + classify --incremental need this)" if label in ("#updated", "#wrangled") else ""
-        if _yn(f"  {BAD} {label} missing — create '{name}' ({dt}{', multiple' if mult else ''}){why}?", yes):
+        if _ask(f"  {BAD} {label} missing — create '{name}' ({dt}{', multiple' if mult else ''}){why}?"):
             legacy.create_custom_column(label.lstrip("#"), name, dt, mult); created = True
         else: print(f"      skipped {label}")
     if created:

@@ -5,7 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 calibre-wrangler normalizes a [FanFicFare](https://github.com/JimmXinu/FanFicFare)-imported
 [Calibre](https://calibre-ebook.com) library — consolidating tags, fandoms, characters, relationships,
 genres, and status. It is data-driven (bundled `defaults/` + per-user `overrides/` + `config.toml`),
-audit-first, and reversible. Pure Python stdlib + Calibre's own CLI; no third-party deps, no test suite.
+audit-first, and reversible. Pure Python stdlib + Calibre's own CLI; no test suite. `rich` is an **optional**
+dependency (progress bars + tables in `audit`/`classify`): imported under `try/except`, so it's present in the
+system-`python3` paths but absent under `calibre-debug` (Calibre's bundled Python has empty site-packages) — every
+rich use must have a plain fallback. Never make rich a hard import.
 
 ## Running it
 

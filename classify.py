@@ -16,6 +16,14 @@ Engines (--engine):  apple = on-device Apple Foundation Models via ./afm (free; 
           column and stamps each tagged book, so the state lives IN the library — no external file. (--since DATE
           forces an explicit cutoff against #updated.) Avoids the ~full-library cost of a --fresh pass."""
 import os, sys, re, csv, json, sqlite3, subprocess, collections
+from contextlib import nullcontext
+try:                                              # rich is optional: pretty progress/tables in system python3
+    from rich.console import Console
+    from rich.progress import Progress, BarColumn, TextColumn, MofNCompleteColumn, TimeRemainingColumn
+    from rich.table import Table
+    _con = Console(stderr=True); RICH = True
+except ImportError:
+    RICH = False
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LIB = os.path.expanduser(os.environ.get("CALIBRE_LIBRARY", ""))
@@ -229,14 +237,21 @@ def work(b, d):
     out, err = ask_retry(prompt_for(d)); vt, nt = parse_resp(out); return b, err, vt, nt
 fails = nproc = 0; failures = []
 print(f"  {len(todo)} to do this run, {WORKERS} concurrent")
-with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+prog = (Progress(TextColumn("[cyan]classifying"), BarColumn(), MofNCompleteColumn(),
+                 TextColumn("· {task.fields[stat]}"), TimeRemainingColumn(), console=_con)
+        if RICH and todo else None)
+with ThreadPoolExecutor(max_workers=WORKERS) as ex, (prog or nullcontext()):
+    task = prog.add_task("", total=len(todo), stat="") if prog else None
     futs = [ex.submit(work, b, d) for b, d in todo]
     for fut in as_completed(futs):
         b, err, vt, nt = fut.result()
         if err: fails += 1; failures.append((b, err))
         if vt or nt: proposal[b] = (vt, nt)
         nproc += 1
-        if nproc % 50 == 0: dump(); print(f"  +{nproc}/{len(todo)} this run, {len(done)+nproc}/{len(targets)} total … {sum(1 for v in proposal.values() if v[0])} tagged, {fails} failed")
+        if nproc % 50 == 0: dump()                # checkpoint regardless of UI
+        stat = f"{sum(1 for v in proposal.values() if v[0])} tagged, {fails} failed"
+        if prog: prog.update(task, advance=1, stat=stat)
+        elif nproc % 50 == 0: print(f"  +{nproc}/{len(todo)} this run, {len(done)+nproc}/{len(targets)} total … {stat}")
 dump()
 if failures:
     with open(f"{HERE}/classify_failures.csv", "w", newline="") as f:
@@ -254,6 +269,12 @@ with open(RANK, "w", newline="") as f:
     for t, cnt in ranked.most_common(): w.writerow([t, cnt])
 print(f"\nOutput 1 (apply): {sum(1 for v in proposal.values() if v[0])} books with vocab tags -> {os.path.basename(PROP)} (col 'added_tags')")
 print(f"Output 2 (grow):  {len(ranked)} distinct new-tag candidates -> {os.path.basename(RANK)} (review -> promote into defaults/classify_vocab.txt)")
-print("top new-tag candidates:")
-for t, cnt in ranked.most_common(25): print(f"  {cnt:4}  {t}")
+if RICH and ranked:
+    tbl = Table(title="top new-tag candidates (review → promote into the vocab)")
+    tbl.add_column("count", justify="right", style="cyan"); tbl.add_column("proposed tag")
+    for tag, cnt in ranked.most_common(25): tbl.add_row(str(cnt), tag)
+    _con.print(tbl)
+else:
+    print("top new-tag candidates:")
+    for t, cnt in ranked.most_common(25): print(f"  {cnt:4}  {t}")
 print("\nApply vocab tags with: calibre-debug -e classify.py -- --apply   (Calibre closed)")
