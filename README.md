@@ -8,11 +8,19 @@ reversible.
 
 ```bash
 export CALIBRE_LIBRARY="$HOME/Calibre/fanfiction"     # folder containing metadata.db
+# first, with Calibre CLOSED — interactive health check + setup:
+calibre-debug -e wrangle.py -- setup                  # check FanFicFare + columns + config; create/fix what's missing
 python3 wrangle.py audit                              # read-only dry-run report (Calibre may be open)
-# then, with Calibre CLOSED:
-calibre-debug -e wrangle.py -- setup                  # first-run wizard: detect/create columns + write config
 calibre-debug -e wrangle.py -- apply                  # pre-apply (no write); add `--apply` to write
 ```
+
+**`setup` is the first-run wizard + re-runnable health check.** It verifies, with `✓/⚠/✗` status and
+`Y/n` prompts (default-yes; `--yes` to auto-accept): the library; that the **FanFicFare plugin is
+installed and configured**, flagging + offering to fix the known gotchas (fandom-vs-series mapping,
+`include_in_series:category`, unprotected `#genres`); that every needed column exists (`#fandoms`,
+`#characters`, `#relationships`, `#genres`, `#status`, plus `#updated` and `#wrangled` for staleness /
+incremental classification), creating any that are missing; and writes `config.toml` (preserving your
+behavior toggles). Safe to re-run anytime.
 
 The engine reads:
 - **`defaults/`** — bundled, generic fanfic knowledge (FFN `Harry P.`→`Harry Potter`, JP→English
