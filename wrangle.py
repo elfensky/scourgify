@@ -93,6 +93,7 @@ def load_maps(cfg):
     m["fanvals"] = {norm(v) for v in m["fan"].values()}
     m["trope"] = resolve_trope_chains({v: (cn, rt) for v, cn, rt in
         (read_tropes(os.path.join(DEF, "tropes.csv")) + read_tropes(os.path.join(odir, "tropes.csv")))})
+    m["fan_block"] = {norm(x) for x in read_lines(os.path.join(DEF, "fandom_blocklist.txt")) + read_lines(os.path.join(odir, "fandom_blocklist.txt")) if x and not x.startswith("#")}  # values that are never fandoms
     m["gsplit"] = {r["combined"]: r["atoms"].split("|") for r in both("genres_split.csv")}
     m["gcanon"] = {r["variant"]: r["canonical"] for r in both("genres_canon.csv")}
     m["gallow"] = {norm(x) for x in read_lines(os.path.join(DEF, "genres_allow.txt")) + read_lines(os.path.join(odir, "genres_allow.txt")) if x and not x.startswith("#")}
@@ -142,7 +143,10 @@ def transform(d, m, beh, cols, known_chars=frozenset(), tagcanon=None):
     nF = set()
     for f in F:
         tgt = m["fan"].get(f, f)
-        if tgt: nF.add(tgt)
+        if not tgt: continue                                  # alias -> empty: drop
+        if norm(tgt) in m["fan_block"]:                       # a curated non-fandom (kink/rating/status/meta) -> tag pipeline routes it
+            T.append(tgt); continue
+        nF.add(tgt)
     # characters: fold abbrev/case -> full (global, then fandom-scoped)
     nC = set()
     for ch in C:
@@ -181,7 +185,9 @@ def transform(d, m, beh, cols, known_chars=frozenset(), tagcanon=None):
     newd = {"fandoms": sorted(nF), "characters": sorted(nC), "genres": sorted(nG),
             "relationships": sorted(R), "tags": sorted(nT)}
     if st: newd["status"] = st
-    return newd, (had_F and not nF), (had_C and not nC)
+    # losing a fandom only counts if the book had a REAL one (a blocklisted non-fandom going to 0 is intentional)
+    had_real_F = any(m["fan"].get(f, f) and norm(m["fan"].get(f, f)) not in m["fan_block"] for f in F)
+    return newd, (had_real_F and not nF), (had_C and not nC)
 
 # ---------------- column resolution ----------------
 def fff_columns_from_prefs(get_pref):
