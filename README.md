@@ -8,11 +8,15 @@ reversible.
 
 ```bash
 export CALIBRE_LIBRARY="$HOME/Calibre/fanfiction"     # folder containing metadata.db
-# first, with Calibre CLOSED — interactive health check + setup:
-calibre-debug -e wrangle.py -- setup                  # check FanFicFare + columns + config; create/fix what's missing
-python3 wrangle.py audit                              # read-only dry-run report (Calibre may be open)
-calibre-debug -e wrangle.py -- apply                  # pre-apply (no write); add `--apply` to write
+python3 wrangle.py setup                              # interactive health check + setup (FanFicFare, columns, config)
+python3 wrangle.py audit                              # read-only dry-run report of every pass
+python3 wrangle.py apply --apply                      # write changes (Calibre CLOSED for this step)
 ```
+
+Everything runs under plain `python3`. The tool reads via read-only sqlite and, for the actual writes,
+shells out **once** to `calibre-debug -e _writer.py` (Calibre's API is the only fast batch-write path) —
+so any command that writes (`apply --apply`, `setup` creating columns, `classify.py --apply`) needs
+Calibre **closed**, and refuses to run while it's open. You never invoke `calibre-debug` yourself.
 
 **`setup` is the first-run wizard + re-runnable health check.** It verifies, with `✓/⚠/✗` status and
 `Y/n` prompts (default-yes; `--yes` to auto-accept): the library; that the **FanFicFare plugin is
@@ -23,8 +27,8 @@ incremental classification), creating any that are missing; and writes `config.t
 behavior toggles). Safe to re-run anytime.
 
 *Optional:* `pip install rich` for progress bars (long `classify.py` runs) and tables (`audit` before/after,
-candidate lists). Without it everything still works in plain text — rich is never a hard dependency, and Calibre's
-bundled Python (which runs `setup`/`apply`) doesn't have it, so those stay plain.
+candidate lists). Everything still works in plain text without it — rich is `try/except`-imported, never a hard
+dependency. (The `_writer.py` helper runs under Calibre's bundled Python, which has no rich, but it prints no UI.)
 
 The engine reads:
 - **`defaults/`** — bundled, generic fanfic knowledge (FFN `Harry P.`→`Harry Potter`, JP→English
@@ -91,7 +95,7 @@ unifications live in `build_defaults.py`'s `CURATED_FAN`.
 ### Protecting your cleanup from re-pollution
 FFF's **`custom_cols_newonly`** (`{column: bool}`) controls overwrite-on-update: when `true`, FFF
 only writes that column **if it's empty**, so a metadata refresh won't clobber your normalized
-values. Recommended: set `newonly:true` for `#genres` and `#status`. The **built-in `tags` column is
+values. Recommended: `newonly:true` for `#genres`; leave `#status` **writable** so FanFicFare refreshes it on fetch (`staleness.py` re-derives the activity inference). The **built-in `tags` column is
 never protected** by this — so new downloads/updates re-add raw tag junk, and you re-run
 `wrangle.py` to clean it (see *Maintenance*).
 
@@ -136,7 +140,7 @@ New stories arrive **raw**. `#genres`/`#status` are protected by `newonly` (abov
 not — so re-run the engine (it's idempotent and won't regress curated genres, since it uses the full
 `genres_allow.txt`):
 ```bash
-calibre-debug -e wrangle.py -- apply            # pre-apply; review, then add --apply
+python3 wrangle.py apply --apply                # write changes (Calibre closed)
 ```
 
 ---
@@ -149,7 +153,7 @@ review and **promote** the recurring ones into the vocab. Grows the tag set deli
 
 ```bash
 python3 classify.py --engine apple --limit 50        # propose -> classify_proposal.csv (dry-run, read-only)
-calibre-debug -e classify.py -- --apply              # add the proposed tags (Calibre CLOSED)
+python3 classify.py --apply                          # add the proposed tags (Calibre CLOSED)
 ```
 - `--engine apple` — on-device **Apple Foundation Models** via `afm.swift` (free, private; macOS 26+,
   Apple Intelligence). Build once: `swiftc -O afm.swift -o afm`. Lower quality — prone to over-tagging,

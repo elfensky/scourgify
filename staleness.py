@@ -3,7 +3,7 @@
 Idempotent & self-correcting — re-run after an #updated refresh and the status re-derives automatically.
 
   python3 staleness.py                          # audit (read-only, no changes)
-  calibre-debug -e staleness.py -- --apply      # write #status (Calibre CLOSED)
+  python3 staleness.py --apply                  # write #status (Calibre CLOSED)
 
 Rule: <STALE yrs -> In-Progress | STALE..DEAD -> Hiatus | >=DEAD -> Abandoned. Tunable: --stale-years 2 --dead-years 5.
 Completed/Dropped/Rewritten and books without an #updated date are NEVER changed."""
@@ -54,9 +54,8 @@ for b, (o, n) in list(changes.items())[:10]:
     a = age(b); print(f"    {o:12}->{n:12} ({a:.1f}y) #{b}")
 
 if APPLY:
-    from calibre.library import db as DB_
-    api = DB_(LIB).new_api
-    api.set_field("#status", {b: n for b, (o, n) in changes.items()})
-    print(f"\nWROTE: re-derived #status for {len(changes)} books.")
+    from wrangle import run_writer                      # standalone: write shells out to calibre-debug
+    run_writer([{"op": "set_field", "field": "#status", "values": {str(b): n for b, (o, n) in changes.items()}}])
+    print(f"re-derived #status for {len(changes)} books.")
 else:
-    print("\nDry run. To write: calibre-debug -e staleness.py -- --apply  (Calibre closed)")
+    print("\nDry run. To write: python3 staleness.py --apply   (Calibre closed)")

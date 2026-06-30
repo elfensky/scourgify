@@ -16,18 +16,22 @@ Everything keys off `CALIBRE_LIBRARY` (the folder containing `metadata.db`):
 
 ```bash
 export CALIBRE_LIBRARY="$HOME/Calibre/fanfiction"
-python3 wrangle.py audit                              # read-only dry-run report — safe while Calibre is OPEN
-calibre-debug -e wrangle.py -- setup                  # first-run wizard: detect/create columns + write config.toml
-calibre-debug -e wrangle.py -- apply                  # pre-apply (no write); add `--apply` to actually write
+python3 wrangle.py setup                              # interactive health check + setup (FanFicFare, columns, config)
+python3 wrangle.py audit                              # read-only dry-run of every pass
+python3 wrangle.py apply --apply                      # write changes (Calibre CLOSED for the write step)
 ```
 
-**Two execution modes — this distinction is the core operating rule:**
-- **Read-only (audit / proposal generation):** plain `python3 <script>.py`, opens `metadata.db` via
-  `sqlite3 ... mode=ro`. Fine while Calibre is open. This is how `audit` and `classify.py` (proposal phase) run.
-- **Writes (`--apply`, `setup`):** `calibre-debug -e <script>.py -- <args>` — uses Calibre's Python API.
-  **Calibre MUST be closed** (it locks the DB) and the library must be fully downloaded (it's typically on
-  iCloud Drive). Always `cp "$CALIBRE_LIBRARY/metadata.db" /tmp/ff_$(date +%s).db` first. Master rollback =
-  the user's full "Export all Calibre data" backup.
+**Everything runs under plain `python3`** (system Python, rich-capable). The core operating rule is about
+*reads vs writes*, not which interpreter:
+- **Reads** (audit, classify proposal, setup health check) — read-only `sqlite3 ... mode=ro`; fine while Calibre is open.
+- **Writes** — the standalone tool computes the change-set, serializes it to JSON, and shells out **once** to
+  `calibre-debug -e _writer.py -- ops.json` (Calibre's API is the only fast batch-write path; `calibredb set_metadata`
+  is one book per process). `run_writer()` (in wrangle.py; imported by classify/staleness) does this and **refuses to
+  run while Calibre is open** (it locks the DB). The user never types `calibre-debug`. Back up first:
+  `cp "$CALIBRE_LIBRARY/metadata.db" /tmp/ff_$(date +%s).db`. Master rollback = the full "Export all Calibre data" backup.
+- **`_writer.py`** is the only file that imports Calibre — a generic ops executor (`create_column` / `set_field` /
+  `stamp_now` / `set_pref`). wrangle.py is guarded with `if __name__ == "__main__"` so classify/staleness can
+  `from wrangle import run_writer`.
 
 There is no test framework. `wrangle.py audit` *is* the verification step: it computes the full new state
 and prints before/after counts + a SAFETY line asserting **no book loses its last fandom or character**
@@ -36,10 +40,10 @@ and prints before/after counts + a SAFETY line asserting **no book loses its las
 ## Maintenance loop (after new FanFicFare downloads)
 
 ```
-FFF fetch → calibre-debug -e staleness.py -- --apply        # free; re-derive #status from #updated age
-          → python3 classify.py --incremental                # cheap; only books changed since last wrangle
+FFF fetch → python3 staleness.py --apply        # free; re-derive #status from #updated age
+          → python3 classify.py --incremental    # cheap; only books changed since last wrangle
           → review classify_proposal.csv
-          → calibre-debug -e classify.py -- --apply           # Calibre closed
+          → python3 classify.py --apply           # Calibre closed (writes shell to calibre-debug)
 ```
 
 **⚠️ Cost:** a full Gemini `classify --fresh` pass over the library ≈ **€50** in tokens. Never run `--fresh`
