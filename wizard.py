@@ -23,19 +23,35 @@ ENGINE_KEYS = {"claude": ("ANTHROPIC_API_KEY",), "openai": ("OPENAI_API_KEY",),
                "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY")}
 
 
-# ---------------- status header ----------------
+# ---------------- status header + workflow detection ----------------
 def snapshot():
     try:
         con = ro_connect()
         books = con.execute("SELECT count(*) FROM books").fetchone()[0]
         missing = [c for c in COLS if custom_column_id(con, c) is None]
+        changed = None                        # books new/updated since the last classify-apply
+        if "#updated" not in missing and "#wrangled" not in missing:
+            from common import read_custom_column
+            upd = read_custom_column(con, "#updated") or {}
+            wr = read_custom_column(con, "#wrangled") or {}
+            changed = sum(1 for b, v in upd.items() if b not in wr or str(v)[:10] > str(wr[b])[:10])
         con.close()
     except Exception as e:
         raise SystemExit(f"can't read {db_path()} — is CALIBRE_LIBRARY correct? ({e})")
     pending = 0
     if os.path.exists(classify.PROP):
         pending = sum(1 for r in csv.DictReader(open(classify.PROP)) if r.get("added_tags", "").strip())
-    return {"books": books, "missing": missing, "pending": pending, "calibre": calibre_open()}
+    return {"books": books, "missing": missing, "changed": changed,
+            "pending": pending, "calibre": calibre_open(),
+            "setup_needed": bool(missing) or not os.path.exists(os.path.join(common.HERE, "config.toml"))}
+
+
+def recommend(info):
+    """The menu default = the step the library actually needs next."""
+    if info["setup_needed"]: return "1"                        # setup first
+    if info["pending"]: return "6"                             # a reviewed-but-unapplied proposal is waiting
+    if info["changed"]: return "0"                             # new/changed books -> run the loop
+    return "2"                                                 # healthy -> audit is the safe look-around
 
 
 def header(info):
@@ -43,12 +59,14 @@ def header(info):
     g.add_column(style="bold"); g.add_column()
     g.add_row("library", f"{library()}  ·  {info['books']:,} books")
     g.add_row("columns", "[green]all present ✓[/]" if not info["missing"]
-              else f"[yellow]missing: {', '.join(info['missing'])}[/]  → run setup")
-    g.add_row("proposal", f"[cyan]{info['pending']} books queued to apply[/]  → review / apply via classify"
+              else f"[yellow]missing: {', '.join(info['missing'])}[/]  → run 1 setup")
+    if info["changed"] is not None:
+        g.add_row("changes", f"[cyan]{info['changed']} books new/updated since the last wrangle[/]  → run 0 maintenance"
+                  if info["changed"] else "[green]library up to date ✓[/]")
+    g.add_row("proposal", f"[cyan]{info['pending']} books queued to apply[/]  → 6 review"
               if info["pending"] else "[dim]none pending[/]")
     if info["calibre"]:
         g.add_row("calibre", "[bold red]RUNNING[/] — reads work; any write will refuse until you close it")
-    g.add_row("loop", "[dim]new downloads? run 3 wrangle → 4 staleness → 5 classify → 6 review, in order[/]")
     ui.panel(g, title="[bold]calibre-wrangler[/]")
 
 
@@ -141,16 +159,45 @@ def act_review():
         ui.say("done ✓", "green")
 
 
+def act_flow():
+    """Guided maintenance run — the whole loop in the right order, every step skippable.
+    Each act_* already previews and asks before writing, so this adds only sequencing."""
+    ui.say("[bold]guided maintenance[/] — the loop in the right order: deterministic cleanup first "
+           "(wrangle), then status, then AI tagging, then review. every step previews before "
+           "writing and can be skipped.")
+    steps = [("wrangle",   "normalize the new raw tags — FIRST, because junk tags inflate tag counts "
+                           "and hide sparse books from the classifier", act_wrangle),
+             ("staleness", "re-derive #status from #updated age (free)", act_staleness),
+             ("classify",  "AI content tagging for new/changed books", act_classify),
+             ("review",    "inspect + apply the pending proposal", act_review)]
+    for i, (name, why, fn) in enumerate(steps, 1):
+        console.rule(f"[bold]step {i}/4 · {name}[/]", style="cyan")
+        ui.say(why, "dim")
+        if not ui.confirm(f"run {name}?", default=True):
+            ui.say(f"(skipped {name})", "dim"); continue
+        try:
+            fn()
+        except SystemExit as e:
+            if str(e): ui.error(str(e))
+            if not ui.confirm("continue with the remaining steps?", default=True): return
+        except KeyboardInterrupt:
+            ui.say("\n(step cancelled)", "dim")
+            if not ui.confirm("continue with the remaining steps?", default=True): return
+    console.rule(style="green")
+    ui.say("maintenance run complete ✓", "bold green")
+
+
 MENU = [
-    ("1", "setup",     "health check + first-run wizard (FanFicFare, columns, config)"),
-    ("2", "audit",     "read-only dry-run report of every normalize pass"),
-    ("3", "wrangle",   "normalize tags/fandoms/characters/genres — preview, then write"),
-    ("4", "staleness", "re-derive #status from #updated age — preview, then write"),
-    ("5", "classify",  "AI content tagging with a live dashboard — propose, then apply"),
-    ("6", "review",    "inspect the pending proposal + new-tag candidates"),
-    ("7", "quit",      "also: q, or Ctrl+C at any prompt"),
+    ("0", "maintenance", "guided run of the whole loop: wrangle → staleness → classify → review"),
+    ("1", "setup",       "health check + first-run wizard (FanFicFare, columns, config)"),
+    ("2", "audit",       "read-only dry-run report of every normalize pass"),
+    ("3", "wrangle",     "normalize tags/fandoms/characters/genres — preview, then write"),
+    ("4", "staleness",   "re-derive #status from #updated age — preview, then write"),
+    ("5", "classify",    "AI content tagging with a live dashboard — propose, then apply"),
+    ("6", "review",      "inspect the pending proposal + new-tag candidates"),
+    ("7", "quit",        "also: q, or Ctrl+C at any prompt"),
 ]
-ACTIONS = {"1": act_setup, "2": act_audit, "3": act_wrangle,
+ACTIONS = {"0": act_flow, "1": act_setup, "2": act_audit, "3": act_wrangle,
            "4": act_staleness, "5": act_classify, "6": act_review}
 
 
@@ -159,11 +206,25 @@ def run():
     if not ui.interactive():
         raise SystemExit("the wizard needs an interactive terminal — use the subcommands instead "
                          "(uv run wrangle.py --help).")
+    # first-launch guidance: an un-set-up library gets routed to setup before anything else
+    info = snapshot()
+    if info["setup_needed"]:
+        ui.clear(); header(info)
+        ui.say("this library isn't fully set up yet — the tools need their columns and config.toml.", "yellow")
+        if ui.confirm("run setup now?", default=True):
+            try:
+                act_setup()
+            except SystemExit as e:
+                if str(e): ui.error(str(e))
+            except (KeyboardInterrupt, EOFError):
+                ui.say("\n(cancelled)", "dim")
+            ui.pause()
     while True:
         ui.clear()
-        header(snapshot())
+        info = snapshot()
+        header(info)
         try:
-            choice = ui.menu("what do you want to do?", MENU, default="2", also=("q",))
+            choice = ui.menu("what do you want to do?", MENU, default=recommend(info), also=("q",))
         except (KeyboardInterrupt, EOFError):  # Ctrl+C / Ctrl+D at the menu = quit cleanly
             console.print()
             return

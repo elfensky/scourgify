@@ -24,12 +24,16 @@ uv run wrangle.py audit                              # read-only dry-run of ever
 uv run wrangle.py apply --apply                      # write changes (Calibre CLOSED for the write step)
 ```
 
-**`wizard.py`** (launched by bare `wrangle.py`, or directly) is a menu wizard over all workflows: status
-header (books, column health, pending proposal, Calibre-open warning) + setup/audit/wrangle/staleness/
-classify/review. It calls the same engine functions the subcommands do (previews → confirm → write), so
-guardrails and auto-backup apply identically; guardrail `SystemExit`s return to the menu. `ui.py` holds
-the shared rich Console + prompt helpers (lintle `term.py` pattern). classify runs render a live
-dashboard (`classify._Dashboard`: progress, tagged/failed/rate, throughput sparkline, rising candidates).
+**`wizard.py`** (launched by bare `wrangle.py`, or directly) is a guiding menu wizard: on launch it
+detects an un-set-up library (missing columns / no config.toml) and routes to setup; the header shows
+books, column health, new/changed-since-last-run count, pending proposal, Calibre-open warning; the
+menu default adapts via `recommend()` (setup → review-pending → maintenance → audit). Item 0
+(`act_flow`) is a guided maintenance run sequencing wrangle → staleness → classify → review with
+per-step explanations and skips. It calls the same engine functions the subcommands do (previews →
+confirm → write), so guardrails and auto-backup apply identically; guardrail `SystemExit`s return to
+the menu. `ui.py` holds the shared rich Console + prompt helpers (lintle `term.py` pattern). classify
+runs render a live dashboard (`classify._Dashboard`: progress, tagged/failed/rate, throughput
+sparkline, rising candidates).
 
 **Everything runs under normal CPython** — `uv run` (pyproject manages the venv + rich; `[tool.uv] package
 = false`, this is a scripts repo, not an installable package) or plain `python3` with rich installed. The

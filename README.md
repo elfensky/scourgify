@@ -14,10 +14,13 @@ uv run wrangle.py                                     # ← the wizard: everythi
 [uv](https://docs.astral.sh/uv/) handles the environment (one dependency: rich) — no install step.
 Plain `python3 wrangle.py` works too if rich is on your system Python (`pip install rich`).
 
-**The wizard** (no arguments) is the intended way in: a status header (library, book count, column
-health, pending proposal, Calibre-running warning) and a guided menu over every workflow — setup,
-audit, normalize, staleness, AI classify with a **live dashboard** (progress + tagged/failed/rate +
-throughput sparkline + rising tag candidates), and proposal review. Every write previews first,
+**The wizard** (no arguments) is the intended way in — and it steers you: on a fresh library it
+detects missing columns/config and offers to run **setup** immediately; afterwards the status header
+shows book count, column health, how many books are **new/changed since the last run**, and any
+pending proposal, and the menu **defaults to whatever the library needs next**. Menu item **0 —
+maintenance** walks the whole loop in the right order (wrangle → staleness → classify → review),
+each step explained, previewed, and skippable. Classify runs show a **live dashboard** (progress +
+tagged/failed/rate + throughput sparkline + rising tag candidates). Every write previews first,
 asks for confirmation, and auto-backs-up `metadata.db`.
 
 Each step is also a plain scriptable subcommand:
