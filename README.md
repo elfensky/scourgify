@@ -70,13 +70,14 @@ fandom-stuffed series field. Fix:
 1. Remove `include_in_series:category` from `personal.ini` → `series` becomes the real (e.g. AO3) series.
 2. Map `#fandoms ← category` (the true fandom field).
 
-`apply_fff_config.py` does both, plus the protection below. After that, real series fills in going
+`wrangle.py setup` detects and offers to fix both, plus the protection below (the original
+`attic/apply_fff_config.py` does the same standalone). After that, real series fills in going
 forward and fandoms come from `category`.
 
 **Why fandom-as-series is especially bad:** Calibre's **Series** is a *numbered* field — every book
 gets a `series_index` (`A Fandom Name [1]`, `[2]`, …). So fandom-as-series doesn't just duplicate the
 fandom, it invents a bogus **ordered hierarchy**: dozens of unrelated stories become "book 1, book 2…
-of Harry Potter," a sequence that reflects nothing real. Clearing it (see `apply_other.py`) and
+of Harry Potter," a sequence that reflects nothing real. Clearing it (see `attic/apply_other.py`) and
 mapping `#fandoms ← category` removes the fake ordering; real series (where the index is meaningful,
 e.g. a genuine 3-part AO3 series) then populate correctly.
 
@@ -129,11 +130,13 @@ defaults and wins on conflicts. This is where *your* preferences live — the co
 
 ## Safety model
 `audit` and `apply` compute the full new state in memory and assert **no book loses its last fandom
-or character** (backfill-before-strip), aborting without writing if that fails. A redundant tag is
-only stripped when the concept already lives in that book's structured column. `audit` is read-only
+or character** (backfill-before-strip), aborting without writing if that fails. A second guardrail
+aborts if tags would **mass-shrink** (>25% of assignments and >200 lost — the signature of an
+over-broad `junk.txt` rule; `--force` overrides after you've checked). A redundant tag is only
+stripped when the concept already lives in that book's structured column. `audit` is read-only
 (plain `python3`, fine with Calibre open); `apply`/`setup` use the Calibre API (Calibre **closed**).
-**Back up first:** `cp "$CALIBRE_LIBRARY/metadata.db" /tmp/ff_$(date +%s).db` (master rollback = a
-full "Export all Calibre data" backup).
+**Every write automatically snapshots `metadata.db` to `/tmp/ff_<timestamp>.db` first** and prints
+the path — that's your instant rollback (master rollback = a full "Export all Calibre data" backup).
 
 ## Maintenance — after new downloads / updates
 New stories arrive **raw**. `#genres`/`#status` are protected by `newonly` (above), but `tags` is
@@ -152,7 +155,7 @@ from the **controlled vocabulary** (`defaults/classify_vocab.txt`), which get ap
 review and **promote** the recurring ones into the vocab. Grows the tag set deliberately, without freeform noise.
 
 ```bash
-python3 classify.py --engine apple --limit 50        # propose -> classify_proposal.csv (dry-run, read-only)
+python3 classify.py --engine apple --limit 50        # propose -> data/classify_proposal.csv (dry-run, read-only)
 python3 classify.py --apply                          # add the proposed tags (Calibre CLOSED)
 ```
 - `--engine apple` — on-device **Apple Foundation Models** via `afm.swift` (free, private; macOS 26+,
@@ -164,6 +167,10 @@ python3 classify.py --apply                          # add the proposed tags (Ca
   until `--apply`. Edit `defaults/classify_vocab.txt` to shape the allowed tag set.
 - Long runs **save incrementally and resume** on re-run (skip books already in the proposal; `--fresh`
   to restart). `--batch N` processes only N new books per run — handy for pacing API spend/rate limits.
+  A **spend gate** asks for confirmation (or `--yes`) before sending more than 200 books to a cloud engine.
+- Proposals/outputs live in `data/` (gitignored): `classify_proposal.csv`, `classify_newtags_ranked.csv`,
+  `classify_failures.csv`. On `--apply` the proposal is **archived** to `classify_proposal_applied_<ts>.csv`,
+  so a later apply can never re-add tags you've since hand-removed in Calibre.
 - **Incremental maintenance (`--incremental`):** after new FanFicFare downloads, `classify.py --incremental` (re)tags
   only books whose `#updated` is newer than their own **`#wrangled`** marker (a datetime column auto-created and
   stamped on `--apply`), plus any still untagged — cents instead of a full pass. State lives *in the library*
@@ -175,19 +182,18 @@ The bundled `defaults/` are generic. Two helper workflows mined library-specific
 (`overrides/fandoms.csv`, e.g. `Avengers`/`Captain America (Movies)` → `Marvel`, `Game of Thrones (TV)`
 → `A Song of Ice and Fire`). The engine loads these on top of the defaults automatically.
 
-## Advanced — provenance & the original pipeline
-calibre-wrangler grew out of a step-by-step cleanup of one library. Those scripts are kept for
-reference and for regenerating the defaults:
+## Repo layout
+- **`wrangle.py`** — the engine: `setup` / `audit` / `apply`
+- **`classify.py`** — content-based tagging (LLM engines) · **`staleness.py`** — `#status` re-derivation
+- **`common.py`** — shared core: library resolution, read-only sqlite + custom-column reading,
+  config, and `run_writer()` (the single write funnel, with automatic backup)
+- **`_writer.py`** — the only file that imports Calibre; a generic ops executor invoked under
+  `calibre-debug` by `run_writer()`, never by hand
+- **`build_defaults.py`** — maintainer tool: regenerates `defaults/` from the review maps in `data/`
+- **`defaults/`** (shipped) · **`overrides/`** (yours, gitignored) · **`data/`** (your review maps,
+  proposals, intermediates — gitignored) · **`tests/`** (`python3 tests/test_core.py`, no library needed)
+- **`attic/`** — the original single-purpose pipeline, kept as provenance (see `attic/README.md`);
+  `wrangle.py` supersedes it.
 
-- **`build_defaults.py`** — regenerates `defaults/` from a source library's review maps (maintainer
-  tool; needs the gitignored `*_map.csv` present).
-- **`generate_maps.py` / `generate_followups.py`** — heuristic generators that produced the
-  reviewable per-value "decision maps" (CSV) a human edited.
-- **`apply.py`, `apply_more.py`, `apply_tropes.py`, `apply_relationships.py`, `apply_other.py`,
-  `apply_asciitags.py`, `apply_fff_config.py`, `apply_recents.py`, `dryrun.py`** — the original
-  single-purpose passes, each `calibre-debug -e <script>.py [-- --apply]`, Calibre closed. `wrangle.py`
-  supersedes most of these with one data-driven engine; `apply_fff_config.py` (the FFF config fix)
-  and `apply_relationships.py` (ship rebuild) remain useful standalone.
-
-The per-library review-map CSVs are gitignored (they contain your library's actual data); only the
-generic `defaults/` ship with the repo.
+The per-library review-map CSVs in `data/` are gitignored (they contain your library's actual data);
+only the generic `defaults/` ship with the repo.

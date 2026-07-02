@@ -5,7 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 calibre-wrangler normalizes a [FanFicFare](https://github.com/JimmXinu/FanFicFare)-imported
 [Calibre](https://calibre-ebook.com) library — consolidating tags, fandoms, characters, relationships,
 genres, and status. It is data-driven (bundled `defaults/` + per-user `overrides/` + `config.toml`),
-audit-first, and reversible. Pure Python stdlib + Calibre's own CLI; no test suite. `rich` is an **optional**
+audit-first, and reversible. Pure Python stdlib + Calibre's own CLI; tests in `tests/` (plain asserts,
+no framework needed). `rich` is an **optional**
 dependency (progress bars + tables in `audit`/`classify`): imported under `try/except`, so it's present in the
 system-`python3` paths but absent under `calibre-debug` (Calibre's bundled Python has empty site-packages) — every
 rich use must have a plain fallback. Never make rich a hard import.
@@ -26,30 +27,36 @@ python3 wrangle.py apply --apply                      # write changes (Calibre C
 - **Reads** (audit, classify proposal, setup health check) — read-only `sqlite3 ... mode=ro`; fine while Calibre is open.
 - **Writes** — the standalone tool computes the change-set, serializes it to JSON, and shells out **once** to
   `calibre-debug -e _writer.py -- ops.json` (Calibre's API is the only fast batch-write path; `calibredb set_metadata`
-  is one book per process). `run_writer()` (in wrangle.py; imported by classify/staleness) does this and **refuses to
-  run while Calibre is open** (it locks the DB). The user never types `calibre-debug`. Back up first:
-  `cp "$CALIBRE_LIBRARY/metadata.db" /tmp/ff_$(date +%s).db`. Master rollback = the full "Export all Calibre data" backup.
+  is one book per process). `run_writer()` (in **common.py**; imported by wrangle/classify/staleness) does this,
+  **automatically snapshots metadata.db to `/tmp/ff_<ts>.db` first** (prints the path — that's the rollback), and
+  **refuses to run while Calibre is open** (it locks the DB). The user never types `calibre-debug`. Master rollback =
+  the full "Export all Calibre data" backup.
 - **`_writer.py`** is the only file that imports Calibre — a generic ops executor (`create_column` / `set_field` /
-  `stamp_now` / `set_pref`). wrangle.py is guarded with `if __name__ == "__main__"` so classify/staleness can
-  `from wrangle import run_writer`.
+  `stamp_now` / `set_pref`).
+- **`common.py`** is the shared core: lazy `CALIBRE_LIBRARY` resolution (importing any module never exits),
+  `ro_connect()`, link-table-aware `read_custom_column()`, `norm`/`ascii_fold`, the minimal TOML `load_config()`,
+  and `run_writer()`. Don't re-implement any of these in a tool script.
 
-There is no test framework. `wrangle.py audit` *is* the verification step: it computes the full new state
-and prints before/after counts + a SAFETY line asserting **no book loses its last fandom or character**
-(`apply` aborts if that fails). Scripts also carry small inline `python3 -c` self-checks.
+Verification: `python3 tests/test_core.py` (plain asserts, pytest-compatible, no library/network needed) pins the
+pure core — `transform`, trope-chain resolution, `parse_resp`, the TOML reader. `wrangle.py audit` remains the
+against-your-library check: full new state, before/after counts, and SAFETY lines asserting **no book loses its
+last fandom or character** plus a **tag mass-deletion guardrail** (`apply` aborts if tags would shrink >25% and
+>200 assignments — the signature of an over-broad junk rule; `--force` overrides).
 
 ## Maintenance loop (after new FanFicFare downloads)
 
 ```
 FFF fetch → python3 staleness.py --apply        # free; re-derive #status from #updated age
           → python3 classify.py --incremental    # cheap; only books changed since last wrangle
-          → review classify_proposal.csv
+          → review data/classify_proposal.csv
           → python3 classify.py --apply           # Calibre closed (writes shell to calibre-debug)
 ```
 
 **⚠️ Cost:** a full Gemini `classify --fresh` pass over the library ≈ **€50** in tokens. Never run `--fresh`
 casually — use `--incremental` (only changed/new books), `--batch N`, or `--engine apple` (free, on-device).
-Confirm with the user before any full cloud run. **Do NOT bulk re-fetch FFF metadata** — it re-pollutes
-columns not protected by `custom_cols_newonly`.
+Confirm with the user before any full cloud run (classify itself gates cloud runs >200 books behind a
+confirmation / `--yes`). **Do NOT bulk re-fetch FFF metadata** — it re-pollutes columns not protected by
+`custom_cols_newonly`.
 
 ## Architecture
 
@@ -74,13 +81,15 @@ vocab grows without freeform noise). Engines `--engine apple|claude|openai|gemin
 book's own prose (EPUB via zipfile, other formats via `ebook-convert`) when the `#comments` description is
 too thin. `--incremental` re-tags only books whose `#updated` is newer than their per-book **`#wrangled`**
 datetime marker (auto-created and stamped on `--apply`) — state lives in the library, no external file.
+Proposals/outputs live in `data/` (gitignored); `--apply` archives the proposal to
+`classify_proposal_applied_<ts>.csv` so stale rows never re-add hand-removed tags.
 
 **`staleness.py`** — re-derives `#status` for the activity family {In-Progress, Hiatus, Abandoned} from
 `#updated` age (`<2y`→In-Progress, `2–5y`→Hiatus, `≥5y`→Abandoned); idempotent + self-correcting on re-run.
 Completed/Dropped/Rewritten and date-less books are never touched.
 
 **`build_defaults.py`** — maintainer tool: regenerates `defaults/` from the source library's gitignored
-review-map CSVs. Curated cross-library knowledge (e.g. franchise unification) lives in its `CURATED_FAN`.
+review-map CSVs (in `data/`). Curated cross-library knowledge (e.g. franchise unification) lives in its `CURATED_FAN`.
 
 ## Gotchas worth knowing before editing
 
@@ -95,15 +104,16 @@ review-map CSVs. Curated cross-library knowledge (e.g. franchise unification) li
 - **Gemini hard-blocks ~1% of extreme content** as `PROHIBITED_CONTENT` (non-configurable; `safetySettings`
   only relaxes the 4 HARM categories). It's deterministic — recover those books with `--engine openai` or
   `--engine apple`. `classify.py` logs failures to `classify_failures.csv`.
-- **No `tomllib`** under `calibre-debug`'s Python — `wrangle.py` ships a minimal TOML reader (quote-aware so
+- **No `tomllib`** under `calibre-debug`'s Python — `common.py` ships a minimal TOML reader (quote-aware so
   values can contain `#`; tolerates trailing comments on section headers).
 
 ## Repo conventions
 
-- **Personal library data is gitignored**: `.gitignore` ignores `*.csv` **except** `!defaults/*.csv`, plus
-  `*.db`, `overrides/`, `classify_*.csv`, the compiled `/afm` binary. Only the generic `defaults/` ship.
-- **`apply_*.py`, `generate_*.py`, `dryrun.py`, `recover_xianxia.py`** are the original single-purpose
-  pipeline, kept as provenance. `wrangle.py` supersedes most; `apply_fff_config.py` (FFF config fix) and
-  `apply_relationships.py` (ship rebuild) remain useful standalone.
+- **Personal library data is gitignored and lives in `data/`** (review maps, proposals, cluster
+  intermediates); `.gitignore` also ignores stray `*.csv` **except** `!defaults/*.csv`, plus `*.db`,
+  `overrides/`, the compiled `/afm` binary. Only the generic `defaults/` ship.
+- **`attic/`** holds the original single-purpose pipeline (`apply_*.py`, `generate_*.py`, `dryrun.py`,
+  `recover_xianxia.py`), kept as provenance — see `attic/README.md`. `wrangle.py` supersedes it; the attic
+  scripts read CSVs from their own directory and predate the auto-backup, so prefer the live tools.
 - `afm.swift` is the Apple Foundation Models bridge for `classify.py --engine apple`; build with
   `swiftc -O afm.swift -o afm` (requires macOS 26+ / Apple Intelligence).
