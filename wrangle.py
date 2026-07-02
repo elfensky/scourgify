@@ -102,7 +102,7 @@ def trope_route(canon, route, beh):
     return route
 
 # ---------------- the transform (per book) ----------------
-def transform(d, m, beh, cols, known_chars=frozenset(), tagcanon=None):
+def transform(d, m, beh, known_chars=frozenset(), tagcanon=None):
     """d: dict col_key -> list[str] for configured columns. Returns (newd, lost_fandom, lost_char).
     known_chars: normalized set of character names in the library (to rescue chars misfiled in #genres).
     tagcanon: norm -> canonical spelling map for generic normalize-merge of tag variants."""
@@ -128,7 +128,7 @@ def transform(d, m, beh, cols, known_chars=frozenset(), tagcanon=None):
         if norm(tgt) in m["fan_block"]:                       # a curated non-fandom (kink/rating/status/meta) -> tag pipeline routes it
             T.append(tgt); continue
         nF.add(tgt)
-    nF |= {m["fan"].get(f, f) for f in seedF}                  # decomposed fandoms
+    nF |= {m["fan"].get(f, f) for f in seedF if m["fan"].get(f, f)}   # decomposed fandoms (skip alias->empty)
     # characters: fold abbrev/case -> full (global, then fandom-scoped)
     nC = set()
     for ch in C:
@@ -214,7 +214,7 @@ def audit(cfg, m):
     for b in allb:
         d = {k: perbook[b].get(k, []) for k in cols}
         for k in cols: before[k].update(d.get(k, []))
-        nd, lf, lc = transform(d, m, beh, cols, known_chars, tagcanon); lostF += lf; lostC += lc
+        nd, lf, lc = transform(d, m, beh, known_chars, tagcanon); lostF += lf; lostC += lc
         tagsB += len(d.get("tags", [])); tagsA += len(nd.get("tags", []))
         for k in cols:
             if k in nd: after[k].update(nd[k])
@@ -291,7 +291,7 @@ def apply_changes(cfg, m, do_write, force=False):
     changes = collections.defaultdict(dict); lostF = lostC = tagsB = tagsA = 0
     for b in allb:
         d = {k: perbook[b].get(k, []) for k in cols}
-        nd, lf, lc = transform(d, m, beh, cols, known_chars, tagcanon); lostF += lf; lostC += lc
+        nd, lf, lc = transform(d, m, beh, known_chars, tagcanon); lostF += lf; lostC += lc
         tagsB += len(d.get("tags", [])); tagsA += len(nd.get("tags", []))
         for k, lab in cols.items():
             if k in nd and tuple(sorted(nd[k])) != tuple(sorted(d.get(k, []))):
