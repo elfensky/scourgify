@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-calibre-wrangler normalizes a [FanFicFare](https://github.com/JimmXinu/FanFicFare)-imported
+scourgify normalizes a [FanFicFare](https://github.com/JimmXinu/FanFicFare)-imported
 [Calibre](https://calibre-ebook.com) library — consolidating tags, fandoms, characters, relationships,
 genres, and status. It is data-driven (bundled `defaults/` + per-user `overrides/` + `config.toml`),
 audit-first, and reversible. Python stdlib + Calibre's own CLI + `rich`; tests in `tests/` (plain asserts,

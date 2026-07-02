@@ -1,5 +1,5 @@
 [project]
-name = "calibre-wrangler"
+name = "scourgify"
 version = "1.0.0"
 description = "Normalize and consolidate tags/fandoms/characters/genres in a FanFicFare-imported Calibre library"
 readme = "README.md"

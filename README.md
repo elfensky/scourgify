@@ -1,4 +1,4 @@
-# calibre-wrangler
+# scourgify
 
 The tag-wrangler / canonizer for your fanfiction library — normalize and consolidate **tags,
 fandoms, characters, relationships and genres** in a
@@ -61,7 +61,7 @@ The engine reads:
 
 FanFicFare scrapes metadata fields from each story and writes them into Calibre columns. The mapping
 lives in the FFF Calibre-plugin config (stored per-library in the `metadata.db` preference
-`namespaced:FanFicFarePlugin:settings` → key `custom_cols`). calibre-wrangler's `setup` reads that
+`namespaced:FanFicFarePlugin:settings` → key `custom_cols`). scourgify's `setup` reads that
 mapping, and creates any recommended columns you're missing.
 
 **Recommended mapping** (FFF metadata field → Calibre column):

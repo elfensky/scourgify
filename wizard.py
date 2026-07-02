@@ -67,7 +67,7 @@ def header(info):
               if info["pending"] else "[dim]none pending[/]")
     if info["calibre"]:
         g.add_row("calibre", "[bold red]RUNNING[/] — reads work; any write will refuse until you close it")
-    ui.panel(g, title="[bold]calibre-wrangler[/]")
+    ui.panel(g, title="[bold]scourgify[/]")
 
 
 # ---------------- actions ----------------
