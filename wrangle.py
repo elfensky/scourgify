@@ -433,13 +433,21 @@ def setup(cfg):
 # ---------------- main ----------------
 if __name__ == "__main__":
     import argparse
-    p = argparse.ArgumentParser(description="Normalize a FanFicFare-imported Calibre library (writes auto-shell to calibre-debug).")
-    p.add_argument("command", nargs="?", default="audit", choices=["setup", "audit", "apply"],
-                   help="setup: interactive health check + configure | audit: read-only dry-run | apply: write changes")
+    p = argparse.ArgumentParser(description="Normalize a FanFicFare-imported Calibre library (writes auto-shell to calibre-debug). "
+                                            "With no command: launch the interactive wizard.")
+    p.add_argument("command", nargs="?", default=None, choices=["setup", "audit", "apply"],
+                   help="setup: interactive health check + configure | audit: read-only dry-run | apply: write changes | (none): wizard")
     p.add_argument("--apply", action="store_true", help="with `apply`: actually write (Calibre closed)")
     p.add_argument("--force", action="store_true", help="override the tag mass-deletion guardrail")
     p.add_argument("--yes", "-y", action="store_true", help="non-interactive: take the recommended default for every prompt")
     a = p.parse_args()
+    if a.command is None:
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            import wizard                  # lazy: keeps rich fully optional for the plain subcommands
+            wizard.run()
+        else:
+            p.print_help()
+        sys.exit(0)
     library()                      # fail fast with a clear message before doing any work
     cfg = load_config(); maps = load_maps(cfg)
     if a.command == "audit": audit(cfg, maps)

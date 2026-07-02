@@ -1,0 +1,3 @@
+# rich powers the wizard (required there) and the live dashboards/tables in the CLI tools
+# (optional there — they degrade to plain text without it).
+rich
