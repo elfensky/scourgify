@@ -124,7 +124,7 @@ PROP = f"{HERE}/classify_proposal.csv"
 RANK = f"{HERE}/classify_newtags_ranked.csv"
 
 if APPLY:                                      # apply 'added_tags' + stamp #wrangled — standalone, no LLM calls
-    from wrangle import run_writer                                    # writes shell out to calibre-debug
+    from common import run_writer                                     # writes shell out to calibre-debug
     rcon = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
     cur = collections.defaultdict(list)
     for b, t in rcon.execute("SELECT l.book, t.name FROM books_tags_link l JOIN tags t ON t.id=l.tag"): cur[b].append(t)
