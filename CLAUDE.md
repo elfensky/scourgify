@@ -5,11 +5,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 calibre-wrangler normalizes a [FanFicFare](https://github.com/JimmXinu/FanFicFare)-imported
 [Calibre](https://calibre-ebook.com) library — consolidating tags, fandoms, characters, relationships,
 genres, and status. It is data-driven (bundled `defaults/` + per-user `overrides/` + `config.toml`),
-audit-first, and reversible. Pure Python stdlib + Calibre's own CLI; tests in `tests/` (plain asserts,
-no framework needed). `rich` is an **optional**
-dependency (progress bars + tables in `audit`/`classify`): imported under `try/except`, so it's present in the
-system-`python3` paths but absent under `calibre-debug` (Calibre's bundled Python has empty site-packages) — every
-rich use must have a plain fallback. Never make rich a hard import.
+audit-first, and reversible. Python stdlib + Calibre's own CLI + `rich`; tests in `tests/` (plain asserts,
+no framework needed). **rich dependency rules by surface:** `wizard.py`/`ui.py` may hard-import rich (the
+wizard is rich-first; `ui.py` raises a friendly install hint if missing). The core tools
+(`wrangle`/`classify`/`staleness`) import rich under `try/except` and every rich use there needs a plain
+fallback (scripting/CI without rich must keep working). `_writer.py` runs under `calibre-debug` (Calibre's
+bundled Python has empty site-packages) — never import rich (or `ui`/`wizard`) there.
 
 ## Running it
 
@@ -17,10 +18,18 @@ Everything keys off `CALIBRE_LIBRARY` (the folder containing `metadata.db`):
 
 ```bash
 export CALIBRE_LIBRARY="$HOME/Calibre/fanfiction"
+python3 wrangle.py                                    # no args = the interactive wizard (rich required; TTY only)
 python3 wrangle.py setup                              # interactive health check + setup (FanFicFare, columns, config)
 python3 wrangle.py audit                              # read-only dry-run of every pass
 python3 wrangle.py apply --apply                      # write changes (Calibre CLOSED for the write step)
 ```
+
+**`wizard.py`** (launched by bare `wrangle.py`, or directly) is a menu wizard over all workflows: status
+header (books, column health, pending proposal, Calibre-open warning) + setup/audit/wrangle/staleness/
+classify/review. It calls the same engine functions the subcommands do (previews → confirm → write), so
+guardrails and auto-backup apply identically; guardrail `SystemExit`s return to the menu. `ui.py` holds
+the shared rich Console + prompt helpers (lintle `term.py` pattern). classify runs render a live
+dashboard (`classify._Dashboard`: progress, tagged/failed/rate, throughput sparkline, rising candidates).
 
 **Everything runs under plain `python3`** (system Python, rich-capable). The core operating rule is about
 *reads vs writes*, not which interpreter:

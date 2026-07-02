@@ -7,7 +7,20 @@ library. Data-driven from **~1,700 bundled generic defaults**, fully customizabl
 reversible.
 
 ```bash
+pip install rich                                      # the one dependency (wizard + live dashboards)
 export CALIBRE_LIBRARY="$HOME/Calibre/fanfiction"     # folder containing metadata.db
+python3 wrangle.py                                    # ← the wizard: everything below, menu-driven
+```
+
+**The wizard** (no arguments) is the intended way in: a status header (library, book count, column
+health, pending proposal, Calibre-running warning) and a guided menu over every workflow — setup,
+audit, normalize, staleness, AI classify with a **live dashboard** (progress + tagged/failed/rate +
+throughput sparkline + rising tag candidates), and proposal review. Every write previews first,
+asks for confirmation, and auto-backs-up `metadata.db`.
+
+Each step is also a plain scriptable subcommand:
+
+```bash
 python3 wrangle.py setup                              # interactive health check + setup (FanFicFare, columns, config)
 python3 wrangle.py audit                              # read-only dry-run report of every pass
 python3 wrangle.py apply --apply                      # write changes (Calibre CLOSED for this step)
@@ -26,9 +39,9 @@ installed and configured**, flagging + offering to fix the known gotchas (fandom
 incremental classification), creating any that are missing; and writes `config.toml` (preserving your
 behavior toggles). Safe to re-run anytime.
 
-*Optional:* `pip install rich` for progress bars (long `classify.py` runs) and tables (`audit` before/after,
-candidate lists). Everything still works in plain text without it — rich is `try/except`-imported, never a hard
-dependency. (The `_writer.py` helper runs under Calibre's bundled Python, which has no rich, but it prints no UI.)
+**rich** is required for the wizard and powers the live dashboards/tables everywhere else; the plain
+subcommands still degrade to text without it (rich is `try/except`-imported in the core tools, so
+scripting/CI without rich keeps working, and `_writer.py` under Calibre's bundled Python needs none).
 
 The engine reads:
 - **`defaults/`** — bundled, generic fanfic knowledge (FFN `Harry P.`→`Harry Potter`, JP→English
@@ -183,7 +196,9 @@ The bundled `defaults/` are generic. Two helper workflows mined library-specific
 → `A Song of Ice and Fire`). The engine loads these on top of the defaults automatically.
 
 ## Repo layout
-- **`wrangle.py`** — the engine: `setup` / `audit` / `apply`
+- **`wrangle.py`** — the engine: `setup` / `audit` / `apply`; with no command it launches the wizard
+- **`wizard.py` + `ui.py`** — the interactive wizard and its rich terminal helpers (the one
+  rich-required surface)
 - **`classify.py`** — content-based tagging (LLM engines) · **`staleness.py`** — `#status` re-derivation
 - **`common.py`** — shared core: library resolution, read-only sqlite + custom-column reading,
   config, and `run_writer()` (the single write funnel, with automatic backup)
