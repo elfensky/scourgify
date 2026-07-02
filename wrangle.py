@@ -178,10 +178,11 @@ def transform(d, m, beh, cols, known_chars=frozenset(), tagcanon=None):
     nC |= seedC                                                # decomposed characters
     # genres: split -> canon -> allowlist(keep) else move to tags
     nG = set(); extra_tags = set()
+    ga = lambda na: na in m["gallow"] or any(na.startswith(x + " ") for x in m["gallow"] if len(x) >= 4)  # allowed genre?
     for g in G0:
         for atom in (m["gsplit"].get(g, [g])):
             a = m["gcanon"].get(atom, atom); na = norm(a)
-            if na in m["gallow"] or any(na.startswith(x + " ") for x in m["gallow"] if len(x) >= 4):
+            if ga(na):
                 nG.add(a)                                       # allowlisted genre or a subtype of one (AU - Canon Divergence)
             elif na in m["fanvals"]: nF.add(a)                  # misfiled fandom
             elif na in known_chars: nC.add(a)                   # misfiled character (e.g. Akeno Himejima in #genres)
@@ -194,10 +195,10 @@ def transform(d, m, beh, cols, known_chars=frozenset(), tagcanon=None):
         if is_junk(t, m): continue
         if t in m["trope"]:
             canon, route = m["trope"][t]; route = trope_route(canon, route, beh)
-            if route == "genre": nG.add(canon)
+            if route == "genre": (nG if ga(norm(canon)) else nT).add(canon)   # genre only if allowlisted, else tag (keeps #genres idempotent)
             elif route == "fandom": nF.add(m["fan"].get(canon, canon))
             elif route == "character": nC.add(canon)
-            elif beh.get("tropes_as") == "genre" and norm(canon) not in m["rating"]: nG.add(canon)  # fold tropes into #genres (ratings stay tags)
+            elif beh.get("tropes_as") == "genre" and norm(canon) not in m["rating"]: (nG if ga(norm(canon)) else nT).add(canon)
             else: nT.add(canon)                       # tag fold
             continue
         if norm(t) in known_chars: nC.add(t); continue   # tag is actually a known character -> #characters
