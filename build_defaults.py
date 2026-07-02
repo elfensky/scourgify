@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Build the bundled generic `defaults/` from a source library's review maps (the *_map.csv files).
+# Build the bundled generic `defaults/` from a source library's review maps (the *_map.csv files in data/).
 # Maintainer-only: needs the personal review maps present (they're gitignored). The OUTPUT defaults/
 # is committed and ships with the tool. Generic fanfic facts only — personal preference folds excluded.
 import csv, os
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEF = os.path.join(HERE, "defaults"); os.makedirs(DEF, exist_ok=True)
+DATA = os.path.join(HERE, "data")
 
 def rows(fn):
-    p = os.path.join(HERE, fn)
+    p = os.path.join(DATA, fn)
     return list(csv.DictReader(open(p))) if os.path.exists(p) else []
 def write_csv(name, header, data):
     seen, out = set(), []

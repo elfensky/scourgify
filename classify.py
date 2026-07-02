@@ -18,7 +18,7 @@ Engines (--engine):  apple = on-device Apple Foundation Models via ./afm (free; 
 import argparse, os, re, csv, json, subprocess, collections, time
 from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from common import HERE, ro_connect, read_custom_column, custom_column_id, run_writer, library
+from common import HERE, DATA, ro_connect, read_custom_column, custom_column_id, run_writer, library
 try:                                              # rich is optional: pretty progress/tables in system python3
     from rich.console import Console
     from rich.progress import Progress, BarColumn, TextColumn, MofNCompleteColumn, TimeRemainingColumn
@@ -29,9 +29,9 @@ except ImportError:
 
 VOCAB = [l.strip() for l in open(f"{HERE}/defaults/classify_vocab.txt") if l.strip() and not l.startswith("#")]
 VLOW = {v.lower(): v for v in VOCAB}
-PROP = f"{HERE}/classify_proposal.csv"
-RANK = f"{HERE}/classify_newtags_ranked.csv"
-FAIL = f"{HERE}/classify_failures.csv"
+PROP = f"{DATA}/classify_proposal.csv"
+RANK = f"{DATA}/classify_newtags_ranked.csv"
+FAIL = f"{DATA}/classify_failures.csv"
 SPEND_GATE = 200        # cloud runs above this many books require an explicit yes
 
 
@@ -310,6 +310,7 @@ def main():
     a = p.parse_args()
     if a.engine == "apple": a.workers = 1        # apple = one subprocess pipe, not thread-safe
     library()                                    # fail fast with a clear message
+    os.makedirs(DATA, exist_ok=True)
     if a.apply: apply_proposal()
     else: classify_run(a)
 

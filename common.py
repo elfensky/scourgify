@@ -13,6 +13,7 @@ import os, re, sys, sqlite3, collections, unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULTS = os.path.join(HERE, "defaults")
+DATA = os.path.join(HERE, "data")      # personal review maps, proposals, intermediates (gitignored)
 
 
 # ---------------- library resolution (lazy — importing this module never exits) ----------------
