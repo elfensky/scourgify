@@ -141,16 +141,16 @@ def act_review():
 
 
 MENU = [
-    ("s", "setup",     "health check + first-run wizard (FanFicFare, columns, config)"),
-    ("a", "audit",     "read-only dry-run report of every normalize pass"),
-    ("w", "wrangle",   "normalize tags/fandoms/characters/genres — preview, then write"),
-    ("t", "staleness", "re-derive #status from #updated age — preview, then write"),
-    ("c", "classify",  "AI content tagging with a live dashboard — propose, then apply"),
-    ("r", "review",    "inspect the pending proposal + new-tag candidates"),
-    ("q", "quit",      ""),
+    ("1", "setup",     "health check + first-run wizard (FanFicFare, columns, config)"),
+    ("2", "audit",     "read-only dry-run report of every normalize pass"),
+    ("3", "wrangle",   "normalize tags/fandoms/characters/genres — preview, then write"),
+    ("4", "staleness", "re-derive #status from #updated age — preview, then write"),
+    ("5", "classify",  "AI content tagging with a live dashboard — propose, then apply"),
+    ("6", "review",    "inspect the pending proposal + new-tag candidates"),
+    ("7", "quit",      ""),
 ]
-ACTIONS = {"s": act_setup, "a": act_audit, "w": act_wrangle,
-           "t": act_staleness, "c": act_classify, "r": act_review}
+ACTIONS = {"1": act_setup, "2": act_audit, "3": act_wrangle,
+           "4": act_staleness, "5": act_classify, "6": act_review}
 
 
 def run():
@@ -161,8 +161,8 @@ def run():
     while True:
         ui.clear()
         header(snapshot())
-        choice = ui.menu("what do you want to do?", MENU, default="a")
-        if choice == "q":
+        choice = ui.menu("what do you want to do?", MENU, default="2")
+        if choice == "7":
             return
         console.print()
         try:
