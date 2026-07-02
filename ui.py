@@ -41,14 +41,15 @@ def panel(renderable, title=None, style="cyan"):
     console.print(Panel(renderable, title=title, border_style=style, padding=(0, 1)))
 
 
-def menu(title, options, default=None):
-    """Render a keyed menu and return the chosen key. options = [(key, label, hint), ...]."""
+def menu(title, options, default=None, also=()):
+    """Render a keyed menu and return the chosen key. options = [(key, label, hint), ...];
+    `also` lists extra accepted keys that aren't rendered (e.g. a 'q' quit alias)."""
     t = Table(box=box.SIMPLE, show_header=False, pad_edge=False)
     t.add_column(style="bold cyan", justify="right"); t.add_column(); t.add_column(style="dim")
     for k, label, hint in options:
         t.add_row(k, label, hint)
     panel(t, title=title)
-    keys = [k for k, _, _ in options]
+    keys = [k for k, _, _ in options] + list(also)
     return Prompt.ask("choose", choices=keys, default=default or keys[0], console=console)
 
 

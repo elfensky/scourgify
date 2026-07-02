@@ -320,15 +320,27 @@ def classify_run(a):
 
     failures = []
     print(f"  {len(todo)} to do this run, {a.workers} concurrent")
-    with ThreadPoolExecutor(max_workers=a.workers) as ex, _Dashboard(len(todo), len(done), len(targets)) as dash:
-        futs = [ex.submit(work, b, d) for b, d in todo]
-        for fut in as_completed(futs):
-            b, err, vt, nt = fut.result()
-            if err: failures.append((b, err))
-            if vt or nt: proposal[b] = (vt, nt)
-            dash.update(vt, nt, err)
-            if dash.n % 50 == 0: dump()               # checkpoint regardless of UI
+    ex = ThreadPoolExecutor(max_workers=a.workers)
+    interrupted = False
+    try:
+        with _Dashboard(len(todo), len(done), len(targets)) as dash:
+            futs = [ex.submit(work, b, d) for b, d in todo]
+            for fut in as_completed(futs):
+                b, err, vt, nt = fut.result()
+                if err: failures.append((b, err))
+                if vt or nt: proposal[b] = (vt, nt)
+                dash.update(vt, nt, err)
+                if dash.n % 50 == 0: dump()           # checkpoint regardless of UI
+    except KeyboardInterrupt:
+        # Ctrl+C: never start queued work, don't wait for in-flight requests (they're
+        # abandoned; runs are resumable so nothing is lost beyond the requests in the air)
+        interrupted = True
+        ex.shutdown(wait=False, cancel_futures=True)
+    else:
+        ex.shutdown()
     dump()
+    if interrupted:
+        print(f"\n  interrupted — {len(proposal)} results saved to the proposal; re-run to resume where you left off.")
     if failures:
         with open(FAIL, "w", newline="") as f:
             w = csv.writer(f); w.writerow(["book_id", "title", "reason"])

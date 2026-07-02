@@ -147,7 +147,7 @@ MENU = [
     ("4", "staleness", "re-derive #status from #updated age — preview, then write"),
     ("5", "classify",  "AI content tagging with a live dashboard — propose, then apply"),
     ("6", "review",    "inspect the pending proposal + new-tag candidates"),
-    ("7", "quit",      ""),
+    ("7", "quit",      "also: q, or Ctrl+C at any prompt"),
 ]
 ACTIONS = {"1": act_setup, "2": act_audit, "3": act_wrangle,
            "4": act_staleness, "5": act_classify, "6": act_review}
@@ -161,16 +161,20 @@ def run():
     while True:
         ui.clear()
         header(snapshot())
-        choice = ui.menu("what do you want to do?", MENU, default="2")
-        if choice == "7":
+        try:
+            choice = ui.menu("what do you want to do?", MENU, default="2", also=("q",))
+        except (KeyboardInterrupt, EOFError):  # Ctrl+C / Ctrl+D at the menu = quit cleanly
+            console.print()
+            return
+        if choice in ("7", "q"):
             return
         console.print()
         try:
             ACTIONS[choice]()
         except SystemExit as e:               # guardrails/aborts return to the menu instead of exiting
             if str(e): ui.error(str(e))
-        except KeyboardInterrupt:
-            ui.say("\n(cancelled)", "dim")
+        except (KeyboardInterrupt, EOFError):  # Ctrl+C mid-action = cancel back to the menu
+            ui.say("\n(cancelled — nothing written beyond what was already confirmed)", "dim")
         console.print()
         ui.pause()
 
