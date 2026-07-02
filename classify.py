@@ -16,13 +16,15 @@ Engines (--engine):  apple = on-device Apple Foundation Models via ./afm (free; 
           column and stamps each tagged book, so the state lives IN the library — no external file. (--since DATE
           forces an explicit cutoff against #updated.) Avoids the ~full-library cost of a --fresh pass."""
 import argparse, os, re, csv, json, subprocess, collections, time
-from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from common import HERE, DATA, ro_connect, read_custom_column, custom_column_id, run_writer, library
-try:                                              # rich is optional: pretty progress/tables in system python3
-    from rich.console import Console
+try:                                              # rich is optional: live dashboard/tables in system python3
+    from rich.console import Console, Group
+    from rich.live import Live
+    from rich.panel import Panel
     from rich.progress import Progress, BarColumn, TextColumn, MofNCompleteColumn, TimeRemainingColumn
     from rich.table import Table
+    from rich.text import Text
     _con = Console(stderr=True); RICH = True
 except ImportError:
     RICH = False
@@ -119,6 +121,76 @@ class Gemini:
         return parts[0]["text"]
 
 ENGINES = {"apple": Apple, "claude": Claude, "openai": OpenAI, "gemini": Gemini}
+
+
+# ---- live run display ----
+def sparkline(vals, width=28):
+    """Unicode sparkline of a numeric series (last `width` points), scaled to its max."""
+    vals = [v for v in vals][-width:]
+    if not vals: return ""
+    blocks = "▁▂▃▄▅▆▇█"
+    hi = max(vals)
+    if hi <= 0: return blocks[0] * len(vals)
+    return "".join(blocks[min(7, int(v * 8 / hi))] for v in vals)
+
+class _Dashboard:
+    """Live display for a classify run: progress bar, running numbers (tagged / failed /
+    no-match / rate), a throughput sparkline, and the rising new-tag candidates.
+    rich renders it live; without rich it degrades to a checkpoint line every 25 books."""
+    BUCKET = 5.0                                   # seconds per throughput bucket
+
+    def __init__(self, todo_n, done_before, targets_n):
+        self.total, self.done_before, self.targets = todo_n, done_before, targets_n
+        self.n = self.tagged = self.fails = 0
+        self.newtags = collections.Counter()
+        self.t0 = time.monotonic(); self.hist = [0]
+        self.live = self.prog = self.task = None
+
+    def __enter__(self):
+        if RICH and self.total:
+            self.prog = Progress(TextColumn("[cyan]classifying"), BarColumn(bar_width=None),
+                                 MofNCompleteColumn(), TimeRemainingColumn(), console=_con)
+            self.task = self.prog.add_task("", total=self.total)
+            self.live = Live(self._render(), console=_con, refresh_per_second=4)
+            self.live.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        if self.live: self.live.__exit__(*exc)
+        return False
+
+    def update(self, vt, nt, err):
+        self.n += 1
+        if err: self.fails += 1
+        elif vt: self.tagged += 1
+        self.newtags.update(nt)
+        b = int((time.monotonic() - self.t0) // self.BUCKET)
+        while len(self.hist) <= b: self.hist.append(0)
+        self.hist[b] += 1
+        if self.live:
+            self.prog.update(self.task, advance=1)
+            self.live.update(self._render())
+        elif self.n % 25 == 0:
+            el = time.monotonic() - self.t0
+            print(f"  +{self.n}/{self.total} … {self.tagged} tagged, {self.fails} failed, {self.n / el:.1f}/s")
+
+    def _render(self):
+        el = time.monotonic() - self.t0
+        rate = self.n / el if el > 1 else 0.0
+        g = Table.grid(padding=(0, 2))
+        g.add_row("[bold]this run[/]", f"{self.n}/{self.total}",
+                  "[green]tagged[/]", str(self.tagged),
+                  "[red]failed[/]", str(self.fails),
+                  "[dim]no match[/]", str(max(0, self.n - self.tagged - self.fails)),
+                  "[bold]rate[/]", f"{rate:.1f}/s")
+        parts = [self.prog, g]
+        spark = sparkline(self.hist)
+        if spark: parts.append(Text.assemble(("throughput  ", "bold"), (spark, "cyan")))
+        if self.newtags:
+            top = " · ".join(f"{t} ×{c}" for t, c in self.newtags.most_common(5))
+            parts.append(Text.assemble(("rising candidates  ", "bold"), (top, "magenta")))
+        return Panel(Group(*parts), border_style="cyan", padding=(0, 1),
+                     title=f"classify — {self.done_before + self.n}/{self.targets} total")
 
 
 # ---- apply: 'added_tags' + stamp #wrangled — standalone, no LLM calls ----
@@ -246,23 +318,16 @@ def classify_run(a):
     def work(b, d):
         out, err = ask_retry(prompt_for(d, a.max_tags)); vt, nt = parse_resp(out, a.max_tags); return b, err, vt, nt
 
-    fails = nproc = 0; failures = []
+    failures = []
     print(f"  {len(todo)} to do this run, {a.workers} concurrent")
-    prog = (Progress(TextColumn("[cyan]classifying"), BarColumn(), MofNCompleteColumn(),
-                     TextColumn("· {task.fields[stat]}"), TimeRemainingColumn(), console=_con)
-            if RICH and todo else None)
-    with ThreadPoolExecutor(max_workers=a.workers) as ex, (prog or nullcontext()):
-        task = prog.add_task("", total=len(todo), stat="") if prog else None
+    with ThreadPoolExecutor(max_workers=a.workers) as ex, _Dashboard(len(todo), len(done), len(targets)) as dash:
         futs = [ex.submit(work, b, d) for b, d in todo]
         for fut in as_completed(futs):
             b, err, vt, nt = fut.result()
-            if err: fails += 1; failures.append((b, err))
+            if err: failures.append((b, err))
             if vt or nt: proposal[b] = (vt, nt)
-            nproc += 1
-            if nproc % 50 == 0: dump()                # checkpoint regardless of UI
-            stat = f"{sum(1 for v in proposal.values() if v[0])} tagged, {fails} failed"
-            if prog: prog.update(task, advance=1, stat=stat)
-            elif nproc % 50 == 0: print(f"  +{nproc}/{len(todo)} this run, {len(done)+nproc}/{len(targets)} total … {stat}")
+            dash.update(vt, nt, err)
+            if dash.n % 50 == 0: dump()               # checkpoint regardless of UI
     dump()
     if failures:
         with open(FAIL, "w", newline="") as f:
@@ -291,7 +356,7 @@ def classify_run(a):
     print("\nApply vocab tags with: python3 classify.py --apply   (Calibre closed)")
 
 
-def main():
+def build_parser():
     p = argparse.ArgumentParser(description="Content-based tagging from a controlled vocabulary (LLM engines; dry-run until --apply).")
     p.add_argument("--engine", default="apple", choices=sorted(ENGINES), help="apple = on-device, free (default)")
     p.add_argument("--apply", action="store_true", help="apply 'added_tags' from the proposal + stamp #wrangled (Calibre closed)")
@@ -307,10 +372,17 @@ def main():
     p.add_argument("--timeout", type=int, default=60, metavar="S", help="per-request HTTP timeout")
     p.add_argument("--text-fallback", action="store_true", help="sample the book's own prose when the description is thin")
     p.add_argument("--yes", "-y", action="store_true", help="skip the large-cloud-run confirmation")
-    a = p.parse_args()
+    return p
+
+def normalize(a):
+    """Post-parse invariants shared by the CLI and the wizard."""
     if a.engine == "apple": a.workers = 1        # apple = one subprocess pipe, not thread-safe
     library()                                    # fail fast with a clear message
     os.makedirs(DATA, exist_ok=True)
+    return a
+
+def main():
+    a = normalize(build_parser().parse_args())
     if a.apply: apply_proposal()
     else: classify_run(a)
 

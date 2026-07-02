@@ -8,7 +8,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import common
 from common import norm, ascii_fold, load_config
 from wrangle import transform, resolve_trope_chains, build_tagcanon, is_junk
-from classify import parse_resp, VOCAB
+from classify import parse_resp, sparkline, VOCAB
+from staleness import derive
 
 BEH = load_config(path="/nonexistent/config.toml")["behavior"]     # shipped defaults
 
@@ -112,6 +113,21 @@ def test_parse_resp_rejects_list_echo_and_garbage():
 def test_parse_resp_rejects_formula_injection():
     _, nt = parse_resp('{"tags": [], "new": ["=SUM(A1:A9)", "+curse", "@cmd", "Sentient Toaster Romance"]}')
     assert nt == ["Sentient Toaster Romance"]
+
+def test_sparkline():
+    assert sparkline([]) == ""
+    assert sparkline([0, 0]) == "▁▁"                                   # flat zero series doesn't divide by zero
+    s = sparkline([1, 4, 8])
+    assert len(s) == 3 and s[-1] == "█" and s[0] < s[1] < s[2]         # monotonic input -> monotonic blocks
+    assert len(sparkline(list(range(100)), width=28)) == 28            # windowed to the last `width` points
+
+def test_staleness_derive():
+    assert derive("Completed", 10.0, 2, 5) == "Completed"              # final statuses never touched
+    assert derive("In-Progress", None, 2, 5) == "In-Progress"          # no date -> unchanged
+    assert derive("In-Progress", 1.0, 2, 5) == "In-Progress"
+    assert derive("In-Progress", 3.0, 2, 5) == "Hiatus"
+    assert derive("Hiatus", 6.0, 2, 5) == "Abandoned"
+    assert derive("Abandoned", 1.0, 2, 5) == "In-Progress"             # self-correcting on refresh
 
 def test_load_config_toml_reader():
     with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
