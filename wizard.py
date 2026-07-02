@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One-command guided wizard over the whole toolchain:
 
-    python3 wrangle.py            # no arguments — or equivalently: python3 wizard.py
+    uv run wrangle.py            # no arguments — or equivalently: uv run wizard.py
 
 Menu-driven: setup/health check, audit, normalize (the wrangle passes), staleness,
 AI classify with a live dashboard, and proposal review. Every write path previews
@@ -48,6 +48,7 @@ def header(info):
               if info["pending"] else "[dim]none pending[/]")
     if info["calibre"]:
         g.add_row("calibre", "[bold red]RUNNING[/] — reads work; any write will refuse until you close it")
+    g.add_row("loop", "[dim]new downloads? run 3 wrangle → 4 staleness → 5 classify → 6 review, in order[/]")
     ui.panel(g, title="[bold]calibre-wrangler[/]")
 
 
@@ -157,7 +158,7 @@ def run():
     library()                                 # fail fast with the clear CALIBRE_LIBRARY message
     if not ui.interactive():
         raise SystemExit("the wizard needs an interactive terminal — use the subcommands instead "
-                         "(python3 wrangle.py --help).")
+                         "(uv run wrangle.py --help).")
     while True:
         ui.clear()
         header(snapshot())

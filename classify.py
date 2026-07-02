@@ -4,8 +4,8 @@
   2) proposed_new  — short reusable tags the model thinks apply but are NOT in the vocab yet; aggregated into
                      classify_newtags_ranked.csv for review, so the vocabulary grows cleanly (promote -> vocab).
 
-  python3 classify.py [--engine apple|claude|openai|gemini] [--incremental] [--workers N] [--batch N] [--fresh]
-  python3 classify.py --apply                    # apply 'added_tags' + stamp #wrangled (Calibre CLOSED; writes shell to calibre-debug)
+  uv run classify.py [--engine apple|claude|openai|gemini] [--incremental] [--workers N] [--batch N] [--fresh]
+  uv run classify.py --apply                    # apply 'added_tags' + stamp #wrangled (Calibre CLOSED; writes shell to calibre-debug)
 
 Engines (--engine):  apple = on-device Apple Foundation Models via ./afm (free; macOS 26+).
           claude = Anthropic (ANTHROPIC_API_KEY) | openai = OpenAI (OPENAI_API_KEY) | gemini = Google (GEMINI_API_KEY).
@@ -347,7 +347,7 @@ def classify_run(a):
             for b, e in failures: w.writerow([b, titles.get(b, ""), e])
         bytype = collections.Counter(e.split(":")[0].split(" ")[0] for _, e in failures)
         print(f"failures: {len(failures)} -> {os.path.basename(FAIL)}  by type: {dict(bytype)}")
-        print("  (recover blocked books with a no-policy engine: python3 classify.py --engine apple)")
+        print("  (recover blocked books with a no-policy engine: uv run classify.py --engine apple)")
 
     ranked = collections.Counter()
     for vt, nt in proposal.values():
@@ -365,7 +365,7 @@ def classify_run(a):
     else:
         print("top new-tag candidates:")
         for t, cnt in ranked.most_common(25): print(f"  {cnt:4}  {t}")
-    print("\nApply vocab tags with: python3 classify.py --apply   (Calibre closed)")
+    print("\nApply vocab tags with: uv run classify.py --apply   (Calibre closed)")
 
 
 def build_parser():

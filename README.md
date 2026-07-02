@@ -7,10 +7,12 @@ library. Data-driven from **~1,700 bundled generic defaults**, fully customizabl
 reversible.
 
 ```bash
-pip install rich                                      # the one dependency (wizard + live dashboards)
 export CALIBRE_LIBRARY="$HOME/Calibre/fanfiction"     # folder containing metadata.db
-python3 wrangle.py                                    # ← the wizard: everything below, menu-driven
+uv run wrangle.py                                     # ← the wizard: everything below, menu-driven
 ```
+
+[uv](https://docs.astral.sh/uv/) handles the environment (one dependency: rich) — no install step.
+Plain `python3 wrangle.py` works too if rich is on your system Python (`pip install rich`).
 
 **The wizard** (no arguments) is the intended way in: a status header (library, book count, column
 health, pending proposal, Calibre-running warning) and a guided menu over every workflow — setup,
@@ -21,9 +23,9 @@ asks for confirmation, and auto-backs-up `metadata.db`.
 Each step is also a plain scriptable subcommand:
 
 ```bash
-python3 wrangle.py setup                              # interactive health check + setup (FanFicFare, columns, config)
-python3 wrangle.py audit                              # read-only dry-run report of every pass
-python3 wrangle.py apply --apply                      # write changes (Calibre CLOSED for this step)
+uv run wrangle.py setup                               # interactive health check + setup (FanFicFare, columns, config)
+uv run wrangle.py audit                               # read-only dry-run report of every pass
+uv run wrangle.py apply --apply                       # write changes (Calibre CLOSED for this step)
 ```
 
 Everything runs under plain `python3`. The tool reads via read-only sqlite and, for the actual writes,
@@ -152,12 +154,21 @@ stripped when the concept already lives in that book's structured column. `audit
 the path — that's your instant rollback (master rollback = a full "Export all Calibre data" backup).
 
 ## Maintenance — after new downloads / updates
-New stories arrive **raw**. `#genres`/`#status` are protected by `newonly` (above), but `tags` is
-not — so re-run the engine (it's idempotent and won't regress curated genres, since it uses the full
-`genres_allow.txt`):
+New stories arrive **raw** (junky subject tags, unfolded names). **Order matters — deterministic
+cleanup first, content tagging second**, because raw junk tags inflate a book's tag count and would
+hide it from the classifier's "sparsely tagged" targeting:
+
 ```bash
-python3 wrangle.py apply --apply                # write changes (Calibre closed)
+uv run wrangle.py apply --apply        # 1. wrangle FIRST: junk-drop/canonicalize the new raw tags (idempotent)
+uv run staleness.py --apply            # 2. free: re-derive #status from #updated age (independent, any time)
+uv run classify.py --incremental       # 3. cheap: content-tag only new/changed books -> proposal
+                                       # 4. review data/classify_proposal.csv
+uv run classify.py --apply             # 5. apply the reviewed tags + stamp #wrangled
 ```
+
+Or just `uv run wrangle.py` and walk the wizard menu in order: **3 wrangle → 4 staleness →
+5 classify → 6 review**. Re-running wrangle is always safe — it's idempotent and won't regress
+curated genres (it uses the full `genres_allow.txt`).
 
 ---
 
@@ -168,8 +179,8 @@ from the **controlled vocabulary** (`defaults/classify_vocab.txt`), which get ap
 review and **promote** the recurring ones into the vocab. Grows the tag set deliberately, without freeform noise.
 
 ```bash
-python3 classify.py --engine apple --limit 50        # propose -> data/classify_proposal.csv (dry-run, read-only)
-python3 classify.py --apply                          # add the proposed tags (Calibre CLOSED)
+uv run classify.py --engine apple --limit 50        # propose -> data/classify_proposal.csv (dry-run, read-only)
+uv run classify.py --apply                          # add the proposed tags (Calibre CLOSED)
 ```
 - `--engine apple` — on-device **Apple Foundation Models** via `afm.swift` (free, private; macOS 26+,
   Apple Intelligence). Build once: `swiftc -O afm.swift -o afm`. Lower quality — prone to over-tagging,
@@ -206,7 +217,7 @@ The bundled `defaults/` are generic. Two helper workflows mined library-specific
   `calibre-debug` by `run_writer()`, never by hand
 - **`build_defaults.py`** — maintainer tool: regenerates `defaults/` from the review maps in `data/`
 - **`defaults/`** (shipped) · **`overrides/`** (yours, gitignored) · **`data/`** (your review maps,
-  proposals, intermediates — gitignored) · **`tests/`** (`python3 tests/test_core.py`, no library needed)
+  proposals, intermediates — gitignored) · **`tests/`** (`uv run tests/test_core.py`, no library needed)
 - **`attic/`** — the original single-purpose pipeline, kept as provenance (see `attic/README.md`);
   `wrangle.py` supersedes it.
 

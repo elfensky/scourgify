@@ -3,9 +3,9 @@
 
 Set CALIBRE_LIBRARY to your library folder first, then (everything runs under plain python3;
 writes shell out to calibre-debug automatically):
-  python3 wrangle.py setup            # interactive health check + first-run wizard
-  python3 wrangle.py audit            # read-only dry-run report of every pass
-  python3 wrangle.py apply --apply    # write changes  (Calibre must be CLOSED)
+  uv run wrangle.py setup            # interactive health check + first-run wizard
+  uv run wrangle.py audit            # read-only dry-run report of every pass
+  uv run wrangle.py apply --apply    # write changes  (Calibre must be CLOSED)
 """
 import os, sys, re, csv, collections
 from common import HERE, DEFAULTS as DEF, norm, ascii_fold, load_config, library, ro_connect, read_custom_column, run_writer
@@ -304,7 +304,7 @@ def apply_changes(cfg, m, do_write, force=False):
     if do_write:
         run_writer([{"op": "set_field", "field": lab, "values": {str(b): v for b, v in ch.items()}} for lab, ch in changes.items()])
     else:
-        print("Re-run: python3 wrangle.py apply --apply   (Calibre closed; writes shell out to calibre-debug)")
+        print("Re-run: uv run wrangle.py apply --apply   (Calibre closed; writes shell out to calibre-debug)")
 
 def write_config(colmap, beh=None):
     b = beh or {}                                     # preserve existing toggles on re-run; defaults on first run
@@ -426,9 +426,9 @@ def setup(cfg):
         run_writer(ops)
     print("\n" + "-" * 64)
     print("Setup complete. Next:")
-    print("  python3 wrangle.py audit          # read-only dry-run of all passes")
-    print("  python3 wrangle.py apply --apply  # write changes (Calibre closed; backs up first)")
-    print("  python3 classify.py --incremental # content-tag new/updated books (cheap)")
+    print("  uv run wrangle.py audit          # read-only dry-run of all passes")
+    print("  uv run wrangle.py apply --apply  # write changes (Calibre closed; backs up first)")
+    print("  uv run classify.py --incremental # content-tag new/updated books (cheap)")
 
 # ---------------- main ----------------
 if __name__ == "__main__":

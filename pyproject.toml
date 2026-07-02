@@ -1,0 +1,18 @@
+[project]
+name = "calibre-wrangler"
+version = "1.0.0"
+description = "Normalize and consolidate tags/fandoms/characters/genres in a FanFicFare-imported Calibre library"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Andrei Lavrenov", email = "andrei@lav.ren" }]
+dependencies = [
+    "rich>=13",
+]
+
+# Flat scripts repo, not an installable package: uv manages the venv + dependencies
+# for `uv run <tool>.py`, but never tries to build/install this project itself.
+# (_writer.py is excluded from all of this — it runs under calibre-debug's bundled Python.)
+[tool.uv]
+package = false

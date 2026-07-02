@@ -14,6 +14,7 @@ overrides/
 # Python / OS cruft
 __pycache__/
 *.pyc
+.venv/
 .DS_Store
 
 # compiled Apple FM bridge binary (build from afm.swift)

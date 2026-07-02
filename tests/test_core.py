@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Regression tests for the pure core — the functions where a data-loss bug would live.
-No framework needed:  python3 tests/test_core.py   (also collectable by pytest).
+No framework needed:  uv run tests/test_core.py   (also collectable by pytest).
 No Calibre, no library, no network."""
 import os, sys, tempfile
 

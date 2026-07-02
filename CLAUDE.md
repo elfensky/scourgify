@@ -18,10 +18,10 @@ Everything keys off `CALIBRE_LIBRARY` (the folder containing `metadata.db`):
 
 ```bash
 export CALIBRE_LIBRARY="$HOME/Calibre/fanfiction"
-python3 wrangle.py                                    # no args = the interactive wizard (rich required; TTY only)
-python3 wrangle.py setup                              # interactive health check + setup (FanFicFare, columns, config)
-python3 wrangle.py audit                              # read-only dry-run of every pass
-python3 wrangle.py apply --apply                      # write changes (Calibre CLOSED for the write step)
+uv run wrangle.py                                    # no args = the interactive wizard (rich required; TTY only)
+uv run wrangle.py setup                              # interactive health check + setup (FanFicFare, columns, config)
+uv run wrangle.py audit                              # read-only dry-run of every pass
+uv run wrangle.py apply --apply                      # write changes (Calibre CLOSED for the write step)
 ```
 
 **`wizard.py`** (launched by bare `wrangle.py`, or directly) is a menu wizard over all workflows: status
@@ -31,8 +31,9 @@ guardrails and auto-backup apply identically; guardrail `SystemExit`s return to 
 the shared rich Console + prompt helpers (lintle `term.py` pattern). classify runs render a live
 dashboard (`classify._Dashboard`: progress, tagged/failed/rate, throughput sparkline, rising candidates).
 
-**Everything runs under plain `python3`** (system Python, rich-capable). The core operating rule is about
-*reads vs writes*, not which interpreter:
+**Everything runs under normal CPython** — `uv run` (pyproject manages the venv + rich; `[tool.uv] package
+= false`, this is a scripts repo, not an installable package) or plain `python3` with rich installed. The
+core operating rule is about *reads vs writes*, not which interpreter:
 - **Reads** (audit, classify proposal, setup health check) — read-only `sqlite3 ... mode=ro`; fine while Calibre is open.
 - **Writes** — the standalone tool computes the change-set, serializes it to JSON, and shells out **once** to
   `calibre-debug -e _writer.py -- ops.json` (Calibre's API is the only fast batch-write path; `calibredb set_metadata`
@@ -46,7 +47,7 @@ dashboard (`classify._Dashboard`: progress, tagged/failed/rate, throughput spark
   `ro_connect()`, link-table-aware `read_custom_column()`, `norm`/`ascii_fold`, the minimal TOML `load_config()`,
   and `run_writer()`. Don't re-implement any of these in a tool script.
 
-Verification: `python3 tests/test_core.py` (plain asserts, pytest-compatible, no library/network needed) pins the
+Verification: `uv run tests/test_core.py` (plain asserts, pytest-compatible, no library/network needed) pins the
 pure core — `transform`, trope-chain resolution, `parse_resp`, the TOML reader. `wrangle.py audit` remains the
 against-your-library check: full new state, before/after counts, and SAFETY lines asserting **no book loses its
 last fandom or character** plus a **tag mass-deletion guardrail** (`apply` aborts if tags would shrink >25% and
@@ -54,12 +55,18 @@ last fandom or character** plus a **tag mass-deletion guardrail** (`apply` abort
 
 ## Maintenance loop (after new FanFicFare downloads)
 
+**Order matters: deterministic cleanup (wrangle) FIRST, content tagging (classify) second** — raw
+junk tags inflate a book's tag count and would hide it from the classifier's sparse-book targeting.
+
 ```
-FFF fetch → python3 staleness.py --apply        # free; re-derive #status from #updated age
-          → python3 classify.py --incremental    # cheap; only books changed since last wrangle
-          → review data/classify_proposal.csv
-          → python3 classify.py --apply           # Calibre closed (writes shell to calibre-debug)
+FFF fetch → uv run wrangle.py apply --apply      # 1. junk-drop/canonicalize the new raw tags (idempotent)
+          → uv run staleness.py --apply          # 2. free; re-derive #status from #updated age
+          → uv run classify.py --incremental     # 3. cheap; only books changed since last wrangle
+          → review data/classify_proposal.csv    # 4.
+          → uv run classify.py --apply           # 5. Calibre closed (writes shell to calibre-debug)
 ```
+
+(Or the wizard: `uv run wrangle.py` → menu 3 → 4 → 5 → 6.)
 
 **⚠️ Cost:** a full Gemini `classify --fresh` pass over the library ≈ **€50** in tokens. Never run `--fresh`
 casually — use `--incremental` (only changed/new books), `--batch N`, or `--engine apple` (free, on-device).
