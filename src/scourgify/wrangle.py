@@ -174,21 +174,15 @@ def transform(d, m, beh, known_chars=frozenset(), tagcanon=None):
     had_real_F = any(m["fan"].get(f, f) and norm(m["fan"].get(f, f)) not in m["fan_block"] for f in F)
     return newd, (had_real_F and not nF), (had_C and not nC)
 
-# ---------------- column resolution ----------------
-def fff_columns_from_prefs(get_pref):
-    """Read FanFicFare's custom_cols mapping from the library prefs, if present."""
-    try:
-        s = get_pref("namespaced:FanFicFarePlugin:settings") or {}
-        return s.get("custom_cols", {}) or {}
-    except Exception:
-        return {}
-
 # ---------------- AUDIT (read-only sqlite) ----------------
 def col_key_label(cfg):
     return {k: v for k, v in cfg["columns"].items() if v}     # col_key -> calibre label
 
 def read_library(cfg):
-    """Read all configured columns per book via read-only sqlite. -> (cols, perbook, present, nb, allb)."""
+    """Read all configured columns per book via read-only sqlite. -> (cols, perbook, present, nb, allb).
+    Always the whole library, deliberately: transform() needs global context (tagcanon majority
+    spelling, known_chars), runs in seconds, and apply only writes books that actually changed —
+    scoped selection (select.py) is for the expensive LLM pass, not this one."""
     cols = col_key_label(cfg)
     con = ro_connect(); c = con.cursor()
     perbook = collections.defaultdict(lambda: collections.defaultdict(list)); present = {}
@@ -283,7 +277,8 @@ def tag_loss_guard(tags_before, tags_after, force):
         raise SystemExit(f"ABORT: tags would shrink {tags_before} -> {tags_after} assignments (-{lost}). "
                          "Check junk.txt / overrides for an over-broad rule, or re-run with --force.")
 
-def apply_changes(cfg, m, do_write, force=False):
+def apply_changes(cfg, m, do_write, force=False, cli_hint=True):
+    """-> number of distinct books that would change (the wizard uses it to auto-skip a clean library)."""
     beh = cfg["behavior"]
     cols, perbook, present, nb, allb = read_library(cfg)
     known_chars = {norm(v) for bb in perbook for v in perbook[bb].get("characters", [])}
@@ -303,8 +298,9 @@ def apply_changes(cfg, m, do_write, force=False):
     tag_loss_guard(tagsB, tagsA, force)
     if do_write:
         run_writer([{"op": "set_field", "field": lab, "values": {str(b): v for b, v in ch.items()}} for lab, ch in changes.items()])
-    else:
+    elif cli_hint:
         print("Re-run: scourgify apply --apply   (Calibre closed; writes shell out to calibre-debug)")
+    return len({b for ch in changes.values() for b in ch})
 
 def write_config(colmap, beh=None):
     b = beh or {}                                     # preserve existing toggles on re-run; defaults on first run

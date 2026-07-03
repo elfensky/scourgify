@@ -26,16 +26,27 @@ uv run scourgify apply --apply                       # write changes (Calibre CL
 
 (`uv run scourgify` from a checkout; an installed copy — `pipx install scourgify` — drops the `uv run`.)
 
-**`wizard.py`** (launched by bare `scourgify`) is a guiding menu wizard: on launch it
-detects an un-set-up library (missing columns / no config.toml) and routes to setup; the header shows
-books, column health, new/changed-since-last-run count, pending proposal, Calibre-open warning; the
-menu default adapts via `recommend()` (setup → review-pending → maintenance → audit). Item 0
-(`act_flow`) is a guided maintenance run sequencing wrangle → staleness → classify → review with
-per-step explanations and skips. It calls the same engine functions the subcommands do (previews →
-confirm → write), so guardrails and auto-backup apply identically; guardrail `SystemExit`s return to
-the menu. `ui.py` holds the shared rich Console + prompt helpers (lintle `term.py` pattern). classify
+**`wizard.py`** (launched by bare `scourgify`) is a **linear guided lifecycle — no menu**: header
+(books, column health, new/changed count via `select.changed`, pending proposal, Calibre-open
+warning) → setup if columns/config are missing → then the four stages in order, **wrangle →
+staleness → classify → review**, each dry-running first, showing its report, and asking before
+writing (a clean stage auto-skips). There is no separate audit step — the wrangle stage's dry run IS
+the audit; `scourgify audit` stays for the full per-value detail. The classify stage auto-targets
+new/changed books only, shows per-engine cost estimates (`classify.est_cost`, list prices in
+`classify.PRICING`), offers an engine **bake-off** (`classify.bakeoff`: the same ~5 sample books
+through every usable engine, display-only), and enables `--text-fallback` so thin descriptions get
+sampled rather than dropped. The review stage offers apply / keep / discard (discard archives to
+`*_discarded_*.csv`). Stages call the same engine functions the subcommands do (previews → confirm →
+write), so guardrails and auto-backup apply identically; guardrail `SystemExit`s skip the stage, not
+the run. `ui.py` holds the shared rich Console + prompt helpers (lintle `term.py` pattern). classify
 runs render a live dashboard (`classify._Dashboard`: progress, tagged/failed/rate, throughput
 sparkline, rising candidates).
+
+**`select.py`** — the one owner of "which books does this run operate on"; classify's scope flags and
+the wizard header both go through it, so they can never disagree. A book is new/changed iff unstamped
+∨ `#updated` > stamp ∨ added-date (`books.timestamp`) > stamp — the added-date clock catches re-fetches
+(FanFicFare bumps it) while staying immune to scourgify's own writes (`last_modified` is deliberately
+NOT used). All pickers return newest-added-first.
 
 **Packaging.** The code is a proper installable package under `src/scourgify/` (hatchling; on PyPI as
 `scourgify`). The single `scourgify` console command (`cli.py`) dispatches argv to the tools: bare → wizard,
@@ -61,7 +72,9 @@ dir (use it only for shipped read-only files); anything user-writable keys off `
   and `run_writer()`. Don't re-implement any of these in a tool script.
 
 Verification: `uv run tests/test_core.py` (plain asserts, pytest-compatible, no library/network needed) pins the
-pure core — `transform`, trope-chain resolution, `parse_resp`, the TOML reader. `scourgify audit` remains the
+pure core — `transform`, trope-chain resolution, `parse_resp`, the TOML reader — and
+`uv run tests/test_selection.py` pins the selection semantics against a throwaway sqlite `metadata.db` built
+by `tests/fixture_db.py` (covers both custom-column storage shapes). CI runs both. `scourgify audit` remains the
 against-your-library check: full new state, before/after counts, and SAFETY lines asserting **no book loses its
 last fandom or character** plus a **tag mass-deletion guardrail** (`apply` aborts if tags would shrink >25% and
 >200 assignments — the signature of an over-broad junk rule; `--force` overrides).
@@ -74,12 +87,13 @@ junk tags inflate a book's tag count and would hide it from the classifier's spa
 ```
 FFF fetch → uv run scourgify apply --apply           # 1. junk-drop/canonicalize the new raw tags (idempotent)
           → uv run scourgify staleness --apply       # 2. free; re-derive #status from #updated age
-          → uv run scourgify classify --incremental  # 3. cheap; only books changed since last wrangle
+          → uv run scourgify classify --incremental  # 3. cheap; only new/changed books (see select.py)
           → review data/classify_proposal.csv        # 4.
           → uv run scourgify classify --apply        # 5. Calibre closed (writes shell to calibre-debug)
 ```
 
-(Or the wizard: `uv run scourgify` → menu 3 → 4 → 5 → 6.)
+(Or the wizard: `uv run scourgify` walks exactly this loop, guided. Targeted redo:
+`classify --last 30` / `--since DATE`.)
 
 **⚠️ Cost:** a full Gemini `classify --fresh` pass over the library ≈ **€50** in tokens. Never run `--fresh`
 casually — use `--incremental` (only changed/new books), `--batch N`, or `--engine apple` (free, on-device).
@@ -102,16 +116,20 @@ concept already lives in that book's structured column (**backfill-before-strip*
 into the numbered Series field, and aggressive franchise unification (e.g. all Fate/Nasuverse → `Type-Moon`).
 
 **`classify.py` — content-based tagging** (separate from the deterministic engine; uses an LLM). Two outputs
-per book: `added_tags` (chosen from the controlled vocab `defaults/classify_vocab.txt` → applied) and
-`proposed_new` (novel candidates → aggregated to `classify_newtags_ranked.csv` for review→promotion, so the
-vocab grows without freeform noise). Engines `--engine apple|claude|openai|gemini` (keys via env:
-`ANTHROPIC_/OPENAI_/GEMINI_API_KEY`); `apple` = on-device, free, single-threaded. Concurrency via
-`ThreadPoolExecutor` (`--workers`), retry/backoff, incremental save + resume. `--text-fallback` samples the
-book's own prose (EPUB via zipfile, other formats via `ebook-convert`) when the `#comments` description is
-too thin. `--incremental` re-tags only books whose `#updated` is newer than their per-book **`#wrangled`**
-datetime marker (auto-created and stamped on `--apply`) — state lives in the library, no external file.
+per book: `added_tags` (chosen from the controlled vocab — bundled `defaults/classify_vocab.txt` merged with
+the user's `overrides/classify_vocab.txt` via `load_vocab()`, lazily, so installed copies stay overridable →
+applied) and `proposed_new` (novel candidates → aggregated to `classify_newtags_ranked.csv` for
+review→promotion, so the vocab grows without freeform noise). Engines `--engine apple|claude|openai|gemini`
+(keys via env: `ANTHROPIC_/OPENAI_/GEMINI_API_KEY`); `apple` = on-device, free, single-threaded. Concurrency
+via `ThreadPoolExecutor` (`--workers`), retry/backoff, incremental save + resume. `--text-fallback` samples
+the book's own prose (EPUB via zipfile, other formats via `ebook-convert`) when the description (Calibre's
+built-in `comments` table) is too thin. Scope flags (`--incremental` / `--last N` / `--since DATE`) go through
+`select.pick` and select ONLY their books; the sparse-book default (`< --min-tags`) applies only with no scope
+flag. `--apply` auto-creates the **`#wrangled`** datetime marker and stamps **every processed book** (a no-tag
+book left unstamped would be re-sent to the LLM forever) — state lives in the library, no external file.
 Proposals/outputs live in `data/` (gitignored); `--apply` archives the proposal to
-`classify_proposal_applied_<ts>.csv` so stale rows never re-add hand-removed tags.
+`classify_proposal_applied_<ts>.csv` so stale rows never re-add hand-removed tags. `est_cost`/`PRICING` hold
+the public list prices behind the wizard's per-engine estimates; `bakeoff()` is the sample comparison.
 
 **`staleness.py`** — re-derives `#status` for the activity family {In-Progress, Hiatus, Abandoned} from
 `#updated` age (`<2y`→In-Progress, `2–5y`→Hiatus, `≥5y`→Abandoned); idempotent + self-correcting on re-run.

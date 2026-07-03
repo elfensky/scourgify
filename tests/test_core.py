@@ -8,7 +8,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from scourgify import common
 from scourgify.common import norm, ascii_fold, load_config
 from scourgify.wrangle import transform, resolve_trope_chains, build_tagcanon, is_junk
-from scourgify.classify import parse_resp, sparkline, VOCAB
+from scourgify.classify import parse_resp, sparkline, load_vocab
+VOCAB = load_vocab()
 from scourgify.staleness import derive
 
 BEH = load_config(path="/nonexistent/config.toml")["behavior"]     # shipped defaults
@@ -138,6 +139,26 @@ def test_load_config_toml_reader():
     assert cfg["columns"]["tags"] == "#my tags"
     assert cfg["behavior"]["fold_characters"] is False
     assert cfg["behavior"]["ascii_only_tags"] is True                  # untouched default survives
+
+def test_vocab_overrides_merge():
+    from scourgify import classify
+    with tempfile.TemporaryDirectory() as td:
+        os.makedirs(os.path.join(td, "overrides"))
+        with open(os.path.join(td, "overrides", "classify_vocab.txt"), "w") as f:
+            f.write("# my terms\nSentient Toaster Romance\n-Time Travel\n")
+        old = os.getcwd(); os.chdir(td); classify._VOCAB = None       # vocab is cached per CWD
+        try:
+            v = classify.load_vocab()
+            assert "Sentient Toaster Romance" in v                     # appended
+            assert "Time Travel" not in v                              # '-term' removed a bundled term
+        finally:
+            os.chdir(old); classify._VOCAB = None
+
+def test_est_cost():
+    from scourgify.classify import est_cost
+    assert est_cost(100, "apple") == 0.0                               # on-device is free
+    assert 0 < est_cost(100, "gemini") < est_cost(100, "claude")       # scales with list price
+    assert est_cost(200, "gemini") == 2 * est_cost(100, "gemini")      # linear in books
 
 
 if __name__ == "__main__":

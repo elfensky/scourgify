@@ -11,13 +11,16 @@ Engines (--engine):  apple = on-device Apple Foundation Models via ./afm (free; 
           claude = Anthropic (ANTHROPIC_API_KEY) | openai = OpenAI (OPENAI_API_KEY) | gemini = Google (GEMINI_API_KEY).
           --model overrides the per-engine default. Only books with < --min-tags tags AND a description are processed.
           Runs are resumable (skip books already in the proposal; --fresh restarts). Dry-run until --apply.
---incremental = cheap maintenance after new downloads: (re)process only books whose #updated is newer than their own
-          #wrangled marker (or never wrangled), plus any still untagged. --apply auto-creates the #wrangled datetime
-          column and stamps each tagged book, so the state lives IN the library — no external file. (--since DATE
-          forces an explicit cutoff against #updated.) Avoids the ~full-library cost of a --fresh pass."""
+--incremental = cheap maintenance after new downloads: (re)process ONLY new/changed books — never classified,
+          #updated newer than their own #wrangled marker, or re-fetched (added-date newer). --last N / --since DATE
+          instead select by added/updated date ("update the last 30 books"). Scoped runs select exactly their books;
+          the sparse-book default (< --min-tags) applies only when no scope flag is given. --apply auto-creates the
+          #wrangled datetime column and stamps EVERY processed book, so the state lives IN the library — no external
+          file. Selection semantics live in select.py (shared with the wizard header)."""
 import argparse, os, re, csv, json, subprocess, collections, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from scourgify.common import HERE, DATA, ro_connect, read_custom_column, custom_column_id, run_writer, library
+from scourgify import select
+from scourgify.common import HERE, DATA, ro_connect, custom_column_id, run_writer, library
 try:                                              # rich is optional: live dashboard/tables in system python3
     from rich.console import Console, Group
     from rich.live import Live
@@ -29,12 +32,36 @@ try:                                              # rich is optional: live dashb
 except ImportError:
     RICH = False
 
-VOCAB = [l.strip() for l in open(f"{HERE}/defaults/classify_vocab.txt") if l.strip() and not l.startswith("#")]
-VLOW = {v.lower(): v for v in VOCAB}
 PROP = f"{DATA}/classify_proposal.csv"
 RANK = f"{DATA}/classify_newtags_ranked.csv"
 FAIL = f"{DATA}/classify_failures.csv"
 SPEND_GATE = 200        # cloud runs above this many books require an explicit yes
+
+# $/MTok (input, output) for each engine's default model — public list prices as of 2026-07; edit when they change.
+PRICING = {"apple": (0.0, 0.0), "claude": (1.00, 5.00), "openai": (0.15, 0.60), "gemini": (0.30, 2.50)}
+
+_VOCAB = None
+def load_vocab():
+    """Bundled vocab + optional CWD overrides/classify_vocab.txt (a line appends a term; '-term' removes one).
+    Lazy so a packaging problem gives a real error at use, not at import, and installed users can override."""
+    global _VOCAB
+    if _VOCAB is None:
+        terms = [l.strip() for l in open(f"{HERE}/defaults/classify_vocab.txt") if l.strip() and not l.startswith("#")]
+        ov = os.path.join(os.getcwd(), "overrides", "classify_vocab.txt")
+        if os.path.exists(ov):
+            for l in open(ov):
+                l = l.strip()
+                if not l or l.startswith("#"): continue
+                if l.startswith("-"): terms = [t for t in terms if t.lower() != l[1:].strip().lower()]
+                elif l.lower() not in {t.lower() for t in terms}: terms.append(l)
+        _VOCAB = terms
+    return _VOCAB
+
+def est_cost(n_books, engine):
+    """Rough list-price $ estimate for a run: input ≈ prompt chars/4 tokens, output ≈ 80 tokens/book."""
+    i, o = PRICING.get(engine, (0.0, 0.0))
+    tokens_in = (len(", ".join(load_vocab())) + 1900) / 4      # vocab + 1500-char description + instructions
+    return n_books * (tokens_in * i + 80 * o) / 1e6
 
 
 def prompt_for(desc, maxtags):
@@ -43,20 +70,21 @@ def prompt_for(desc, maxtags):
             "be conservative; [] if vague; do NOT echo the whole list).\n"
             '  "new": up to 3 SHORT reusable trope/genre/theme tags (Title Case) that clearly apply but are NOT in the '
             "list and would be worth adding to the vocabulary. No plot specifics, character names, or fandoms; [] if none.\n"
-            f"CONTROLLED LIST: {', '.join(VOCAB)}\n\nDESCRIPTION:\n{desc[:1500]}\n\nJSON:")
+            f"CONTROLLED LIST: {', '.join(load_vocab())}\n\nDESCRIPTION:\n{desc[:1500]}\n\nJSON:")
 
 def parse_resp(text, maxtags=6):
     m = re.search(r"\{.*\}", text, re.S)
     if not m: return [], []
     try: obj = json.loads(m.group(0))
     except Exception: return [], []
-    vt = [VLOW[str(t).strip().lower()] for t in obj.get("tags", []) if str(t).strip().lower() in VLOW]
+    vlow = {v.lower(): v for v in load_vocab()}
+    vt = [vlow[str(t).strip().lower()] for t in obj.get("tags", []) if str(t).strip().lower() in vlow]
     if len(vt) > maxtags * 2: vt = []          # model echoed the list, not selecting
     nt, seen = [], set()
     for t in obj.get("new", []):
         t = str(t).strip()
         # first char must be alphanumeric: also blocks =/+/-/@ spreadsheet-formula injection in the review CSVs
-        if t and t[0].isalnum() and 1 < len(t) <= 40 and t.lower() not in VLOW and t.lower() not in seen:
+        if t and t[0].isalnum() and 1 < len(t) <= 40 and t.lower() not in vlow and t.lower() not in seen:
             seen.add(t.lower()); nt.append(t)
     return vt[:maxtags], nt[:3]
 
@@ -201,21 +229,23 @@ def apply_proposal():
     cur = collections.defaultdict(list)
     for b, t in con.execute("SELECT l.book, t.name FROM books_tags_link l JOIN tags t ON t.id=l.tag"): cur[b].append(t)
     have_wrangled = custom_column_id(con, "wrangled") is not None
-    chg = {}
+    chg, processed = {}, []
     for r in csv.DictReader(open(PROP)):
-        b = int(r["book_id"]); tags = [t for t in r.get("added_tags", "").split("; ") if t.strip()]
+        b = int(r["book_id"]); processed.append(b)
+        tags = [t for t in r.get("added_tags", "").split("; ") if t.strip()]
         if tags: chg[str(b)] = sorted(set(cur.get(b, [])) | set(tags))   # union with current tags
     ops = []
     if not have_wrangled:                                             # first run: create + backfill whole library as wrangled-now
         ops.append({"op": "create_column", "label": "wrangled", "name": "Wrangled", "datatype": "datetime", "is_multiple": False})
         ops.append({"op": "stamp_now", "field": "#wrangled", "books": None})
     ops.append({"op": "set_field", "field": "tags", "values": chg})
-    ops.append({"op": "stamp_now", "field": "#wrangled", "books": [int(b) for b in chg]})
+    # stamp EVERY processed book, tagged or not — an unstamped no-tag book would be re-sent to the LLM forever
+    ops.append({"op": "stamp_now", "field": "#wrangled", "books": processed})
     run_writer(ops)
     # archive so a later --apply can't re-add tags you've since hand-removed (stale rows never re-apply)
     arch = PROP.replace(".csv", f"_applied_{time.strftime('%Y%m%d-%H%M%S')}.csv")
     os.rename(PROP, arch)
-    print(f"applied tags to {len(chg)} books + stamped #wrangled; proposal archived -> {os.path.basename(arch)}")
+    print(f"applied tags to {len(chg)} books + stamped #wrangled on {len(processed)} processed; proposal archived -> {os.path.basename(arch)}")
 
 
 # ---- gather books (read-only) ----
@@ -244,19 +274,18 @@ def book_text(path, limit=6000):
     except Exception: return ""
 
 def gather(a):
-    """-> (targets [(book, text)], titles, needs) for books under --min-tags or changed since last wrangle."""
+    """-> (targets [(book, text)], titles, needs). Scope comes from the flags, first match wins:
+    --incremental / --last N / --since DATE select ONLY matching books (newest-added-first);
+    bare classify keeps the sparse mode (fewer than --min-tags tags). `needs(b)` is True for
+    explicitly scoped books — the resume logic uses it to re-process them even if already proposed."""
     con = ro_connect(); c = con.cursor()
-    tagn = {b: 0 for (b,) in c.execute("SELECT id FROM books")}
-    for (b,) in c.execute("SELECT book FROM books_tags_link"): tagn[b] = tagn.get(b, 0) + 1
+    if a.incremental: ids, scope = select.pick(con, "incremental"), "new/changed since last classify"
+    elif a.last:      ids, scope = select.pick(con, "last", n=a.last), f"last {a.last} added"
+    elif a.since:     ids, scope = select.pick(con, "since", since=a.since), f"added/updated since {a.since}"
+    else:             ids, scope = select.pick(con, "sparse", min_tags=a.min_tags), f"fewer than {a.min_tags} tags"
+    explicit = set(ids) if (a.incremental or a.last or a.since) else set()
+    def needs(b): return b in explicit
     desc = {b: t for b, t in c.execute("SELECT book, text FROM comments")}
-    updated = wrangled = {}
-    if a.since or a.incremental:
-        updated = {b: str(v)[:10] for b, v in (read_custom_column(con, "#updated") or {}).items()}
-        if a.incremental: wrangled = {b: str(v)[:10] for b, v in (read_custom_column(con, "#wrangled") or {}).items()}
-    def needs(b):                                 # changed since we last tagged it, or after an explicit --since date
-        if a.incremental and (b not in wrangled or updated.get(b, "") > wrangled.get(b, "")): return True
-        if a.since and updated.get(b, "") >= a.since: return True
-        return False
     bookfile = {}
     if a.text_fallback:                           # when the description is thin, sample the book's own text
         bp = {b: p for b, p in c.execute("SELECT id, path FROM books")}
@@ -270,17 +299,36 @@ def gather(a):
         if len(d) >= 80 or not a.text_fallback: return d
         et = book_text(bookfile.get(b, ""))
         return (d + " " + et).strip() if et else d
-    targets = [(b, text_for(b)) for b in tagn if tagn[b] < a.min_tags or needs(b)]
-    if a.incremental or a.since: print(f"  incremental: {sum(1 for b in tagn if needs(b))} books changed since last wrangle")
-    targets = [(b, t) for b, t in targets if t and len(t) >= 40]
+    targets = [(b, text_for(b)) for b in ids]
+    kept = [(b, t) for b, t in targets if t and len(t) >= 40]
+    print(f"  scope: {scope} -> {len(ids)} books")
+    if len(kept) < len(targets):                  # no silent drops: thin descriptions are reported, not vanished
+        print(f"  note: {len(targets) - len(kept)} dropped (description under 40 chars"
+              + (")" if a.text_fallback else "; --text-fallback samples the book text instead)"))
     titles = {b: t for b, t in c.execute("SELECT id, title FROM books")}
-    if a.limit: targets = targets[:a.limit]
-    return targets, titles, needs
+    if a.limit: kept = kept[:a.limit]
+    return kept, titles, needs
+
+
+def bakeoff(a, targets, engines, n=5):
+    """The same n sample books through each engine, sequentially — for comparing output quality
+    before committing to a full run. -> {book: {engine: (vocab_tags, new_tags, err)}}.
+    Display-only: never touches the proposal CSV."""
+    out = {}
+    for e in engines:
+        eng = ENGINES[e]("", a.timeout)                       # per-engine default model
+        for b, d in targets[:n]:
+            try:
+                vt, nt = parse_resp(eng.ask(prompt_for(d, a.max_tags)), a.max_tags); err = ""
+            except Exception as ex:
+                vt, nt, err = [], [], f"{type(ex).__name__}: {ex}"[:60]
+            out.setdefault(b, {})[e] = (vt, nt, err)
+    return out
 
 
 def classify_run(a):
     targets, titles, needs = gather(a)
-    print(f"engine={a.engine}  books to process (< {a.min_tags} tags, has description): {len(targets)}")
+    print(f"engine={a.engine}  candidate books: {len(targets)}")
 
     proposal, done = {}, set()                     # book -> (vocab_tags, proposed_new_tags)
     if os.path.exists(PROP) and not a.fresh:       # resume: skip books already in proposal
@@ -372,8 +420,9 @@ def build_parser():
     p = argparse.ArgumentParser(description="Content-based tagging from a controlled vocabulary (LLM engines; dry-run until --apply).")
     p.add_argument("--engine", default="apple", choices=sorted(ENGINES), help="apple = on-device, free (default)")
     p.add_argument("--apply", action="store_true", help="apply 'added_tags' from the proposal + stamp #wrangled (Calibre closed)")
-    p.add_argument("--incremental", action="store_true", help="only books whose #updated is newer than their #wrangled marker")
-    p.add_argument("--since", default="", metavar="DATE", help="(re)process books with #updated >= this ISO date")
+    p.add_argument("--incremental", action="store_true", help="only new/changed books (never classified, #updated newer than their #wrangled marker, or re-fetched)")
+    p.add_argument("--last", type=int, default=0, metavar="N", help="(re)process the N most recently added books")
+    p.add_argument("--since", default="", metavar="DATE", help="(re)process books added or site-updated on/after this ISO date")
     p.add_argument("--fresh", action="store_true", help="ignore the existing proposal and restart (a full cloud pass costs real money)")
     p.add_argument("--batch", type=int, default=0, metavar="N", help="process only N new books this run (re-run resumes)")
     p.add_argument("--limit", type=int, default=0, metavar="N", help="hard cap on candidate books")

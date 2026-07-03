@@ -15,21 +15,22 @@ reversible.
 pipx install scourgify                                # or: uv tool install scourgify  (one dependency: rich)
 
 export CALIBRE_LIBRARY="$HOME/Calibre/fanfiction"     # folder containing metadata.db
-scourgify                                             # ← the wizard: everything below, menu-driven
+scourgify                                             # ← the wizard: the whole lifecycle, guided
 ```
 
 Requires **Calibre installed** — the tool reads via read-only sqlite and shells out to Calibre's own
 `calibre-debug` for writes. From a checkout, `uv run scourgify` (or `uvx --from . scourgify`) runs it
 without installing; [uv](https://docs.astral.sh/uv/) handles the environment (one dependency: rich).
 
-**The wizard** (no arguments) is the intended way in — and it steers you: on a fresh library it
-detects missing columns/config and offers to run **setup** immediately; afterwards the status header
-shows book count, column health, how many books are **new/changed since the last run**, and any
-pending proposal, and the menu **defaults to whatever the library needs next**. Menu item **0 —
-maintenance** walks the whole loop in the right order (wrangle → staleness → classify → review),
-each step explained, previewed, and skippable. Classify runs show a **live dashboard** (progress +
-tagged/failed/rate + throughput sparkline + rising tag candidates). Every write previews first,
-asks for confirmation, and auto-backs-up `metadata.db`.
+**The wizard** (no arguments) is the intended way in — one guided pass, no menu to navigate: on a
+fresh library it detects missing columns/config and runs **setup** first; then it walks the whole
+lifecycle in the right order — **wrangle → staleness → classify → review** — where every stage
+dry-runs first, shows its report, and asks *apply / skip*. The status header shows book count,
+column health, how many books are **new/changed since the last classify**, and any pending proposal.
+The classify stage targets only those new/changed books, prices each engine for the run (public
+list prices), and can **compare engines on a 5-book sample** before you commit; runs show a **live
+dashboard** (progress + tagged/failed/rate + throughput sparkline + rising tag candidates). Every
+write previews first, asks for confirmation, and auto-backs-up `metadata.db`.
 
 Each step is also a plain scriptable subcommand:
 
@@ -177,8 +178,9 @@ scourgify classify --incremental       # 3. cheap: content-tag only new/changed 
 scourgify classify --apply             # 5. apply the reviewed tags + stamp #wrangled
 ```
 
-Or just `scourgify` and walk the wizard menu in order: **3 wrangle → 4 staleness →
-5 classify → 6 review**. Re-running wrangle is always safe — it's idempotent and won't regress
+Or just `scourgify` — the wizard runs exactly this loop, guided. Need a specific redo instead?
+`scourgify classify --last 30` (the 30 most recently added) or `--since 2026-06-01` (added or
+site-updated since a date). Re-running wrangle is always safe — it's idempotent and won't regress
 curated genres (it uses the full `genres_allow.txt`).
 
 ---
@@ -199,18 +201,26 @@ scourgify classify --apply                          # add the proposed tags (Cal
   so the prompt caps at `--max-tags 6` and dumps (>2× cap) are rejected.
 - `--engine claude|openai|gemini` — cloud APIs (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY`);
   defaults `claude-haiku-4-5` / `gpt-4o-mini` / `gemini-2.5-flash`, override with `--model`. Sharper; cheap.
-- Only books with `< --min-tags` (default 2) tags **and** a description are touched. Always dry-run
-  until `--apply`. Edit `defaults/classify_vocab.txt` to shape the allowed tag set.
+- **Scope — which books a run touches** (`select.py` owns this; newest-added-first, so `--batch`/`--limit`
+  caps hit the new books first): `--incremental` = only new/changed books; `--last N` = the N most recently
+  added; `--since DATE` = added or site-updated on/after DATE; no scope flag = books with `< --min-tags`
+  (default 2) tags. Books whose description is too thin (<40 chars) are reported, not silently dropped —
+  `--text-fallback` samples the book's own prose for them. Always dry-run until `--apply`.
+- The allowed tag set is the bundled `defaults/classify_vocab.txt` **plus your
+  `overrides/classify_vocab.txt`** (a line appends a term, `-term` removes one) — editable even for a
+  pipx/uv-tool install, where the bundled file lives read-only in site-packages.
 - Long runs **save incrementally and resume** on re-run (skip books already in the proposal; `--fresh`
   to restart). `--batch N` processes only N new books per run — handy for pacing API spend/rate limits.
   A **spend gate** asks for confirmation (or `--yes`) before sending more than 200 books to a cloud engine.
 - Proposals/outputs live in `data/` (gitignored): `classify_proposal.csv`, `classify_newtags_ranked.csv`,
   `classify_failures.csv`. On `--apply` the proposal is **archived** to `classify_proposal_applied_<ts>.csv`,
   so a later apply can never re-add tags you've since hand-removed in Calibre.
-- **Incremental maintenance (`--incremental`):** after new FanFicFare downloads, `classify.py --incremental` (re)tags
-  only books whose `#updated` is newer than their own **`#wrangled`** marker (a datetime column auto-created and
-  stamped on `--apply`), plus any still untagged — cents instead of a full pass. State lives *in the library*
-  (travels with `metadata.db`, no external file). A full cloud `--fresh` run is expensive; reserve it for vocab changes.
+- **Incremental maintenance (`--incremental`):** after new FanFicFare downloads, (re)tags only **new/changed**
+  books — never classified, `#updated` newer than their own **`#wrangled`** marker, or **re-fetched** (added-date
+  newer, which FanFicFare bumps on re-download — catching updates fetched late) — cents instead of a full pass.
+  `--apply` auto-creates the marker column and stamps **every processed book** (tagged or not, so no-tag books
+  aren't re-sent forever). State lives *in the library* (travels with `metadata.db`, no external file). A full
+  cloud `--fresh` run is expensive; reserve it for vocab changes.
 
 ## Custom maps from your library (`overrides/`)
 The bundled `defaults/` are generic. Two helper workflows mined library-specific maps into `overrides/`
