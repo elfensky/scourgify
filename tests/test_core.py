@@ -93,6 +93,14 @@ def test_transform_ascii_and_tagcanon():
                          tagcanon={norm("time travel"): "Time Travel"})
     assert "cafe" in nd["tags"] and "Time Travel" in nd["tags"]
 
+def test_transform_routed_genre_goes_through_tag_pipeline():
+    # a genre outside the allowlist routes to tags AND trope-folds there — no raw/canonical duplicates
+    m = maps(trope={"Overpowered Protagonist": ("Overpowered", "tag")}, gallow={"fantasy"})
+    d = {"fandoms": ["X"], "characters": [], "genres": ["Fantasy", "Overpowered Protagonist"], "tags": []}
+    nd, _, _ = transform(d, m, BEH, set(), {})
+    assert nd["genres"] == ["Fantasy"]
+    assert nd["tags"] == ["Overpowered"]                               # folded, not duplicated
+
 def test_build_tagcanon_majority_spelling():
     tc = build_tagcanon(["Time Travel", "Time Travel", "time-travel"], maps())
     assert tc[norm("time travel")] == "Time Travel"

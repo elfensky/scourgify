@@ -137,7 +137,7 @@ def transform(d, m, beh, known_chars=frozenset(), tagcanon=None):
         nC.add(ch)
     nC |= seedC                                                # decomposed characters
     # genres: split -> canon -> allowlist(keep) else move to tags
-    nG = set(); extra_tags = set()
+    nG = set(); routed = set()
     ga = lambda na: na in m["gallow"] or any(na.startswith(x + " ") for x in m["gallow"] if len(x) >= 4)  # allowed genre?
     for g in G0:
         for atom in (m["gsplit"].get(g, [g])):
@@ -146,12 +146,13 @@ def transform(d, m, beh, known_chars=frozenset(), tagcanon=None):
                 nG.add(a)                                       # allowlisted genre or a subtype of one (AU - Canon Divergence)
             elif na in m["fanvals"]: nF.add(a)                  # misfiled fandom
             elif na in known_chars: nC.add(a)                   # misfiled character (e.g. Akeno Himejima in #genres)
-            else: extra_tags.add(a)                             # freeform -> tag
+            else: routed.add(a)                                 # freeform -> through the tag pipeline below
     nG |= seedG                                                 # decomposed genres
     # tags: junk drop / trope route / surface-fold / ascii / redundancy-strip
-    nT = set(extra_tags) | seedT                                # decomposed tags
+    # (routed ex-genres go through the same pipeline, so they trope-fold/dedupe like any tag)
+    nT = set(seedT)                                             # decomposed tags
     homes = {norm(x) for x in nF | nC | nG | R | (set(st) if isinstance(st, list) else {st} if st else set())}
-    for t in T:
+    for t in sorted(set(T) | routed):
         if is_junk(t, m): continue
         if t in m["trope"]:
             canon, route = m["trope"][t]; route = trope_route(canon, route, beh)
@@ -292,11 +293,16 @@ def apply_changes(cfg, m, do_write, force=False, cli_hint=True, detail=True):
         d = {k: perbook[b].get(k, []) for k in cols}
         nd, lf, lc = transform(d, m, beh, known_chars, tagcanon); lostF += lf; lostC += lc
         tagsB += len(d.get("tags", [])); tagsA += len(nd.get("tags", []))
+        booknorms = None
         for k, lab in cols.items():
             if k in nd and tuple(sorted(nd[k])) != tuple(sorted(d.get(k, []))):
                 changes[lab][b] = sorted(nd[k])
                 old, new = set(d.get(k, [])), set(nd[k])
-                diffs[b][lab] = (sorted(old - new), sorted(new - old))
+                if booknorms is None:   # after-state of every column, for "where did it go" annotations
+                    booknorms = {l2: {norm(x) for x in nd.get(k2, d.get(k2, []))} for k2, l2 in cols.items()}
+                gone = [(v, next((l2 for l2, ns in booknorms.items() if l2 != lab and norm(v) in ns), None))
+                        for v in sorted(old - new)]
+                diffs[b][lab] = (gone, sorted(new - old))
     print("APPLY" if do_write else "PRE-APPLY (no write)")
     for lab, ch in changes.items(): print(f"  {lab:14} books changed: {len(ch)}")
     if detail and diffs:
@@ -306,7 +312,8 @@ def apply_changes(cfg, m, do_write, force=False, cli_hint=True, detail=True):
         for b in reversed(ids):
             print(f"  #{b}  {str(titles.get(b, ''))[:64]}")
             for lab, (rm, ad) in diffs[b].items():
-                print(f"      {lab:12} " + "  ".join([f"-{x}" for x in rm] + [f"+{x}" for x in ad]))
+                bits = [f"-{x}" if dest is None else f"-{x}(→{dest})" for x, dest in rm] + [f"+{x}" for x in ad]
+                print(f"      {lab:12} " + "  ".join(bits))
         if len(diffs) > len(ids): print(f"  … +{len(diffs) - len(ids)} more books (scourgify audit shows every value)")
     print(f"  SAFETY losing last fandom: {lostF} | character: {lostC} | tag assignments: {tagsB} -> {tagsA}")
     if lostF or lostC: raise SystemExit("ABORT: data loss detected")
