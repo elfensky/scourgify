@@ -71,7 +71,7 @@ def stage_wrangle():
         ui.say("nothing to normalize ✓", "green"); return
     ui.say("(per-value detail any time: scourgify audit)", "dim")
     if ui.confirm(f"\napply these normalizations to {n} books? (Calibre closed; auto-backup)", default=True):
-        wrangle.apply_changes(cfg, maps, do_write=True)
+        wrangle.apply_changes(cfg, maps, do_write=True, detail=False)   # diff already shown by the dry run
         ui.say("done ✓", "green")
     else:
         ui.say("(skipped — nothing written)", "dim")

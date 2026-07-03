@@ -269,6 +269,8 @@ def audit(cfg, m):
         if folds: print(f"tags fold/route ({len(folds)}):{ex(folds)}")
 
 # ---------------- APPLY (standalone: compute via sqlite, write via calibre-debug helper) ----------------
+DETAIL_BOOKS = 10        # per-book diff lines shown in the apply preview before deferring to `audit`
+
 def tag_loss_guard(tags_before, tags_after, force):
     """Abort on a suspicious mass-deletion of tags (e.g. an over-broad junk.txt regex).
     ponytail: heuristic ceiling — >25% shrink AND >200 assignments lost; --force overrides."""
@@ -277,13 +279,15 @@ def tag_loss_guard(tags_before, tags_after, force):
         raise SystemExit(f"ABORT: tags would shrink {tags_before} -> {tags_after} assignments (-{lost}). "
                          "Check junk.txt / overrides for an over-broad rule, or re-run with --force.")
 
-def apply_changes(cfg, m, do_write, force=False, cli_hint=True):
-    """-> number of distinct books that would change (the wizard uses it to auto-skip a clean library)."""
+def apply_changes(cfg, m, do_write, force=False, cli_hint=True, detail=True):
+    """-> number of distinct books that would change (the wizard uses it to auto-skip a clean library).
+    detail=True prints per-book -removed/+added values for the first DETAIL_BOOKS changed books."""
     beh = cfg["behavior"]
     cols, perbook, present, nb, allb = read_library(cfg)
     known_chars = {norm(v) for bb in perbook for v in perbook[bb].get("characters", [])}
     tagcanon = build_tagcanon((t for bb in perbook for t in perbook[bb].get("tags", [])), m)
-    changes = collections.defaultdict(dict); lostF = lostC = tagsB = tagsA = 0
+    changes = collections.defaultdict(dict); diffs = collections.defaultdict(dict)
+    lostF = lostC = tagsB = tagsA = 0
     for b in allb:
         d = {k: perbook[b].get(k, []) for k in cols}
         nd, lf, lc = transform(d, m, beh, known_chars, tagcanon); lostF += lf; lostC += lc
@@ -291,8 +295,19 @@ def apply_changes(cfg, m, do_write, force=False, cli_hint=True):
         for k, lab in cols.items():
             if k in nd and tuple(sorted(nd[k])) != tuple(sorted(d.get(k, []))):
                 changes[lab][b] = sorted(nd[k])
+                old, new = set(d.get(k, [])), set(nd[k])
+                diffs[b][lab] = (sorted(old - new), sorted(new - old))
     print("APPLY" if do_write else "PRE-APPLY (no write)")
     for lab, ch in changes.items(): print(f"  {lab:14} books changed: {len(ch)}")
+    if detail and diffs:
+        ids = sorted(diffs)[-DETAIL_BOOKS:]                            # highest ids = newest books first
+        con = ro_connect()
+        titles = dict(con.execute(f"SELECT id, title FROM books WHERE id IN ({','.join('?' * len(ids))})", ids))
+        for b in reversed(ids):
+            print(f"  #{b}  {str(titles.get(b, ''))[:64]}")
+            for lab, (rm, ad) in diffs[b].items():
+                print(f"      {lab:12} " + "  ".join([f"-{x}" for x in rm] + [f"+{x}" for x in ad]))
+        if len(diffs) > len(ids): print(f"  … +{len(diffs) - len(ids)} more books (scourgify audit shows every value)")
     print(f"  SAFETY losing last fandom: {lostF} | character: {lostC} | tag assignments: {tagsB} -> {tagsA}")
     if lostF or lostC: raise SystemExit("ABORT: data loss detected")
     tag_loss_guard(tagsB, tagsA, force)
