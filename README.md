@@ -1,5 +1,10 @@
 # scourgify
 
+[![PyPI](https://img.shields.io/pypi/v/scourgify)](https://pypi.org/project/scourgify/)
+[![Python](https://img.shields.io/pypi/pyversions/scourgify)](https://pypi.org/project/scourgify/)
+[![CI](https://github.com/elfensky/scourgify/actions/workflows/ci.yml/badge.svg)](https://github.com/elfensky/scourgify/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/pypi/l/scourgify)](https://github.com/elfensky/scourgify/blob/main/LICENSE)
+
 The tag-wrangler / canonizer for your fanfiction library — normalize and consolidate **tags,
 fandoms, characters, relationships and genres** in a
 [FanFicFare](https://github.com/JimmXinu/FanFicFare)-imported [Calibre](https://calibre-ebook.com)
