@@ -1,0 +1,64 @@
+# Canonical genre vocabulary (one per line). Values here stay in #genres; freeform values not here move to tags.
+Adventure
+Romance
+Drama
+Humor
+Angst
+Hurt/Comfort
+Friendship
+Family
+Fantasy
+Sci-Fi
+Supernatural
+Mystery
+Horror
+Tragedy
+Parody
+Suspense
+Crime
+Spiritual
+General
+Action
+Crossover
+Alternate Universe
+Reincarnation
+Time Travel
+Isekai
+Slice of Life
+Comedy
+War
+LitRPG
+Historical
+Mecha
+Space Opera
+Steampunk
+Cyberpunk
+Dark Fantasy
+Urban Fantasy
+Western
+# sub-genres
+Body Horror
+Cosmic Horror
+Eldritch Horror
+Survival Horror
+Dark Comedy
+Character Study
+Coming of Age
+Epistolary
+Rational Fiction
+Power Fantasy
+Survival
+Magical Realism
+Modern Fantasy
+Science Fantasy
+Magical Adventure
+Military Science Fiction
+Post-Apocalyptic
+Zombie Apocalypse
+Dimension Travel
+School Life
+Ecchi
+Xianxia
+Wuxia
+Xuanhuan
+Cultivation

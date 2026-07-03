@@ -1,0 +1,57 @@
+# Values that are NEVER fandoms. FanFicFare sometimes drops these into `category` -> #fandoms.
+# When found in #fandoms, the engine hands them to the tag pipeline, which routes each to its real
+# home (kink/trope -> #tags, genre -> #genres, status/junk -> dropped). Matched by norm() so casing
+# and [brackets] don't matter. Curated + exact on purpose — do NOT auto-generate from the tag corpus
+# (real fandoms like "SCP Foundation" / "Gate" collide with tag entries). Add only true non-fandoms.
+
+# kinks / content markers
+NSFW
+SFW
+Male Dom
+Female Dom
+Harem
+Smut
+Lemon
+PWP
+Fluff
+Ecchi
+
+# self-insert / AU / OC markers
+SI
+SI OC
+SI/OC
+OC
+OC Insert
+Self-Insert
+AU
+Reader Insert
+
+# genres/tropes misfiled as fandoms (tag pipeline re-routes to #genres)
+Isekai
+Time Travel
+Reincarnation
+LitRPG
+Multicross
+Crossovers
+X-overs
+
+# status misfiled as fandoms
+Complete
+Complete!
+Completed
+Incomplete
+Discontinued
+Dropped
+On Hiatus
+WIP
+
+# FanFiction.net category labels
+Books
+Movies
+TV
+Anime
+Manga
+Comics
+Games
+Misc
+Crossover/Other

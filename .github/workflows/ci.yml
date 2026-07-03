@@ -1,0 +1,40 @@
+name: CI
+
+# Runs the plain-assert core tests on every PR to main and every push to main,
+# across the requires-python floor and the current release — turning the
+# pyproject `requires-python = ">=3.10"` claim into an enforced fact.
+# (No lint leg: scourgify ships no ruff config or dev deps — the tests are the gate.)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"] # requires-python floor + current
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: Tests
+        run: uv run tests/test_core.py

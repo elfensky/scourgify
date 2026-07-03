@@ -1,0 +1,67 @@
+name: Publish
+
+# Two triggers, one workflow:
+#   - push to main      -> auto-publish to TestPyPI (every release commit)
+#   - workflow_dispatch -> pick target manually (testpypi or pypi)
+#
+# Production PyPI stays gated behind manual dispatch — uploads are permanent, so
+# target=pypi should be a deliberate human action, never an accidental push.
+#
+# Trusted Publishing (OIDC) authenticates both indexes — no API tokens stored.
+# Requires a matching trusted publisher registered on PyPI *and* TestPyPI:
+#   owner=elfensky, repo=scourgify, workflow=publish.yml, environment=pypi
+# (if any of those differ in your PyPI registration, update them here to match).
+
+on:
+  push:
+    branches: [main]
+    # Only auto-publish when the package itself changes. A release bumps
+    # __version__ in src/scourgify/__init__.py, so docs/CI/test-only pushes to
+    # main never trigger a (duplicate, and thus failing) publish.
+    paths:
+      - "src/**"
+      - "pyproject.toml"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Where to publish"
+        type: choice
+        options:
+          - testpypi
+          - pypi
+        default: testpypi
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: ${{ inputs.target == 'pypi' && 'https://pypi.org/project/scourgify/' || 'https://test.pypi.org/project/scourgify/' }}
+    permissions:
+      id-token: write # required for Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Verify before publishing
+        run: |
+          uv sync
+          uv run tests/test_core.py
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      # Push to main (inputs.target unset) and dispatch target=testpypi land here.
+      - name: Publish to TestPyPI
+        if: github.event_name == 'push' || inputs.target == 'testpypi'
+        run: uv publish --index testpypi --trusted-publishing always
+
+      # PyPI only on explicit dispatch target=pypi — a push to main can never
+      # reach this step.
+      - name: Publish to PyPI
+        if: github.event_name == 'workflow_dispatch' && inputs.target == 'pypi'
+        run: uv publish --trusted-publishing always
