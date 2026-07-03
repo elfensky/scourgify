@@ -3,12 +3,12 @@
 
 Set CALIBRE_LIBRARY to your library folder first, then (everything runs under plain python3;
 writes shell out to calibre-debug automatically):
-  uv run wrangle.py setup            # interactive health check + first-run wizard
-  uv run wrangle.py audit            # read-only dry-run report of every pass
-  uv run wrangle.py apply --apply    # write changes  (Calibre must be CLOSED)
+  scourgify setup            # interactive health check + first-run wizard
+  scourgify audit            # read-only dry-run report of every pass
+  scourgify apply --apply    # write changes  (Calibre must be CLOSED)
 """
 import os, sys, re, csv, collections
-from common import HERE, DEFAULTS as DEF, norm, ascii_fold, load_config, library, ro_connect, read_custom_column, run_writer
+from scourgify.common import DEFAULTS as DEF, norm, ascii_fold, load_config, library, ro_connect, read_custom_column, run_writer
 try:                                   # rich is optional (present in system python3 for `audit`; absent under calibre-debug)
     from rich.console import Console
     from rich.table import Table
@@ -52,7 +52,7 @@ def resolve_trope_chains(raw):
     return res
 
 def load_maps(cfg):
-    odir = os.path.join(HERE, cfg["overrides"].get("dir", "overrides"))
+    odir = os.path.join(os.getcwd(), cfg["overrides"].get("dir", "overrides"))
     def both(fn):  # defaults first, overrides last (override wins)
         return read_csv(os.path.join(DEF, fn)) + read_csv(os.path.join(odir, fn))
     m = {}
@@ -304,7 +304,7 @@ def apply_changes(cfg, m, do_write, force=False):
     if do_write:
         run_writer([{"op": "set_field", "field": lab, "values": {str(b): v for b, v in ch.items()}} for lab, ch in changes.items()])
     else:
-        print("Re-run: uv run wrangle.py apply --apply   (Calibre closed; writes shell out to calibre-debug)")
+        print("Re-run: scourgify apply --apply   (Calibre closed; writes shell out to calibre-debug)")
 
 def write_config(colmap, beh=None):
     b = beh or {}                                     # preserve existing toggles on re-run; defaults on first run
@@ -326,7 +326,7 @@ def write_config(colmap, beh=None):
           "", "[overrides]",
           "# folder of user files (same formats as defaults/) that extend & win over the defaults",
           'dir = "overrides"', ""]
-    open(os.path.join(HERE, "config.toml"), "w").write("\n".join(L))
+    open(os.path.join(os.getcwd(), "config.toml"), "w").write("\n".join(L))
 
 OK, WARN, BAD = "✓", "⚠", "✗"     # status glyphs (plain; no color dependency)
 def _interactive():
@@ -418,7 +418,7 @@ def setup(cfg):
         lab = colmap.get(k, ""); print(f"        {k:13} → {lab or '(unset — pass not run for this column)'}")
 
     # [5] overrides
-    odir = os.path.join(HERE, cfg["overrides"].get("dir", "overrides"))
+    odir = os.path.join(os.getcwd(), cfg["overrides"].get("dir", "overrides"))
     print("\n[5] Overrides");  print(f"  {OK} {odir}" if os.path.isdir(odir) else f"  {WARN} no overrides/ dir (optional — add your own maps here; they win over defaults/)")
 
     if ops:
@@ -426,14 +426,15 @@ def setup(cfg):
         run_writer(ops)
     print("\n" + "-" * 64)
     print("Setup complete. Next:")
-    print("  uv run wrangle.py audit          # read-only dry-run of all passes")
-    print("  uv run wrangle.py apply --apply  # write changes (Calibre closed; backs up first)")
-    print("  uv run classify.py --incremental # content-tag new/updated books (cheap)")
+    print("  scourgify audit          # read-only dry-run of all passes")
+    print("  scourgify apply --apply  # write changes (Calibre closed; backs up first)")
+    print("  scourgify classify --incremental # content-tag new/updated books (cheap)")
 
 # ---------------- main ----------------
-if __name__ == "__main__":
+def main():
     import argparse
-    p = argparse.ArgumentParser(description="Normalize a FanFicFare-imported Calibre library (writes auto-shell to calibre-debug). "
+    p = argparse.ArgumentParser(prog="scourgify",
+                                description="Normalize a FanFicFare-imported Calibre library (writes auto-shell to calibre-debug). "
                                             "With no command: launch the interactive wizard.")
     p.add_argument("command", nargs="?", default=None, choices=["setup", "audit", "apply"],
                    help="setup: interactive health check + configure | audit: read-only dry-run | apply: write changes | (none): wizard")
@@ -443,7 +444,7 @@ if __name__ == "__main__":
     a = p.parse_args()
     if a.command is None:
         if sys.stdin.isatty() and sys.stdout.isatty():
-            import wizard                  # lazy: keeps rich fully optional for the plain subcommands
+            from scourgify import wizard   # lazy: keeps rich fully optional for the plain subcommands
             wizard.run()
         else:
             p.print_help()
@@ -453,3 +454,7 @@ if __name__ == "__main__":
     if a.command == "audit": audit(cfg, maps)
     elif a.command == "apply": apply_changes(cfg, maps, a.apply, a.force)
     elif a.command == "setup": setup(cfg)
+
+
+if __name__ == "__main__":
+    main()

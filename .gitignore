@@ -3,7 +3,7 @@ data/
 
 # Ignore stray CSVs anywhere; the bundled generic defaults/ are the only tracked CSVs
 *.csv
-!defaults/*.csv
+!src/scourgify/defaults/*.csv
 
 # Calibre DB snapshots / backups
 *.db
@@ -17,7 +17,12 @@ __pycache__/
 .venv/
 .DS_Store
 
-# compiled Apple FM bridge binary (build from afm.swift)
+# compiled Apple FM bridge binary (build from afm.swift; lives next to it in the package)
 /afm
+src/scourgify/afm
 *.o
 classify_state.json
+
+# build artifacts
+/dist/
+*.egg-info/

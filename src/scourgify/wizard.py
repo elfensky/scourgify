@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One-command guided wizard over the whole toolchain:
 
-    uv run wrangle.py            # no arguments — or equivalently: uv run wizard.py
+    scourgify                    # no arguments — launches this interactive wizard
 
 Menu-driven: setup/health check, audit, normalize (the wrangle passes), staleness,
 AI classify with a live dashboard, and proposal review. Every write path previews
@@ -9,14 +9,14 @@ first, asks for confirmation, refuses while Calibre is open, and auto-backs up
 metadata.db (all writes funnel through common.run_writer)."""
 import os, csv, collections
 
-import ui                                   # first: gives the friendly error if rich is missing
-from ui import console
+from scourgify import ui                    # first: gives the friendly error if rich is missing
+from scourgify.ui import console
 from rich import box
 from rich.table import Table
 from rich.text import Text
 
-import common, wrangle, classify, staleness
-from common import library, db_path, ro_connect, custom_column_id, calibre_open
+from scourgify import common, wrangle, classify, staleness
+from scourgify.common import library, db_path, ro_connect, custom_column_id, calibre_open
 
 COLS = ["#fandoms", "#characters", "#relationships", "#genres", "#status", "#updated", "#wrangled"]
 ENGINE_KEYS = {"claude": ("ANTHROPIC_API_KEY",), "openai": ("OPENAI_API_KEY",),
@@ -205,7 +205,7 @@ def run():
     library()                                 # fail fast with the clear CALIBRE_LIBRARY message
     if not ui.interactive():
         raise SystemExit("the wizard needs an interactive terminal — use the subcommands instead "
-                         "(uv run wrangle.py --help).")
+                         "(scourgify --help).")
     # first-launch guidance: an un-set-up library gets routed to setup before anything else
     info = snapshot()
     if info["setup_needed"]:

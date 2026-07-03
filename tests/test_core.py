@@ -4,12 +4,12 @@ No framework needed:  uv run tests/test_core.py   (also collectable by pytest).
 No Calibre, no library, no network."""
 import os, sys, tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import common
-from common import norm, ascii_fold, load_config
-from wrangle import transform, resolve_trope_chains, build_tagcanon, is_junk
-from classify import parse_resp, sparkline, VOCAB
-from staleness import derive
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
+from scourgify import common
+from scourgify.common import norm, ascii_fold, load_config
+from scourgify.wrangle import transform, resolve_trope_chains, build_tagcanon, is_junk
+from scourgify.classify import parse_resp, sparkline, VOCAB
+from scourgify.staleness import derive
 
 BEH = load_config(path="/nonexistent/config.toml")["behavior"]     # shipped defaults
 

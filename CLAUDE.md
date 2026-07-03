@@ -18,13 +18,15 @@ Everything keys off `CALIBRE_LIBRARY` (the folder containing `metadata.db`):
 
 ```bash
 export CALIBRE_LIBRARY="$HOME/Calibre/fanfiction"
-uv run wrangle.py                                    # no args = the interactive wizard (rich required; TTY only)
-uv run wrangle.py setup                              # interactive health check + setup (FanFicFare, columns, config)
-uv run wrangle.py audit                              # read-only dry-run of every pass
-uv run wrangle.py apply --apply                      # write changes (Calibre CLOSED for the write step)
+uv run scourgify                                     # no args = the interactive wizard (rich required; TTY only)
+uv run scourgify setup                               # interactive health check + setup (FanFicFare, columns, config)
+uv run scourgify audit                               # read-only dry-run of every pass
+uv run scourgify apply --apply                       # write changes (Calibre CLOSED for the write step)
 ```
 
-**`wizard.py`** (launched by bare `wrangle.py`, or directly) is a guiding menu wizard: on launch it
+(`uv run scourgify` from a checkout; an installed copy — `pipx install scourgify` — drops the `uv run`.)
+
+**`wizard.py`** (launched by bare `scourgify`) is a guiding menu wizard: on launch it
 detects an un-set-up library (missing columns / no config.toml) and routes to setup; the header shows
 books, column health, new/changed-since-last-run count, pending proposal, Calibre-open warning; the
 menu default adapts via `recommend()` (setup → review-pending → maintenance → audit). Item 0
@@ -35,9 +37,16 @@ the menu. `ui.py` holds the shared rich Console + prompt helpers (lintle `term.p
 runs render a live dashboard (`classify._Dashboard`: progress, tagged/failed/rate, throughput
 sparkline, rising candidates).
 
-**Everything runs under normal CPython** — `uv run` (pyproject manages the venv + rich; `[tool.uv] package
-= false`, this is a scripts repo, not an installable package) or plain `python3` with rich installed. The
-core operating rule is about *reads vs writes*, not which interpreter:
+**Packaging.** The code is a proper installable package under `src/scourgify/` (hatchling; on PyPI as
+`scourgify`). The single `scourgify` console command (`cli.py`) dispatches argv to the tools: bare → wizard,
+`setup`/`audit`/`apply` → wrangle, `classify`, `staleness`. Bundled `defaults/` (and `_writer.py`, `afm.swift`)
+ship **inside** the package (read-only at runtime); per-user `config.toml`, `overrides/`, and `data/` resolve
+against the **current working directory** — so `uv run` from the repo (CWD = repo root) behaves exactly as
+before, while an installed copy writes proposals under wherever it's invoked. `common.HERE` is the package
+dir (use it only for shipped read-only files); anything user-writable keys off `os.getcwd()`.
+
+**Everything runs under normal CPython** — the installed `scourgify` command, `uv run scourgify`, or plain
+`python3` with rich installed. The core operating rule is about *reads vs writes*, not which interpreter:
 - **Reads** (audit, classify proposal, setup health check) — read-only `sqlite3 ... mode=ro`; fine while Calibre is open.
 - **Writes** — the standalone tool computes the change-set, serializes it to JSON, and shells out **once** to
   `calibre-debug -e _writer.py -- ops.json` (Calibre's API is the only fast batch-write path; `calibredb set_metadata`
@@ -52,7 +61,7 @@ core operating rule is about *reads vs writes*, not which interpreter:
   and `run_writer()`. Don't re-implement any of these in a tool script.
 
 Verification: `uv run tests/test_core.py` (plain asserts, pytest-compatible, no library/network needed) pins the
-pure core — `transform`, trope-chain resolution, `parse_resp`, the TOML reader. `wrangle.py audit` remains the
+pure core — `transform`, trope-chain resolution, `parse_resp`, the TOML reader. `scourgify audit` remains the
 against-your-library check: full new state, before/after counts, and SAFETY lines asserting **no book loses its
 last fandom or character** plus a **tag mass-deletion guardrail** (`apply` aborts if tags would shrink >25% and
 >200 assignments — the signature of an over-broad junk rule; `--force` overrides).
@@ -63,14 +72,14 @@ last fandom or character** plus a **tag mass-deletion guardrail** (`apply` abort
 junk tags inflate a book's tag count and would hide it from the classifier's sparse-book targeting.
 
 ```
-FFF fetch → uv run wrangle.py apply --apply      # 1. junk-drop/canonicalize the new raw tags (idempotent)
-          → uv run staleness.py --apply          # 2. free; re-derive #status from #updated age
-          → uv run classify.py --incremental     # 3. cheap; only books changed since last wrangle
-          → review data/classify_proposal.csv    # 4.
-          → uv run classify.py --apply           # 5. Calibre closed (writes shell to calibre-debug)
+FFF fetch → uv run scourgify apply --apply           # 1. junk-drop/canonicalize the new raw tags (idempotent)
+          → uv run scourgify staleness --apply       # 2. free; re-derive #status from #updated age
+          → uv run scourgify classify --incremental  # 3. cheap; only books changed since last wrangle
+          → review data/classify_proposal.csv        # 4.
+          → uv run scourgify classify --apply        # 5. Calibre closed (writes shell to calibre-debug)
 ```
 
-(Or the wizard: `uv run wrangle.py` → menu 3 → 4 → 5 → 6.)
+(Or the wizard: `uv run scourgify` → menu 3 → 4 → 5 → 6.)
 
 **⚠️ Cost:** a full Gemini `classify --fresh` pass over the library ≈ **€50** in tokens. Never run `--fresh`
 casually — use `--incremental` (only changed/new books), `--batch N`, or `--engine apple` (free, on-device).
@@ -130,10 +139,15 @@ review-map CSVs (in `data/`). Curated cross-library knowledge (e.g. franchise un
 ## Repo conventions
 
 - **Personal library data is gitignored and lives in `data/`** (review maps, proposals, cluster
-  intermediates); `.gitignore` also ignores stray `*.csv` **except** `!defaults/*.csv`, plus `*.db`,
-  `overrides/`, the compiled `/afm` binary. Only the generic `defaults/` ship.
+  intermediates); `.gitignore` also ignores stray `*.csv` **except** `!src/scourgify/defaults/*.csv`, plus
+  `*.db`, `overrides/`, the compiled `afm` binary (`/afm` and `src/scourgify/afm`), and build artifacts
+  (`/dist/`, `*.egg-info/`). Only the generic `defaults/` ship (bundled inside the package).
 - **`attic/`** holds the original single-purpose pipeline (`apply_*.py`, `generate_*.py`, `dryrun.py`,
-  `recover_xianxia.py`), kept as provenance — see `attic/README.md`. `wrangle.py` supersedes it; the attic
+  `recover_xianxia.py`), kept as provenance — see `attic/README.md`. `scourgify` supersedes it; the attic
   scripts read CSVs from their own directory and predate the auto-backup, so prefer the live tools.
-- `afm.swift` is the Apple Foundation Models bridge for `classify.py --engine apple`; build with
-  `swiftc -O afm.swift -o afm` (requires macOS 26+ / Apple Intelligence).
+- `src/scourgify/afm.swift` is the Apple Foundation Models bridge for `scourgify classify --engine apple`;
+  it ships in the package (a `swift` toolchain runs it as-is), or build the faster binary with
+  `swiftc -O src/scourgify/afm.swift -o src/scourgify/afm` (requires macOS 26+ / Apple Intelligence).
+- **Publishing:** `uv build` → `uv publish --index testpypi` (dry-run) → `uv publish` (PyPI). The wheel must
+  contain `scourgify/defaults/*`, `_writer.py`, `afm.swift` and **not** `data/`, `overrides/`, or the `afm`
+  binary — verify with `unzip -l dist/*.whl` after a layout change.

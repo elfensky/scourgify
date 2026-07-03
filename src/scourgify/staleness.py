@@ -2,13 +2,13 @@
 """Re-derive #status from activity (#updated age) for the activity family: In-Progress/Hiatus/Abandoned.
 Idempotent & self-correcting — re-run after an #updated refresh and the status re-derives automatically.
 
-  uv run staleness.py                          # audit (read-only, no changes)
-  uv run staleness.py --apply                  # write #status (Calibre CLOSED)
+  scourgify staleness                          # audit (read-only, no changes)
+  scourgify staleness --apply                  # write #status (Calibre CLOSED)
 
 Rule: <STALE yrs -> In-Progress | STALE..DEAD -> Hiatus | >=DEAD -> Abandoned. Tunable: --stale-years 2 --dead-years 5.
 Completed/Dropped/Rewritten and books without an #updated date are NEVER changed."""
 import argparse, datetime, collections
-from common import load_config, ro_connect, read_custom_column, run_writer
+from scourgify.common import load_config, ro_connect, read_custom_column, run_writer
 
 ACTIVITY = {"In-Progress", "Hiatus", "Abandoned"}      # re-derived from activity
 # everything else (Completed, Dropped, Rewritten, blank) is left untouched
@@ -29,7 +29,7 @@ def compute(stale_years=2.0, dead_years=5.0):
     updated = read_custom_column(con, "#updated")
     if status is None or updated is None:
         missing = [l for l, v in ((status_label, status), ("#updated", updated)) if v is None]
-        raise SystemExit(f"missing column(s): {', '.join(missing)} — run `uv run wrangle.py setup` first.")
+        raise SystemExit(f"missing column(s): {', '.join(missing)} — run `scourgify setup` first.")
     today = datetime.date.today()
     def age(b):
         try: return (today - datetime.date.fromisoformat(str(updated.get(b))[:10])).days / 365.25
@@ -65,7 +65,7 @@ def main():
         write(label, rows)
         print(f"re-derived {label} for {len(rows)} books.")
     else:
-        print("\nDry run. To write: uv run staleness.py --apply   (Calibre closed)")
+        print("\nDry run. To write: scourgify staleness --apply   (Calibre closed)")
 
 
 if __name__ == "__main__":

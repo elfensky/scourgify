@@ -7,12 +7,15 @@ library. Data-driven from **~1,700 bundled generic defaults**, fully customizabl
 reversible.
 
 ```bash
+pipx install scourgify                                # or: uv tool install scourgify  (one dependency: rich)
+
 export CALIBRE_LIBRARY="$HOME/Calibre/fanfiction"     # folder containing metadata.db
-uv run wrangle.py                                     # ← the wizard: everything below, menu-driven
+scourgify                                             # ← the wizard: everything below, menu-driven
 ```
 
-[uv](https://docs.astral.sh/uv/) handles the environment (one dependency: rich) — no install step.
-Plain `python3 wrangle.py` works too if rich is on your system Python (`pip install rich`).
+Requires **Calibre installed** — the tool reads via read-only sqlite and shells out to Calibre's own
+`calibre-debug` for writes. From a checkout, `uv run scourgify` (or `uvx --from . scourgify`) runs it
+without installing; [uv](https://docs.astral.sh/uv/) handles the environment (one dependency: rich).
 
 **The wizard** (no arguments) is the intended way in — and it steers you: on a fresh library it
 detects missing columns/config and offers to run **setup** immediately; afterwards the status header
@@ -26,9 +29,9 @@ asks for confirmation, and auto-backs-up `metadata.db`.
 Each step is also a plain scriptable subcommand:
 
 ```bash
-uv run wrangle.py setup                               # interactive health check + setup (FanFicFare, columns, config)
-uv run wrangle.py audit                               # read-only dry-run report of every pass
-uv run wrangle.py apply --apply                       # write changes (Calibre CLOSED for this step)
+scourgify setup                                      # interactive health check + setup (FanFicFare, columns, config)
+scourgify audit                                      # read-only dry-run report of every pass
+scourgify apply --apply                              # write changes (Calibre CLOSED for this step)
 ```
 
 Everything runs under plain `python3`. The tool reads via read-only sqlite and, for the actual writes,
@@ -162,31 +165,32 @@ cleanup first, content tagging second**, because raw junk tags inflate a book's 
 hide it from the classifier's "sparsely tagged" targeting:
 
 ```bash
-uv run wrangle.py apply --apply        # 1. wrangle FIRST: junk-drop/canonicalize the new raw tags (idempotent)
-uv run staleness.py --apply            # 2. free: re-derive #status from #updated age (independent, any time)
-uv run classify.py --incremental       # 3. cheap: content-tag only new/changed books -> proposal
+scourgify apply --apply                # 1. wrangle FIRST: junk-drop/canonicalize the new raw tags (idempotent)
+scourgify staleness --apply            # 2. free: re-derive #status from #updated age (independent, any time)
+scourgify classify --incremental       # 3. cheap: content-tag only new/changed books -> proposal
                                        # 4. review data/classify_proposal.csv
-uv run classify.py --apply             # 5. apply the reviewed tags + stamp #wrangled
+scourgify classify --apply             # 5. apply the reviewed tags + stamp #wrangled
 ```
 
-Or just `uv run wrangle.py` and walk the wizard menu in order: **3 wrangle → 4 staleness →
+Or just `scourgify` and walk the wizard menu in order: **3 wrangle → 4 staleness →
 5 classify → 6 review**. Re-running wrangle is always safe — it's idempotent and won't regress
 curated genres (it uses the full `genres_allow.txt`).
 
 ---
 
-## Content-based tagging — `classify.py`
+## Content-based tagging — `scourgify classify`
 Reads each book's description (`#comments`) and produces **two outputs**: (1) `added_tags` — tags chosen
 from the **controlled vocabulary** (`defaults/classify_vocab.txt`), which get applied; and (2) `proposed_new`
 — short novel tags *not* in the vocab, aggregated by frequency into `classify_newtags_ranked.csv` so you can
 review and **promote** the recurring ones into the vocab. Grows the tag set deliberately, without freeform noise.
 
 ```bash
-uv run classify.py --engine apple --limit 50        # propose -> data/classify_proposal.csv (dry-run, read-only)
-uv run classify.py --apply                          # add the proposed tags (Calibre CLOSED)
+scourgify classify --engine apple --limit 50        # propose -> data/classify_proposal.csv (dry-run, read-only)
+scourgify classify --apply                          # add the proposed tags (Calibre CLOSED)
 ```
 - `--engine apple` — on-device **Apple Foundation Models** via `afm.swift` (free, private; macOS 26+,
-  Apple Intelligence). Build once: `swiftc -O afm.swift -o afm`. Lower quality — prone to over-tagging,
+  Apple Intelligence). Ships as source; a `swift` toolchain runs it as-is, or from a checkout build the
+  faster binary once: `swiftc -O src/scourgify/afm.swift -o src/scourgify/afm`. Lower quality — prone to over-tagging,
   so the prompt caps at `--max-tags 6` and dumps (>2× cap) are rejected.
 - `--engine claude|openai|gemini` — cloud APIs (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY`);
   defaults `claude-haiku-4-5` / `gpt-4o-mini` / `gemini-2.5-flash`, override with `--model`. Sharper; cheap.
@@ -210,6 +214,9 @@ The bundled `defaults/` are generic. Two helper workflows mined library-specific
 → `A Song of Ice and Fire`). The engine loads these on top of the defaults automatically.
 
 ## Repo layout
+The package lives in **`src/scourgify/`**; the single `scourgify` command (`cli.py`) dispatches
+bare → wizard, `setup`/`audit`/`apply` → wrangle, `classify`, and `staleness`.
+- **`cli.py`** — the `scourgify` entry point (argv dispatcher over the tools below)
 - **`wrangle.py`** — the engine: `setup` / `audit` / `apply`; with no command it launches the wizard
 - **`wizard.py` + `ui.py`** — the interactive wizard and its rich terminal helpers (the one
   rich-required surface)
@@ -218,11 +225,13 @@ The bundled `defaults/` are generic. Two helper workflows mined library-specific
   config, and `run_writer()` (the single write funnel, with automatic backup)
 - **`_writer.py`** — the only file that imports Calibre; a generic ops executor invoked under
   `calibre-debug` by `run_writer()`, never by hand
-- **`build_defaults.py`** — maintainer tool: regenerates `defaults/` from the review maps in `data/`
-- **`defaults/`** (shipped) · **`overrides/`** (yours, gitignored) · **`data/`** (your review maps,
-  proposals, intermediates — gitignored) · **`tests/`** (`uv run tests/test_core.py`, no library needed)
+- **`defaults/`** — bundled generic maps, shipped inside the package (read-only at runtime)
+- Per-user files resolve against the **working directory**: `config.toml`, `overrides/` (your maps,
+  gitignored), and `data/` (proposals/intermediates, gitignored)
+- **`build_defaults.py`** (repo root) — maintainer tool: regenerates `defaults/` from the review maps in `data/`
+- **`tests/`** — `uv run tests/test_core.py`, no library needed
 - **`attic/`** — the original single-purpose pipeline, kept as provenance (see `attic/README.md`);
-  `wrangle.py` supersedes it.
+  `scourgify` supersedes it.
 
 The per-library review-map CSVs in `data/` are gitignored (they contain your library's actual data);
 only the generic `defaults/` ship with the repo.

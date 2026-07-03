@@ -1,18 +1,60 @@
 [project]
 name = "scourgify"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Normalize and consolidate tags/fandoms/characters/genres in a FanFicFare-imported Calibre library"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Andrei Lavrenov", email = "andrei@lav.ren" }]
+keywords = [
+    "calibre",
+    "fanfiction",
+    "fanficfare",
+    "ebook",
+    "metadata",
+    "tags",
+    "normalization",
+    "epub",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Utilities",
+]
 dependencies = [
     "rich>=13",
 ]
 
-# Flat scripts repo, not an installable package: uv manages the venv + dependencies
-# for `uv run <tool>.py`, but never tries to build/install this project itself.
-# (_writer.py is excluded from all of this — it runs under calibre-debug's bundled Python.)
-[tool.uv]
-package = false
+[project.urls]
+Homepage = "https://github.com/elfensky/scourgify"
+Repository = "https://github.com/elfensky/scourgify"
+Issues = "https://github.com/elfensky/scourgify/issues"
+
+[project.scripts]
+scourgify = "scourgify.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/scourgify/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scourgify"]
+# The compiled Apple-FM bridge (`afm`) is a platform-specific binary built locally
+# from afm.swift — never ship it in the universal wheel. (afm.swift itself ships.)
+exclude = ["**/afm", "**/__pycache__"]
+
+# TestPyPI as a named publish target. `explicit = true` keeps it out of normal
+# dependency resolution — it is only ever used via `uv publish --index testpypi`.
+[[tool.uv.index]]
+name = "testpypi"
+url = "https://test.pypi.org/simple/"
+publish-url = "https://test.pypi.org/legacy/"
+explicit = true

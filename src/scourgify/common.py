@@ -11,9 +11,12 @@ used to each carry a private copy of:
 """
 import os, re, sys, sqlite3, collections, unicodedata
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULTS = os.path.join(HERE, "defaults")
-DATA = os.path.join(HERE, "data")      # personal review maps, proposals, intermediates (gitignored)
+HERE = os.path.dirname(os.path.abspath(__file__))   # the installed package dir (read-only)
+DEFAULTS = os.path.join(HERE, "defaults")            # bundled generic maps — ship inside the package
+# Per-run + per-user files live in the working directory, not site-packages: `data/`
+# (proposals/intermediates), config.toml, and overrides/ are all resolved against CWD.
+# When run from the repo via `uv run`, CWD == repo root, so dev layout is unchanged.
+DATA = os.path.join(os.getcwd(), "data")             # personal review maps, proposals, intermediates (gitignored)
 
 
 # ---------------- library resolution (lazy — importing this module never exits) ----------------
@@ -69,7 +72,7 @@ def load_config(path=None):
                         "reincarnation_as": "genre", "time_travel_as": "genre", "fold_ratings": False,
                         "keep_categories": True, "tropes_as": "tag"},
            "overrides": {"dir": "overrides"}}
-    p = path or os.path.join(HERE, "config.toml")
+    p = path or os.path.join(os.getcwd(), "config.toml")   # user config: CWD, not the package
     if os.path.exists(p):
         sec = None
         for raw in open(p):

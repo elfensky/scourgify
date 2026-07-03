@@ -4,8 +4,8 @@
   2) proposed_new  — short reusable tags the model thinks apply but are NOT in the vocab yet; aggregated into
                      classify_newtags_ranked.csv for review, so the vocabulary grows cleanly (promote -> vocab).
 
-  uv run classify.py [--engine apple|claude|openai|gemini] [--incremental] [--workers N] [--batch N] [--fresh]
-  uv run classify.py --apply                    # apply 'added_tags' + stamp #wrangled (Calibre CLOSED; writes shell to calibre-debug)
+  scourgify classify [--engine apple|claude|openai|gemini] [--incremental] [--workers N] [--batch N] [--fresh]
+  scourgify classify --apply                    # apply 'added_tags' + stamp #wrangled (Calibre CLOSED; writes shell to calibre-debug)
 
 Engines (--engine):  apple = on-device Apple Foundation Models via ./afm (free; macOS 26+).
           claude = Anthropic (ANTHROPIC_API_KEY) | openai = OpenAI (OPENAI_API_KEY) | gemini = Google (GEMINI_API_KEY).
@@ -17,7 +17,7 @@ Engines (--engine):  apple = on-device Apple Foundation Models via ./afm (free; 
           forces an explicit cutoff against #updated.) Avoids the ~full-library cost of a --fresh pass."""
 import argparse, os, re, csv, json, subprocess, collections, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from common import HERE, DATA, ro_connect, read_custom_column, custom_column_id, run_writer, library
+from scourgify.common import HERE, DATA, ro_connect, read_custom_column, custom_column_id, run_writer, library
 try:                                              # rich is optional: live dashboard/tables in system python3
     from rich.console import Console, Group
     from rich.live import Live
@@ -347,7 +347,7 @@ def classify_run(a):
             for b, e in failures: w.writerow([b, titles.get(b, ""), e])
         bytype = collections.Counter(e.split(":")[0].split(" ")[0] for _, e in failures)
         print(f"failures: {len(failures)} -> {os.path.basename(FAIL)}  by type: {dict(bytype)}")
-        print("  (recover blocked books with a no-policy engine: uv run classify.py --engine apple)")
+        print("  (recover blocked books with a no-policy engine: scourgify classify --engine apple)")
 
     ranked = collections.Counter()
     for vt, nt in proposal.values():
@@ -365,7 +365,7 @@ def classify_run(a):
     else:
         print("top new-tag candidates:")
         for t, cnt in ranked.most_common(25): print(f"  {cnt:4}  {t}")
-    print("\nApply vocab tags with: uv run classify.py --apply   (Calibre closed)")
+    print("\nApply vocab tags with: scourgify classify --apply   (Calibre closed)")
 
 
 def build_parser():
