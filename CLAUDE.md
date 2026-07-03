@@ -157,7 +157,7 @@ review-map CSVs (in `data/`). Curated cross-library knowledge (e.g. franchise un
 ## Branching & releases
 
 Git-flow-lite (mirrors the sibling `lintle` repo):
-- **`develop`** — the integration branch and default working branch. All work (features, fixes, docs, vocab)
+- **`develop`** — the integration branch and your everyday working branch. All work (features, fixes, docs, vocab)
   lands here via PR; CI (`ci.yml` — tests on Python 3.10 + 3.13) runs on every push/PR to `develop` or `main`.
 - **`main`** — release-only and **branch-protected**: PRs required (0 approvals, so you self-merge), both CI
   checks must pass, no force-push/deletion, **enforced for admins** — i.e. *no direct pushes, even for the owner*.
@@ -165,6 +165,8 @@ Git-flow-lite (mirrors the sibling `lintle` repo):
   `develop`, so the merge's 2nd parent arcs back to the exact develop commit it was cut from (visible in any git
   GUI). `git log --first-parent main` is the clean release ledger; full `git log main` still reaches every commit
   via those 2nd parents — nothing is lost.
+- **GitHub default branch is `main`** (so the repo homepage shows the released state). GitHub therefore defaults a
+  new PR's base to `main` — **open feature PRs against `develop`**; only release PRs target `main`.
 
 **Cut a release** (all from `develop`; `main` is only ever reached through a PR merge):
 1. Bump `__version__` in `src/scourgify/__init__.py` — versions are immutable on PyPI, always bump. Commit + push `develop`.
