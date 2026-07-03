@@ -240,3 +240,10 @@ bare → wizard, `setup`/`audit`/`apply` → wrangle, `classify`, and `staleness
 
 The per-library review-map CSVs in `data/` are gitignored (they contain your library's actual data);
 only the generic `defaults/` ship with the repo.
+
+## Development
+`develop` is the integration branch (all work + PRs; CI runs the tests on Python 3.10 + 3.13). `main` is
+release-only and branch-protected — one `Release vX.Y.Z` merge commit per release, each arcing back to the
+`develop` commit it was cut from. Publishing is automated on release via **Trusted Publishing** (OIDC, no
+tokens): a merge to `main` ships to TestPyPI, a manual workflow dispatch promotes to PyPI. Tests need no
+Calibre or network: `uv run tests/test_core.py`. Release steps live in `CLAUDE.md → Branching & releases`.

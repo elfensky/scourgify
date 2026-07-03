@@ -148,6 +148,34 @@ review-map CSVs (in `data/`). Curated cross-library knowledge (e.g. franchise un
 - `src/scourgify/afm.swift` is the Apple Foundation Models bridge for `scourgify classify --engine apple`;
   it ships in the package (a `swift` toolchain runs it as-is), or build the faster binary with
   `swiftc -O src/scourgify/afm.swift -o src/scourgify/afm` (requires macOS 26+ / Apple Intelligence).
-- **Publishing:** `uv build` → `uv publish --index testpypi` (dry-run) → `uv publish` (PyPI). The wheel must
-  contain `scourgify/defaults/*`, `_writer.py`, `afm.swift` and **not** `data/`, `overrides/`, or the `afm`
-  binary — verify with `unzip -l dist/*.whl` after a layout change.
+- **Publishing is automated** via `.github/workflows/publish.yml` (PyPI/TestPyPI **Trusted Publishing** —
+  OIDC, no stored tokens): a push to `main` touching `src/**`/`pyproject.toml` auto-publishes to **TestPyPI**;
+  production **PyPI** is a manual `gh workflow run publish.yml -f target=pypi`. Local dry-run before a layout
+  change: `uv build` then `unzip -l dist/*.whl` — the wheel must contain `scourgify/defaults/*`, `_writer.py`,
+  `afm.swift` and **not** `data/`, `overrides/`, or the `afm` binary. Full release flow: **Branching & releases** below.
+
+## Branching & releases
+
+Git-flow-lite (mirrors the sibling `lintle` repo):
+- **`develop`** — the integration branch and default working branch. All work (features, fixes, docs, vocab)
+  lands here via PR; CI (`ci.yml` — tests on Python 3.10 + 3.13) runs on every push/PR to `develop` or `main`.
+- **`main`** — release-only and **branch-protected**: PRs required (0 approvals, so you self-merge), both CI
+  checks must pass, no force-push/deletion, **enforced for admins** — i.e. *no direct pushes, even for the owner*.
+  Its **first-parent history is exactly one `Release vX.Y.Z` commit per release**; each is a `--no-ff` merge of
+  `develop`, so the merge's 2nd parent arcs back to the exact develop commit it was cut from (visible in any git
+  GUI). `git log --first-parent main` is the clean release ledger; full `git log main` still reaches every commit
+  via those 2nd parents — nothing is lost.
+
+**Cut a release** (all from `develop`; `main` is only ever reached through a PR merge):
+1. Bump `__version__` in `src/scourgify/__init__.py` — versions are immutable on PyPI, always bump. Commit + push `develop`.
+2. `gh pr create --base main --head develop --title "Release vX.Y.Z"`; let CI pass, then
+   `gh pr merge --merge --subject "Release vX.Y.Z"` (a **merge commit** — not squash/rebase; the 2nd-parent arc is
+   the point). The merge lands on `main` → `publish.yml` auto-publishes to **TestPyPI**.
+3. Tag it: `git fetch origin main && git tag -a vX.Y.Z origin/main -m "scourgify X.Y.Z" && git push origin vX.Y.Z`
+   (annotated, on the Release commit; tags aren't branch-protected).
+4. Promote to **PyPI**: `gh workflow run publish.yml -f target=pypi`, then
+   `gh release create vX.Y.Z --title "scourgify X.Y.Z" --notes …`.
+
+`main` was migrated to this shape once via a `git commit-tree` snapshot (tree = the released 1.0.0; parents =
+[repo root, develop tip]); `develop` kept the full granular history. To temporarily bypass protection for an
+emergency fix, edit the rule at *Settings → Branches* (or `gh api -X DELETE …/branches/main/protection`).
