@@ -15,6 +15,12 @@ name: Publish
 on:
   push:
     branches: [main]
+    # Only auto-publish when the package itself changes. A release bumps
+    # __version__ in src/scourgify/__init__.py, so docs/CI/test-only pushes to
+    # main never trigger a (duplicate, and thus failing) publish.
+    paths:
+      - "src/**"
+      - "pyproject.toml"
   workflow_dispatch:
     inputs:
       target:
