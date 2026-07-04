@@ -1,0 +1,12 @@
+# AO3 merger pairs EXCLUDED from the generated defaults/ao3/ layer (variant,canonical).
+# These folds are real AO3 wrangler decisions, but their rationale doesn't transfer to a
+# Calibre library: AO3 drains warning-shadow freeforms into weaker tags because the concept
+# lives in its separate Archive Warnings field (which we don't have), and hub-tag mergers
+# flatten specific tropes into broad topics. Excluding a pair means BOTH terms stay valid.
+Political Intrigue,Politics
+Major Character Death,Character Death
+Divine Intervention,Deus Ex Machina
+Graphic Violence,Violence
+Trauma Recovery,Recovery
+Independent,Independence
+Teen,Teenagers
