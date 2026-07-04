@@ -53,25 +53,33 @@ def resolve_trope_chains(raw):
 
 def load_maps(cfg):
     odir = os.path.join(os.getcwd(), cfg["overrides"].get("dir", "overrides"))
+    ao3 = os.path.join(DEF, "ao3")               # generated AO3 layer (build_ao3_layer.py) — loaded FIRST, everything overrides it
+    def ao3_pairs(fn):                           # master,name,rel pair rows -> {name: master}; {} if the layer is absent
+        return {r["name"]: r["master"] for r in read_csv(os.path.join(ao3, fn))}
     def both(fn):  # defaults first, overrides last (override wins)
         return read_csv(os.path.join(DEF, fn)) + read_csv(os.path.join(odir, fn))
     m = {}
-    m["char"] = {}; m["char_fd"] = {}            # global variant->canon ; (variant,fandom)->canon
+    m["gallow"] = {norm(x) for x in read_lines(os.path.join(DEF, "genres_allow.txt")) + read_lines(os.path.join(odir, "genres_allow.txt")) if x and not x.startswith("#")}
+    m["char"] = ao3_pairs("characters.csv"); m["char_fd"] = {}   # global variant->canon ; (variant,fandom)->canon
     for r in both("characters.csv"):
         if r.get("fandom"): m["char_fd"][(r["variant"], r["fandom"])] = r["canonical"]
         else: m["char"][r["variant"]] = r["canonical"]
-    m["fan"] = {r["alias"]: r["canonical"] for r in both("fandoms.csv")}
+    m["fan"] = ao3_pairs("universes.csv")
+    m["fan"].update({r["alias"]: r["canonical"] for r in both("fandoms.csv")})
     m["fanvals"] = {norm(v) for v in m["fan"].values()}
-    m["trope"] = resolve_trope_chains({v: (cn, rt) for v, cn, rt in
+    # AO3 freeform folds route dynamically: allowlisted canonical -> genre, else tag; curated rows win
+    tropes = {a: (c, "genre" if norm(c) in m["gallow"] else "tag") for a, c in ao3_pairs("tags.csv").items()}
+    tropes.update({v: (cn, rt) for v, cn, rt in
         (read_tropes(os.path.join(DEF, "tropes.csv")) + read_tropes(os.path.join(odir, "tropes.csv")))})
+    m["trope"] = resolve_trope_chains(tropes)
     m["fan_block"] = {norm(x) for x in read_lines(os.path.join(DEF, "fandom_blocklist.txt")) + read_lines(os.path.join(odir, "fandom_blocklist.txt")) if x and not x.startswith("#")}  # values that are never fandoms
     m["decompose"] = {}                          # one contextual value -> parts in several columns (e.g. "Fate SI" -> Type-Moon + SI/OC)
     for r in both("decompose.csv"):
         m["decompose"][norm(r["value"])] = {k: [x.strip() for x in (r.get(k) or "").split(";") if x.strip()]
                                              for k in ("fandoms", "characters", "tags", "genres")}
     m["gsplit"] = {r["combined"]: r["atoms"].split("|") for r in both("genres_split.csv")}
-    m["gcanon"] = {r["variant"]: r["canonical"] for r in both("genres_canon.csv")}
-    m["gallow"] = {norm(x) for x in read_lines(os.path.join(DEF, "genres_allow.txt")) + read_lines(os.path.join(odir, "genres_allow.txt")) if x and not x.startswith("#")}
+    m["gcanon"] = ao3_pairs("genres.csv")        # AO3 genre synonyms first; curated rows win
+    m["gcanon"].update({r["variant"]: r["canonical"] for r in both("genres_canon.csv")})
     m["rating"] = {norm(x) for x in read_lines(os.path.join(DEF, "ratings.txt")) + read_lines(os.path.join(odir, "ratings.txt")) if x and not x.startswith("#")}
     m["junk_exact"], m["junk_rx"] = set(), []
     for ln in read_lines(os.path.join(DEF, "junk.txt")) + read_lines(os.path.join(odir, "junk.txt")):
