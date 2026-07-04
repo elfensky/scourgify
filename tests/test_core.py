@@ -123,6 +123,22 @@ def test_parse_resp_rejects_formula_injection():
     _, nt = parse_resp('{"tags": [], "new": ["=SUM(A1:A9)", "+curse", "@cmd", "Sentient Toaster Romance"]}')
     assert nt == ["Sentient Toaster Romance"]
 
+def test_parse_resp_snaps_near_miss_into_vocab():
+    assert "Slow Burn" in VOCAB and "Enemies to Lovers" in VOCAB       # guard: test data still valid
+    vt, nt = parse_resp('{"tags": [], "new": ["Slow-Burn", "Enemies-To-Lovers", "Sentient Toaster Romance"]}')
+    assert "Slow Burn" in vt and "Enemies to Lovers" in vt             # hyphen/case variants snap to canonical spelling
+    assert nt == ["Sentient Toaster Romance"]                          # genuinely novel still surfaces as new
+
+def test_annotate_new_verdict_split():
+    import collections
+    from scourgify.classify import annotate_new
+    ranked = collections.Counter({"Slow-Burn": 5, "Dragon Politics": 2})
+    rows = annotate_new(ranked, cutoff=0.86, existing=["Slow Burn", "Time Travel"])
+    by = {r[0]: r for r in rows}
+    assert by["Slow-Burn"][4] == "near-duplicate" and by["Slow-Burn"][2] == "Slow Burn"   # variant -> nearest existing
+    assert by["Dragon Politics"][4] == "new"                          # no close match -> genuinely new
+    assert rows[0][4] == "new"                                        # new sorted ahead of near-duplicates
+
 def test_sparkline():
     assert sparkline([]) == ""
     assert sparkline([0, 0]) == "▁▁"                                   # flat zero series doesn't divide by zero
