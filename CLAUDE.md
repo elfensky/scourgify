@@ -177,6 +177,9 @@ review-map CSVs (in `data/`). Curated cross-library knowledge (e.g. franchise un
 Git-flow-lite (mirrors the sibling `lintle` repo):
 - **`develop`** — the integration branch and your everyday working branch. All work (features, fixes, docs, vocab)
   lands here via PR; CI (`ci.yml` — tests on Python 3.10 + 3.13) runs on every push/PR to `develop` or `main`.
+  **`develop` history stays LINEAR** — land feature PRs with `gh pr merge --rebase` (or `git merge --ff-only`),
+  never a merge commit: history should read as if the commits were made on `develop` directly. Merge commits
+  are reserved for Release PRs into `main` (below), where the 2nd-parent arc is the point.
 - **`main`** — release-only and **branch-protected**: PRs required (0 approvals, so you self-merge), both CI
   checks must pass, no force-push/deletion, **enforced for admins** — i.e. *no direct pushes, even for the owner*.
   Its **first-parent history is exactly one `Release vX.Y.Z` commit per release**; each is a `--no-ff` merge of
