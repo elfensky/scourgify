@@ -163,6 +163,94 @@ def build(dump, floor=FLOOR):
     print(f"  {os.path.relpath(bdir, HERE):44} {len(multis)//50+1:>4} multi + {len(singles_l)//250+1} singles batches")
 
 
+def assemble(dump, result_path, floor=FLOOR):
+    """Combine the LLM clustering result with the dump into defaults/ao3/universes.csv.
+
+    Decisions are verdict-gated: merges/splits apply only when the adversarial verify
+    (or the referee) confirmed them; unsure claims go to data/ao3_build/universes_review.csv."""
+    wrapper = json.load(open(result_path))
+    res = wrapper.get("result", wrapper)
+    canon, aliases = read_dump(dump)
+    als = {}                                                   # canonical fandom name -> [aliases]
+    for t, name, mid in aliases:
+        c = canon.get(mid)
+        if t == "Fandom" and c and c[0] == "Fandom" and name != c[1]:
+            als.setdefault(c[1], []).append(name)
+
+    verdict = {}                                               # (kind, child.lower, parent.lower) -> confirm/refute/unsure
+    vd = res["verdicts"]
+    for c in res["claims"]:
+        v = vd.get(c["id"], {}).get("verdict", "unsure")
+        verdict[(c["kind"], c["child"].lower(), c["parent"].lower())] = v
+
+    def merge_ok(child, parent):
+        return verdict.get(("merge", child.lower(), parent.lower()), "confirm") == "confirm"
+
+    root, review = {}, []                                      # name -> master (pre-flatten)
+    for g in res["multi"]:
+        unis = g["universes"]
+        if len(unis) > 1:                                      # a claimed same-name split
+            skey = ("split", g["stem"].lower(), " / ".join(u["master"] for u in unis).lower())
+            v = verdict.get(skey, "confirm")
+            if v == "refute":                                  # verifier says one franchise after all
+                review.append(("split-refuted", g["stem"], g["stem"], ""))
+                unis = [{"master": g["stem"], "members": [m for u in unis for m in u["members"]]     # plain shared name
+                                              + [u["master"] for u in unis if u["master"] != g["stem"]]}]
+            elif v == "unsure":
+                review.append(("split-unsure", g["stem"], " / ".join(u["master"] for u in unis), ""))
+        parent = g.get("parent") if g.get("parent") and merge_ok(g["stem"], g["parent"]) else None
+        if g.get("parent") and not parent:
+            review.append(("parent-dropped", g["stem"], g["parent"], vd.get("", {}).get("note", "")))
+        for u in unis:
+            master = parent if (parent and not u.get("reason")) else u["master"]
+            if u.get("reason"):
+                review.append(("kept-separate", u["master"], g["stem"], u["reason"]))
+            for mname in u["members"]:
+                if mname != master: root[mname] = master
+            if u["master"] != master: root[u["master"]] = master
+    for a in res["adaptations"]:
+        v = verdict.get(("merge", a["name"].lower(), a["parent"].lower()), "unsure")
+        if v == "confirm" and a["name"] != a["parent"]:
+            root.setdefault(a["name"], a["parent"])
+        elif v == "unsure":
+            review.append(("adaptation-unsure", a["name"], a["parent"], a.get("reason", "")))
+
+    def resolve(n, _seen=None):                                # flatten chains; cycle-safe
+        _seen = _seen or set()
+        while n in root and n not in _seen:
+            _seen.add(n); n = root[n]
+        return n
+
+    grouped = {}                                               # every floor-passing canonical -> its final master
+    for cid, (t, name, uses) in canon.items():
+        if t != "Fandom" or uses < floor: continue
+        if name in root:
+            grouped[name] = resolve(name)
+        else:                                                  # LLM didn't touch it: mechanical stem rule
+            stem = franchise_stem(name)
+            grouped[name] = resolve(stem) if name != stem else name
+
+    rows = set()
+    for name, master in grouped.items():
+        if name == master: continue
+        rows.add((master, name, "related" if name in root else "media"))
+        for al in als.get(name, []):
+            if al != master: rows.add((master, al, "alias"))
+    for name in grouped:                                       # aliases of standalone masters too
+        if grouped[name] == name:
+            for al in als.get(name, []):
+                if al != name: rows.add((name, al, "alias"))
+    skip = exceptions()
+    rows = {(m, n, r) for m, n, r in rows if (n, m) not in skip}
+    masters = {m for m, _, _ in rows}
+    rows = {(m, n, r) for m, n, r in rows if n not in masters} # acyclic: a master never appears as a name
+    write_pairs(os.path.join(OUT, "universes.csv"), sorted(rows))
+    rev_path = os.path.join(BUILD, "universes_review.csv")
+    with open(rev_path, "w", newline="") as f:
+        w = csv.writer(f); w.writerow(["kind", "subject", "target", "note"]); w.writerows(sorted(set(review)))
+    print(f"  {os.path.relpath(rev_path, HERE):44} {len(set(review)):7,} rows (human review)")
+
+
 def selftest():
     assert franchise_stem("A Song of Ice and Fire - George R. R. Martin") == "A Song of Ice and Fire"
     assert franchise_stem("X | Y | My Hero Academia (Anime)") == "My Hero Academia"
@@ -184,10 +272,13 @@ def main():
     p.add_argument("--dump", default=os.path.expanduser("~/Downloads/20210226-stats/tags-20210226.csv"))
     p.add_argument("--floor", type=int, default=FLOOR)
     p.add_argument("--selftest", action="store_true")
+    p.add_argument("--assemble", metavar="RESULT_JSON",
+                   help="combine the LLM clustering result into defaults/ao3/universes.csv")
     a = p.parse_args()
     if a.selftest: return selftest()
     if not os.path.exists(a.dump):
         raise SystemExit(f"dump not found: {a.dump}")
+    if a.assemble: return assemble(a.dump, a.assemble, a.floor)
     build(a.dump, a.floor)
 
 

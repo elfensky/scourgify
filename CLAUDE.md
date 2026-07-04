@@ -103,9 +103,12 @@ confirmation / `--yes`). **Do NOT bulk re-fetch FFF metadata** — it re-pollute
 
 ## Architecture
 
-**`wrangle.py` — the unified engine.** Subcommands `audit` / `apply` / `setup`. Loads three layers:
-`defaults/` (generic, shipped) ← `config.toml` (column map + behavior toggles) ← `overrides/` (per-user,
-**gitignored**, same file formats, wins on conflict). `load_maps()` builds the in-memory maps; `transform()`
+**`wrangle.py` — the unified engine.** Subcommands `audit` / `apply` / `setup`. Loads the data layers
+(first to last, later wins): **`defaults/ao3/`** (generated master lists — see below) ← `defaults/`
+(curated generic taste) ← `config.toml` (column map + behavior toggles) ← `overrides/` (per-user,
+**gitignored**, same file formats, survives pip upgrades). `load_maps()` builds the in-memory maps
+(fandom and trope chains are flattened, so a curated re-point of a generated master cascades);
+`transform()`
 is the per-book core: fandom alias→canonical, character folding (global + fandom-scoped), genre
 split→canon→route, tag junk-drop / trope-route / redundancy-strip. Strips a redundant tag only when the
 concept already lives in that book's structured column (**backfill-before-strip**).
@@ -134,6 +137,18 @@ the public list prices behind the wizard's per-engine estimates; `bakeoff()` is 
 **`staleness.py`** — re-derives `#status` for the activity family {In-Progress, Hiatus, Abandoned} from
 `#updated` age (`<2y`→In-Progress, `2–5y`→Hiatus, `≥5y`→Abandoned); idempotent + self-correcting on re-run.
 Completed/Dropped/Rewritten and date-less books are never touched.
+
+**`defaults/ao3/` — the generated master taxonomy** (universes/tags/characters/genres as `master,name,rel`
+pair rows; ~150k rows, ~7MB, ships in the wheel). Built by **`build_ao3_layer.py`** from the OTW
+["Selective data dump for fan statisticians"](https://archiveofourown.org/admin_posts/18804) (2021-02-26):
+mechanical extraction of canonical+merger pairs, then an LLM batch workflow clusters fandoms
+one-universe-per-franchise (Haiku bulk → Sonnet adversarial verify → Opus referee;
+`--assemble <result.json>` combines the verdict-gated decisions into `universes.csv`). NEVER hand-edit
+these files — regeneration overwrites them; hand decisions go in curated `defaults/` (re-points cascade)
+or `defaults/ao3_exceptions.txt` (pairs excluded from generation, with reasons — e.g. AO3 warning-shadow
+mergers that don't transfer to a Calibre library, since Calibre has no warnings field). Policy: **adapt
+AO3 everywhere except franchise unification** — curated/override rows that merely fight AO3 spellings
+get pruned, not kept.
 
 **`build_defaults.py`** — maintainer tool: regenerates `defaults/` from the source library's gitignored
 review-map CSVs (in `data/`). Curated cross-library knowledge (e.g. franchise unification) lives in its `CURATED_FAN`.

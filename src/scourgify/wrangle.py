@@ -66,6 +66,10 @@ def load_maps(cfg):
         else: m["char"][r["variant"]] = r["canonical"]
     m["fan"] = ao3_pairs("universes.csv")
     m["fan"].update({r["alias"]: r["canonical"] for r in both("fandoms.csv")})
+    for a in m["fan"]:                           # flatten chains so a curated re-point of an ao3 master cascades
+        t, seen = m["fan"][a], {a}
+        while t in m["fan"] and t not in seen: seen.add(t); t = m["fan"][t]
+        m["fan"][a] = t
     m["fanvals"] = {norm(v) for v in m["fan"].values()}
     # AO3 freeform folds route dynamically: allowlisted canonical -> genre, else tag; curated rows win
     tropes = {a: (c, "genre" if norm(c) in m["gallow"] else "tag") for a, c in ao3_pairs("tags.csv").items()}
