@@ -157,7 +157,11 @@ def adopt_franchises(path):
     dst = os.path.join(os.getcwd(), "overrides", "fandoms.csv")
     os.makedirs(os.path.dirname(dst), exist_ok=True); _backup(dst)
     d = _delim(dst)
-    existing = {r["variant"] for r in csv.DictReader(open(dst), delimiter=d)} if os.path.exists(dst) else set()
+    existing = set()
+    if os.path.exists(dst):
+        rdr = csv.DictReader(open(dst), delimiter=d)                     # overrides/fandoms.csv header is alias,canonical
+        key = "alias" if "alias" in (rdr.fieldnames or []) else "variant"
+        existing = {r[key] for r in rdr}
     added = 0
     with open(dst, "a", newline="") as f:
         cw = csv.writer(f, delimiter=d)
