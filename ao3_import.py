@@ -74,17 +74,24 @@ def resolve_ids(rows, need_ids):
 
 
 def franchise_stem(name):
-    """AO3 canonical fandom -> franchise base name: strip '& Related Fandoms', ' - <qualifier>'
-    and trailing parentheticals like (TV) / (Anime & Manga) / (Video Game)."""
-    s = re.sub(r"\s*&\s*Related Fandoms\s*$", "", name)
+    """AO3 canonical fandom -> franchise base name: take the English segment of pipe names
+    (native | romaji | English), strip '& Related Fandoms', ' - <qualifier>' and trailing
+    parentheticals like (TV) / (Anime & Manga) / (Video Game)."""
+    s = name
+    if "|" in s: s = s.split("|")[-1]
+    s = re.sub(r"\s*&\s*Related Fandoms\s*$", "", s.strip())
+    s = re.sub(r"\s*\([^)]*\)\s*$", "", s)
     s = s.split(" - ")[0]
     s = re.sub(r"\s*\([^)]*\)\s*$", "", s)
     return s.strip() or name
 
 
-def franchises(lib, validated, aliases, canon_by_id):
+def franchises(lib, validated, aliases, canon_by_id, counts=None):
     """Group library fandom values by franchise stem -> [(universe, variant, ao3_name), ...].
+    The universe name comes from the library's dominant spelling (most books) — the user's own
+    primary wins over AO3's canonical form; a lone alias falls back to its AO3 stem.
     Only groups where something would actually change; biggest groups first."""
+    counts = counts or {}
     groups = {}
     for n, spellings in lib["fandom"].items():
         ao3 = None
@@ -93,15 +100,22 @@ def franchises(lib, validated, aliases, canon_by_id):
         elif n in validated["fandom"]:
             ao3 = validated["fandom"][n][0]
         stem = franchise_stem(ao3 or next(iter(sorted(spellings))))
-        g = groups.setdefault(norm(stem), {"stems": set(), "members": []})
-        g["stems"].add(stem)
-        for v in sorted(spellings): g["members"].append((v, ao3 or ""))
+        g = groups.setdefault(norm(stem), [])
+        for v in sorted(spellings): g.append((v, ao3 or ""))
     rows = []
-    for g in sorted(groups.values(), key=lambda g: -len(g["members"])):
-        universe = sorted(g["stems"], key=lambda s: (len(s), s))[0]     # shortest stem spelling
-        if all(v == universe for v, _ in g["members"]): continue        # nothing to change
-        for v, ao3 in g["members"]: rows.append([universe, v, ao3])
+    for g in sorted(groups.values(), key=lambda g: -len(g)):
+        dom, _ = max(g, key=lambda m: (counts.get(m[0], 0), m[0]))
+        universe = franchise_stem(dom)          # the library's own dominant spelling is the primary
+        if all(v == universe for v, _ in g): continue                   # nothing to change
+        for v, ao3 in g: rows.append([universe, v, ao3])
     return rows
+
+
+def fandom_counts(con):
+    cnt = {}
+    for vals in (read_custom_column(con, "#fandoms", multi=True) or {}).values():
+        for v in vals: cnt[v] = cnt.get(v, 0) + 1
+    return cnt
 
 
 def _backup(path):
@@ -148,7 +162,7 @@ def adopt_franchises(path):
     with open(dst, "a", newline="") as f:
         cw = csv.writer(f, delimiter=d)
         for r in csv.DictReader(open(path)):
-            v, uni = r["variant"], r["universe"]
+            v, uni = r["variant"], r.get("universe") or r["canonical"]   # accepts ao3_fandoms.csv too
             if v != uni and v not in existing:
                 cw.writerow([v, uni]); existing.add(v); added += 1
     print(f"adopted {added} franchise folds -> {dst}")
@@ -187,7 +201,8 @@ def emit(lib, validated, aliases, canon_by_id):
     vrows = sorted(((name, uses) for name, uses in validated["tag"].values()), key=lambda x: -x[1])
     w("ao3_vocab.csv", ["name", "uses"], vrows)
 
-    w("ao3_franchises.csv", ["universe", "variant", "ao3"], franchises(lib, validated, aliases, canon_by_id))
+    w("ao3_franchises.csv", ["universe", "variant", "ao3"],
+      franchises(lib, validated, aliases, canon_by_id, fandom_counts(ro_connect())))
 
     urows = [[kind, v] for kind in ("fandom", "character")
              for n, vs in sorted(lib[kind].items())
@@ -222,9 +237,9 @@ def selftest():
     assert franchise_stem("Game of Thrones (TV)") == "Game of Thrones"
     assert franchise_stem("Sherlock Holmes & Related Fandoms") == "Sherlock Holmes"
     assert franchise_stem("Assassin's Creed - All Media Types") == "Assassin's Creed"
-    fr = franchises({"fandom": {norm("GoT"): {"GoT"}, norm("Naruto"): {"Naruto"}}, "character": {}, "tag": {}},
-                    validated, aliases, canon)
-    assert ["Game of Thrones", "GoT", "Game of Thrones (TV)"] in fr        # alias -> stem of its canonical
+    fr = franchises({"fandom": {norm("Game of Thrones (TV)"): {"Game of Thrones (TV)"}, norm("Naruto"): {"Naruto"}},
+                     "character": {}, "tag": {}}, validated, aliases, canon)
+    assert ["Game of Thrones", "Game of Thrones (TV)", ""] in fr           # media qualifier stripped
     assert not any(v == "Naruto" for _, v, _ in fr)                        # already the universe name -> untouched
     print("selftest ok")
 
