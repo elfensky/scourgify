@@ -17,7 +17,7 @@ Engines (--engine):  apple = on-device Apple Foundation Models via ./afm (free; 
           the sparse-book default (< --min-tags) applies only when no scope flag is given. --apply auto-creates the
           #wrangled datetime column and stamps EVERY processed book, so the state lives IN the library — no external
           file. Selection semantics live in select.py (shared with the wizard header)."""
-import argparse, os, re, csv, json, subprocess, collections, time
+import argparse, os, re, csv, json, subprocess, collections, time, difflib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from scourgify import select
 from scourgify.common import HERE, DATA, ro_connect, custom_column_id, run_writer, library
@@ -35,7 +35,9 @@ except ImportError:
 PROP = f"{DATA}/classify_proposal.csv"
 RANK = f"{DATA}/classify_newtags_ranked.csv"
 FAIL = f"{DATA}/classify_failures.csv"
+AO3_VOCAB = f"{DATA}/ao3_vocab.csv"     # per-library canonical AO3 freeforms (name,uses); absent on fresh installs
 SPEND_GATE = 200        # cloud runs above this many books require an explicit yes
+DEDUP_CUTOFF = 0.86     # difflib ratio at/above which a proposed tag counts as a variant of an existing one
 
 # $/MTok (input, output) for each engine's default model — public list prices as of 2026-07; edit when they change.
 PRICING = {"apple": (0.0, 0.0), "claude": (1.00, 5.00), "openai": (0.15, 0.60), "gemini": (0.30, 2.50)}
@@ -57,6 +59,27 @@ def load_vocab():
         _VOCAB = terms
     return _VOCAB
 
+_AO3 = None
+def load_ao3_vocab():
+    """The per-library AO3 canonical freeforms (data/ao3_vocab.csv 'name' column, built by ao3_import.py).
+    Absent on a fresh install — degrade to [] silently; it's an extra reference layer, not a requirement."""
+    global _AO3
+    if _AO3 is None:
+        try:
+            _AO3 = [r["name"] for r in csv.DictReader(open(AO3_VOCAB)) if r.get("name", "").strip()]
+        except OSError:
+            _AO3 = []
+    return _AO3
+
+def existing_terms():
+    """The reference a proposed-new tag is checked against: curated vocab ∪ ao3_vocab.csv, deduped
+    case-insensitively with the curated spelling winning on collision (~1,450 terms — trivial for difflib)."""
+    seen, out = set(), []
+    for t in load_vocab() + load_ao3_vocab():
+        if t.lower() not in seen:
+            seen.add(t.lower()); out.append(t)
+    return out
+
 def est_cost(n_books, engine):
     """Rough list-price $ estimate for a run: input ≈ prompt chars/4 tokens, output ≈ 80 tokens/book."""
     i, o = PRICING.get(engine, (0.0, 0.0))
@@ -72,21 +95,49 @@ def prompt_for(desc, maxtags):
             "list and would be worth adding to the vocabulary. No plot specifics, character names, or fandoms; [] if none.\n"
             f"CONTROLLED LIST: {', '.join(load_vocab())}\n\nDESCRIPTION:\n{desc[:1500]}\n\nJSON:")
 
-def parse_resp(text, maxtags=6):
+def parse_resp(text, maxtags=6, cutoff=DEDUP_CUTOFF):
     m = re.search(r"\{.*\}", text, re.S)
     if not m: return [], []
     try: obj = json.loads(m.group(0))
     except Exception: return [], []
     vlow = {v.lower(): v for v in load_vocab()}
+    vkeys = list(vlow)                          # lowercased vocab, for the fuzzy near-miss snap below
     vt = [vlow[str(t).strip().lower()] for t in obj.get("tags", []) if str(t).strip().lower() in vlow]
     if len(vt) > maxtags * 2: vt = []          # model echoed the list, not selecting
+    def keep(canon):
+        if canon not in vt: vt.append(canon)   # snapped/exact hit -> apply the canonical vocab spelling
     nt, seen = [], set()
     for t in obj.get("new", []):
-        t = str(t).strip()
+        t = str(t).strip(); tl = t.lower()
         # first char must be alphanumeric: also blocks =/+/-/@ spreadsheet-formula injection in the review CSVs
-        if t and t[0].isalnum() and 1 < len(t) <= 40 and t.lower() not in vlow and t.lower() not in seen:
-            seen.add(t.lower()); nt.append(t)
+        if not (t and t[0].isalnum() and 1 < len(t) <= 40): continue
+        if tl in vlow: keep(vlow[tl]); continue                     # already a vocab term the model mislabeled "new"
+        if tl in seen: continue
+        near = difflib.get_close_matches(tl, vkeys, n=1, cutoff=cutoff)
+        if near: keep(vlow[near[0]])           # ponytail: fuzzy snap can mis-map look-alikes; --dedup-cutoff tunes it
+        else: seen.add(tl); nt.append(t)
     return vt[:maxtags], nt[:3]
+
+
+def annotate_new(ranked, cutoff=DEDUP_CUTOFF, existing=None):
+    """Smart review rows for the proposed-new tags: for each, its nearest existing tag
+    (curated vocab ∪ ao3_vocab.csv) + similarity + verdict. Genuinely-new first (by count), near-dupes last.
+    Pure (pass `existing` in tests) — this is the once-per-run matching against the full reference."""
+    existing = existing_terms() if existing is None else existing
+    elow = {e.lower(): e for e in existing}
+    keys = list(elow)
+    rows = []
+    for tag, cnt in ranked.most_common():
+        near = difflib.get_close_matches(tag.lower(), keys, n=1, cutoff=0.0)
+        if near:
+            nearest = elow[near[0]]
+            sim = round(difflib.SequenceMatcher(None, tag.lower(), near[0]).ratio(), 2)
+        else:
+            nearest, sim = "", 0.0
+        verdict = "near-duplicate" if sim >= cutoff else "new"
+        rows.append([tag, cnt, nearest, sim, verdict])
+    rows.sort(key=lambda r: (r[4] != "new", -r[1]))    # new first, then by descending count
+    return rows
 
 
 # ---- engines ----
@@ -319,7 +370,7 @@ def bakeoff(a, targets, engines, n=5):
         eng = ENGINES[e]("", a.timeout)                       # per-engine default model
         for b, d in targets[:n]:
             try:
-                vt, nt = parse_resp(eng.ask(prompt_for(d, a.max_tags)), a.max_tags); err = ""
+                vt, nt = parse_resp(eng.ask(prompt_for(d, a.max_tags)), a.max_tags, a.dedup_cutoff); err = ""
             except Exception as ex:
                 vt, nt, err = [], [], f"{type(ex).__name__}: {ex}"[:60]
             out.setdefault(b, {})[e] = (vt, nt, err)
@@ -364,7 +415,7 @@ def classify_run(a):
                 if k == tries - 1: return "", err
                 time.sleep(2 ** k)
     def work(b, d):
-        out, err = ask_retry(prompt_for(d, a.max_tags)); vt, nt = parse_resp(out, a.max_tags); return b, err, vt, nt
+        out, err = ask_retry(prompt_for(d, a.max_tags)); vt, nt = parse_resp(out, a.max_tags, a.dedup_cutoff); return b, err, vt, nt
 
     failures = []
     print(f"  {len(todo)} to do this run, {a.workers} concurrent")
@@ -400,19 +451,25 @@ def classify_run(a):
     ranked = collections.Counter()
     for vt, nt in proposal.values():
         for t in nt: ranked[t] += 1
+    rows = annotate_new(ranked, a.dedup_cutoff)               # nearest existing tag + verdict for each candidate
+    fresh = [r for r in rows if r[4] == "new"]                # genuinely novel — the ones worth promoting
     with open(RANK, "w", newline="") as f:
-        w = csv.writer(f); w.writerow(["proposed_tag", "count"])
-        for t, cnt in ranked.most_common(): w.writerow([t, cnt])
+        w = csv.writer(f); w.writerow(["proposed_tag", "count", "nearest_existing", "similarity", "verdict"])
+        w.writerows(rows)
     print(f"\nOutput 1 (apply): {sum(1 for v in proposal.values() if v[0])} books with vocab tags -> {os.path.basename(PROP)} (col 'added_tags')")
-    print(f"Output 2 (grow):  {len(ranked)} distinct new-tag candidates -> {os.path.basename(RANK)} (review -> promote into defaults/classify_vocab.txt)")
-    if RICH and ranked:
-        tbl = Table(title="top new-tag candidates (review → promote into the vocab)")
+    print(f"Output 2 (grow):  {len(fresh)} new + {len(rows) - len(fresh)} near-dupes of existing tags -> {os.path.basename(RANK)} (promote 'verdict=new' rows into defaults/classify_vocab.txt)")
+    if RICH and rows:
+        tbl = Table(title="top new-tag candidates (verdict=new → promote; near-duplicate ≈ an existing tag)")
         tbl.add_column("count", justify="right", style="cyan"); tbl.add_column("proposed tag")
-        for tag, cnt in ranked.most_common(25): tbl.add_row(str(cnt), tag)
+        tbl.add_column("nearest existing", style="dim"); tbl.add_column("verdict")
+        for tag, cnt, nearest, sim, verdict in rows[:25]:
+            tbl.add_row(str(cnt), tag, f"{nearest} ({sim})" if nearest else "",
+                        f"[green]new[/]" if verdict == "new" else f"[yellow]≈ dupe[/]")
         _con.print(tbl)
-    else:
-        print("top new-tag candidates:")
-        for t, cnt in ranked.most_common(25): print(f"  {cnt:4}  {t}")
+    elif rows:
+        print("top new-tag candidates (verdict | count | tag | nearest existing):")
+        for tag, cnt, nearest, sim, verdict in rows[:25]:
+            print(f"  {verdict:14} {cnt:4}  {tag}" + (f"  ≈ {nearest} ({sim})" if nearest else ""))
     print("\nApply vocab tags with: scourgify classify --apply   (Calibre closed)")
 
 
@@ -429,6 +486,8 @@ def build_parser():
     p.add_argument("--workers", type=int, default=8, metavar="N", help="concurrent API requests (cloud engines are I/O-bound)")
     p.add_argument("--min-tags", type=int, default=2, metavar="N", help="process books with fewer than N tags")
     p.add_argument("--max-tags", type=int, default=6, metavar="N", help="max vocab tags per book")
+    p.add_argument("--dedup-cutoff", type=float, default=DEDUP_CUTOFF, metavar="R",
+                   help=f"difflib ratio (0-1) to treat a proposed tag as a variant of an existing one (default {DEDUP_CUTOFF})")
     p.add_argument("--model", default="", help="override the per-engine default model")
     p.add_argument("--timeout", type=int, default=60, metavar="S", help="per-request HTTP timeout")
     p.add_argument("--text-fallback", action="store_true", help="sample the book's own prose when the description is thin")
