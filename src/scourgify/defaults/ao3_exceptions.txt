@@ -10,3 +10,5 @@ Graphic Violence,Violence
 Trauma Recovery,Recovery
 Independent,Independence
 Teen,Teenagers
+# Disney properties keep their own plain names (maintainer ruling)
+DuckTales,DuckTales (1987)
