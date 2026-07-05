@@ -65,12 +65,15 @@ def load_maps(cfg):
         if r.get("fandom"): m["char_fd"][(r["variant"], r["fandom"])] = r["canonical"]
         else: m["char"][r["variant"]] = r["canonical"]
     m["fan"] = ao3_pairs("universes.csv")
-    m["fan"].update({r["alias"]: r["canonical"] for r in both("fandoms.csv")})
+    curated_fan = {r["alias"]: r["canonical"] for r in both("fandoms.csv")}
+    m["fan"].update(curated_fan)
     for a in m["fan"]:                           # flatten chains so a curated re-point of an ao3 master cascades
         t, seen = m["fan"][a], {a}
         while t in m["fan"] and t not in seen: seen.add(t); t = m["fan"][t]
         m["fan"][a] = t
-    m["fanvals"] = {norm(v) for v in m["fan"].values()}
+    # fanvals feeds the misfiled-genre rescue — CURATED names only: the 22k AO3 universe names
+    # include generic words (Empire, Hero, Kingdom) that would hijack ordinary genre values
+    m["fanvals"] = {norm(v) for v in curated_fan.values()}
     # AO3 freeform folds route dynamically: allowlisted canonical -> genre, else tag; curated rows win
     tropes = {a: (c, "genre" if norm(c) in m["gallow"] else "tag") for a, c in ao3_pairs("tags.csv").items()}
     tropes.update({v: (cn, rt) for v, cn, rt in
@@ -318,15 +321,7 @@ def apply_changes(cfg, m, do_write, force=False, cli_hint=True, detail=True):
     print("APPLY" if do_write else "PRE-APPLY (no write)")
     for lab, ch in changes.items(): print(f"  {lab:14} books changed: {len(ch)}")
     if detail and diffs:
-        ids = sorted(diffs)[-DETAIL_BOOKS:]                            # highest ids = newest books first
-        con = ro_connect()
-        titles = dict(con.execute(f"SELECT id, title FROM books WHERE id IN ({','.join('?' * len(ids))})", ids))
-        for b in reversed(ids):
-            print(f"  #{b}  {str(titles.get(b, ''))[:64]}")
-            for lab, (rm, ad) in diffs[b].items():
-                bits = [f"-{x}" if dest is None else f"-{x}(→{dest})" for x, dest in rm] + [f"+{x}" for x in ad]
-                print(f"      {lab:12} " + "  ".join(bits))
-        if len(diffs) > len(ids): print(f"  … +{len(diffs) - len(ids)} more books (scourgify audit shows every value)")
+        _preview_report(m, diffs)
     print(f"  SAFETY losing last fandom: {lostF} | character: {lostC} | tag assignments: {tagsB} -> {tagsA}")
     if lostF or lostC: raise SystemExit("ABORT: data loss detected")
     tag_loss_guard(tagsB, tagsA, force)
@@ -335,6 +330,95 @@ def apply_changes(cfg, m, do_write, force=False, cli_hint=True, detail=True):
     elif cli_hint:
         print("Re-run: scourgify apply --apply   (Calibre closed; writes shell out to calibre-debug)")
     return len({b for ch in changes.values() for b in ch})
+
+MASS_MIN = 3             # a change on this many books is "mass" — aggregated, not listed per book
+
+def _colmap(m, lab, v):
+    """Where would this column's engine fold v? (for pairing a removal with its rename target)"""
+    if lab == "tags": return m["trope"].get(v, (None,))[0]
+    if "fandom" in lab: return m["fan"].get(v)
+    if "character" in lab: return m["char"].get(v)
+    if "genre" in lab: return m["gcanon"].get(v)
+    return None
+
+
+def _classify_edits(m, diffs):
+    """diffs -> (mass Counter{(kind, where, before, after): n_books}, unique {book: [(kind, where, before, after)]}).
+    kind: 'rename' (fold within a column — incl. merging into an already-present canonical),
+    'move' (crossed columns), 'drop' (gone), 'add' (appeared)."""
+    per_book = {}
+    for b, bylab in diffs.items():
+        edits = []
+        for lab, (rm, ad) in bylab.items():
+            added = set(ad)
+            bynorm = {norm(w): w for w in ad}
+            for v, dest in rm:
+                if dest:
+                    edits.append(("move", f"{lab} → {dest}", v, "")); continue
+                w = _colmap(m, lab, v) or bynorm.get(norm(v))   # engine fold, else a same-norm respelling
+                if w:
+                    edits.append(("rename", lab, v, w)); added.discard(w)
+                else:
+                    edits.append(("drop", lab, v, ""))
+            moved_in = {norm(v) for l2, (rm2, _) in bylab.items() for v, dest in rm2 if dest == lab}
+            for w in sorted(added):
+                if norm(w) not in moved_in:                     # a move-in is already shown from its source side
+                    edits.append(("add", lab, "", w))
+        per_book[b] = edits
+    mass = collections.Counter(e for edits in per_book.values() for e in set(edits))
+    mass = {e: n for e, n in mass.items() if n >= MASS_MIN}
+    unique = {b: [e for e in edits if e not in mass] for b, edits in per_book.items()}
+    return mass, {b: es for b, es in unique.items() if es}
+
+
+def _preview_report(m, diffs, top=15, books=DETAIL_BOOKS):
+    """The human-readable change report: aggregated mass folds + per-book unique changes.
+    rich tables/tree when available; aligned plain text otherwise."""
+    mass, unique = _classify_edits(m, diffs)
+    def fmt(kind, where, before, after):
+        return {"rename": (where, f"{before} → {after}"), "move": (where, before),
+                "drop": (where, f"− {before} (dropped)"), "add": (where, f"+ {after}")}[kind]
+    top_mass = sorted(mass.items(), key=lambda kv: -kv[1])[:top]
+    rest = len(mass) - len(top_mass)
+    ids = sorted(unique)[-books:]                               # highest ids = newest books
+    con = ro_connect()
+    titles = dict(con.execute(f"SELECT id, title FROM books WHERE id IN ({','.join('?' * len(ids))})", ids)) if ids else {}
+    def grouped(edits):
+        """[(kind, where, joined-values)] — one line per relation, values joined."""
+        g = {}
+        for kind, where, before, after in sorted(edits):
+            g.setdefault((kind, where), []).append(
+                {"rename": f"{before} → {after}", "move": before, "drop": before, "add": after}[kind])
+        label = {"rename": "", "move": "", "drop": "dropped: ", "add": "added: "}
+        return [(where if kind in ("rename", "move") else f"{label[kind]}{where}", " · ".join(vals))
+                for (kind, where), vals in g.items()]
+    if RICH:
+        from rich.tree import Tree
+        t = Table(title=f"mass folds — same change on {MASS_MIN}+ books", title_justify="left")
+        t.add_column("books", justify="right", style="cyan"); t.add_column("where", style="dim"); t.add_column("change")
+        for (kind, where, before, after), n in top_mass:
+            w, c = fmt(kind, where, before, after); t.add_row(f"{n:,}", w, c)
+        if rest > 0: t.add_row("…", "", f"+{rest} more mass folds (scourgify audit shows every value)")
+        _con.print(t)
+        if unique:
+            tree = Tree(f"[bold]unique changes[/] — newest {len(ids)} of {len(unique):,} books")
+            for b in reversed(ids):
+                node = tree.add(f"[bold]#{b}[/]  {str(titles.get(b, ''))[:64]}")
+                for w, vals in grouped(unique[b]):
+                    node.add(f"[dim]{w:22}[/] {vals}")
+            _con.print(tree)
+    else:
+        print(f"  mass folds (same change on {MASS_MIN}+ books):")
+        for (kind, where, before, after), n in top_mass:
+            w, c = fmt(kind, where, before, after); print(f"  {n:6,}x  {w:22} {c}")
+        if rest > 0: print(f"          … +{rest} more mass folds")
+        if unique:
+            print(f"  unique changes (newest {len(ids)} of {len(unique):,} books):")
+            for b in reversed(ids):
+                print(f"  #{b}  {str(titles.get(b, ''))[:64]}")
+                for w, vals in grouped(unique[b]):
+                    print(f"      {w:22} {vals}")
+
 
 def write_config(colmap, beh=None):
     b = beh or {}                                     # preserve existing toggles on re-run; defaults on first run
