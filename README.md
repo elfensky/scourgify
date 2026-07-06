@@ -232,6 +232,17 @@ scourgify classify --apply                          # add the proposed tags (Cal
   aren't re-sent forever). State lives *in the library* (travels with `metadata.db`, no external file). A full
   cloud `--fresh` run is expensive; reserve it for vocab changes.
 
+### Growing the vocab — `scourgify promote`
+After a classify run, novel tag candidates land in `classify_newtags_ranked.csv`. `scourgify promote`
+adjudicates each one **adversarially against the master tag list**: an advocate proposes
+promote / alias / reject, a skeptic (optionally a *different* engine via `--verify-with openai`) tries
+to refute a promote, and the difflib shortlist of nearest master tags grounds both. Verdicts land in
+`data/promote_review.csv` for review; `scourgify promote --apply` folds them into `overrides/`
+(promotes → vocab, aliases → `tropes.csv` + a snap-map that stops re-proposal). Engines and keys are
+exactly classify's (`--engine claude|openai|gemini|mistral|apple`; your own API key in the env; `apple`
+is free/on-device). Grow the *shipped* vocab by running it with a cloud engine from the repo and
+committing the `defaults/classify_vocab.txt` diff.
+
 ## Custom maps from your library (`overrides/`)
 The bundled `defaults/` are generic. Two helper workflows mined library-specific maps into `overrides/`
 (gitignored): AO3-style tag clustering (`overrides/tropes.csv`) and fandom **universe-unification**

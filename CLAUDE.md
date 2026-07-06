@@ -90,6 +90,7 @@ FFF fetch → uv run scourgify apply --apply           # 1. junk-drop/canonicali
           → uv run scourgify classify --incremental  # 3. cheap; only new/changed books (see select.py)
           → review data/classify_proposal.csv        # 4.
           → uv run scourgify classify --apply        # 5. Calibre closed (writes shell to calibre-debug)
+          → scourgify promote                         # adjudicate new-tag candidates → review → promote --apply
 ```
 
 (Or the wizard: `uv run scourgify` walks exactly this loop, guided. Targeted redo:
@@ -132,7 +133,7 @@ flag. `--apply` auto-creates the **`#wrangled`** datetime marker and stamps **ev
 book left unstamped would be re-sent to the LLM forever) — state lives in the library, no external file.
 Proposals/outputs live in `data/` (gitignored); `--apply` archives the proposal to
 `classify_proposal_applied_<ts>.csv` so stale rows never re-add hand-removed tags. `est_cost`/`PRICING` hold
-the public list prices behind the wizard's per-engine estimates; `bakeoff()` is the sample comparison.
+the public list prices behind the wizard's per-engine estimates; `bakeoff()` is the sample comparison. **`promote.py`** reuses classify's engines/`ask_retry`/`existing_terms` to adjudicate `proposed_new` (advocate→skeptic, `--verify-with` for cross-model, human review is the referee), writes `data/promote_review.csv`, and `--apply` folds into `overrides/` + feeds `parse_resp`'s alias snap.
 
 **`staleness.py`** — re-derives `#status` for the activity family {In-Progress, Hiatus, Abandoned} from
 `#updated` age (`<2y`→In-Progress, `2–5y`→Hiatus, `≥5y`→Abandoned); idempotent + self-correcting on re-run.
