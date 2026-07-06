@@ -377,6 +377,21 @@ def bakeoff(a, targets, engines, n=5):
     return out
 
 
+def ask_retry(eng, prompt, tries=4):
+    """Call eng.ask(prompt) with backoff. -> (text, "") on success; ("", reason) on failure.
+    RuntimeError = deterministic content block (no retry); other errors retry with 2**k backoff."""
+    err = ""
+    for k in range(tries):
+        try: return eng.ask(prompt), ""
+        except RuntimeError as e:
+            return "", str(e)[:140]
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"[:140]
+            if k == tries - 1: return "", err
+            time.sleep(2 ** k)
+    return "", err
+
+
 def classify_run(a):
     targets, titles, needs = gather(a)
     print(f"engine={a.engine}  candidate books: {len(targets)}")
@@ -404,18 +419,8 @@ def classify_run(a):
             raise SystemExit(f"  {msg}\n  non-interactive: re-run with --yes to confirm.")
 
     eng = ENGINES[a.engine](a.model, a.timeout)
-    def ask_retry(prompt, tries=4):
-        err = ""
-        for k in range(tries):
-            try: return eng.ask(prompt), ""
-            except RuntimeError as e:              # deterministic content block (no candidates) — retrying is futile
-                return "", str(e)[:140]
-            except Exception as e:                 # transient (HTTP 429/503, network) — back off and retry
-                err = f"{type(e).__name__}: {e}"[:140]
-                if k == tries - 1: return "", err
-                time.sleep(2 ** k)
     def work(b, d):
-        out, err = ask_retry(prompt_for(d, a.max_tags)); vt, nt = parse_resp(out, a.max_tags, a.dedup_cutoff); return b, err, vt, nt
+        out, err = ask_retry(eng, prompt_for(d, a.max_tags)); vt, nt = parse_resp(out, a.max_tags, a.dedup_cutoff); return b, err, vt, nt
 
     failures = []
     print(f"  {len(todo)} to do this run, {a.workers} concurrent")
