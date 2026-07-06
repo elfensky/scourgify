@@ -34,3 +34,36 @@ def parse_decision(text):
     if conf not in ("low", "med", "high"): conf = "med"
     return {"verdict": v, "target": target if v == "alias" else "",
             "reason": str(obj.get("reason", "")).strip()[:200], "confidence": conf}
+
+
+def shortlist(tag, existing=None, n=15):
+    existing = existing_terms() if existing is None else existing
+    elow = {e.lower(): e for e in existing}
+    return [elow[k] for k in difflib.get_close_matches(tag.lower(), list(elow), n=n, cutoff=0.0)]
+
+
+_SCHEMA = ('Return ONLY a JSON object: {"verdict": "promote"|"alias"|"reject", '
+           '"target": "<existing tag>" (required iff alias), '
+           '"reason": "<one sentence>", "confidence": "low"|"med"|"high"}.')
+
+
+def _ctx(cand, near):
+    ex = " | ".join(cand.get("examples", [])[:5])[:600]
+    return (f'CANDIDATE TAG: "{cand["tag"]}" (proposed for {cand["count"]} book(s))\n'
+            f"NEAREST EXISTING MASTER TAGS: {', '.join(near)}\n"
+            f"EXAMPLE BOOKS THAT USED IT: {ex}\n")
+
+
+def advocate_prompt(cand, near):
+    return ("You curate a controlled fanfiction tag vocabulary. Decide whether this NEW candidate tag "
+            "should be PROMOTED (a genuinely new, reusable trope/theme not covered by an existing tag), "
+            "ALIASED to one of the existing tags (same meaning, different words), or REJECTED "
+            "(plot-specific, a character/fandom name, or noise).\n\n" + _ctx(cand, near) + "\n" + _SCHEMA)
+
+
+def skeptic_prompt(cand, proposed, near):
+    return ("You are a SKEPTIC. Another curator proposed the verdict below. Try to REFUTE a promote: "
+            "is there an existing master tag that already covers this candidate (=> alias), or is it "
+            "plot-specific / a character or fandom name / noise (=> reject)? Default to skeptical when "
+            "unsure.\n\n" + _ctx(cand, near) +
+            f'\nPROPOSED VERDICT: {proposed.get("verdict")} — {proposed.get("reason","")}\n\n' + _SCHEMA)

@@ -51,6 +51,18 @@ def test_parse_decision():
     assert parse_decision("not json") is None
 
 
+def test_shortlist_and_prompts():
+    from scourgify.promote import shortlist, advocate_prompt, skeptic_prompt
+    existing = ["Time Travel", "Fluff", "Angst", "Post-Apocalypse", "Slow Burn"]
+    near = shortlist("Post-Apocalyptic", existing, n=3)
+    assert "Post-Apocalypse" in near and len(near) <= 3       # true synonym surfaced despite low string sim
+    cand = {"tag": "Post-Apocalyptic", "count": 4, "examples": ["A ruined world story"]}
+    ap = advocate_prompt(cand, near)
+    assert "Post-Apocalyptic" in ap and "Post-Apocalypse" in ap and "A ruined world story" in ap
+    sp = skeptic_prompt(cand, {"verdict": "promote", "reason": "novel"}, near)
+    assert "refute" in sp.lower() and "Post-Apocalypse" in sp
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
