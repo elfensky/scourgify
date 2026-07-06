@@ -252,6 +252,36 @@ def test_run_raises_on_existing_review():
     del classify.ENGINES["fake2"]
 
 
+def test_decide_downgrades_self_and_unknown_alias():
+    from scourgify.promote import decide
+    cand = {"tag": "Amoral Deity", "count": 1, "examples": ["a cruel god"]}
+    existing = ["Morality", "Deity Worship", "Dark"]
+    # self-alias (target == candidate) -> downgraded to reject, not written
+    d = decide(cand, lambda p: '{"verdict":"alias","target":"Amoral Deity","reason":"same"}', existing=existing)
+    assert d["verdict"] == "reject" and d["target"] == "" and "unverified alias target" in d["reason"]
+    # alias to a target that isn't in the master list -> reject
+    d2 = decide(cand, lambda p: '{"verdict":"alias","target":"Public Sex","reason":"?"}', existing=existing)
+    assert d2["verdict"] == "reject"
+    # alias to a real master (different casing) -> kept, normalized to canonical spelling
+    d3 = decide(cand, lambda p: '{"verdict":"alias","target":"morality","reason":"same idea"}', existing=existing)
+    assert d3["verdict"] == "alias" and d3["target"] == "Morality"
+
+
+def test_apply_skips_hand_edited_self_alias():
+    import csv, os, tempfile
+    from scourgify.promote import apply_decisions
+    d = tempfile.mkdtemp()
+    review = os.path.join(d, "review.csv"); vocab = os.path.join(d, "v.txt")
+    tropes = os.path.join(d, "t.csv"); aliases = os.path.join(d, "a.csv"); ledger = os.path.join(d, "l.csv")
+    with open(review, "w", newline="") as f:
+        w = csv.writer(f); w.writerow(["tag", "count", "verdict", "target", "reason", "confidence", "contested"])
+        w.writerow(["Self Ref", "1", "alias", "Self Ref", "oops", "low", "False"])   # self-alias
+        w.writerow(["Empty Tgt", "1", "alias", "", "oops", "low", "False"])          # empty target
+    apply_decisions(review, vocab, tropes, aliases, ledger)
+    assert not os.path.exists(tropes) and not os.path.exists(aliases)   # nothing junk written
+    assert not os.path.exists(ledger) or "Self Ref" not in open(ledger).read()
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

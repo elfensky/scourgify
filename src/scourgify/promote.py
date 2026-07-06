@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import difflib
 
 from scourgify.classify import RANK, PROP, ENGINES, existing_terms, ask_retry
-from scourgify.common import DATA, library
+from scourgify.common import DATA, library, norm
 
 LEDGER = f"{DATA}/promote_ledger.csv"
 REVIEW = f"{DATA}/promote_review.csv"
@@ -99,7 +99,24 @@ def candidates(ranked_path=RANK, proposal_path=PROP, ledger_path=LEDGER):
     return out
 
 
+def _finalize(base, dec, existing):
+    """Guard an alias verdict against the master list. A weak model told to 'alias' often echoes the
+    candidate as its own target or invents one that isn't a real tag — either would write a junk fold.
+    A self-alias or an unknown target is downgraded to reject (with a visible reason) so apply can't
+    write garbage; a valid target is normalized to its canonical existing spelling."""
+    if dec.get("verdict") == "alias":
+        elow = {norm(e): e for e in existing}
+        tnorm = norm(dec.get("target", ""))
+        if not tnorm or tnorm == norm(base["tag"]) or tnorm not in elow:
+            dec = {**dec, "verdict": "reject", "target": "", "confidence": "low",
+                   "reason": f"[unverified alias target {dec.get('target', '')!r}] " + dec.get("reason", "")}
+        else:
+            dec = {**dec, "target": elow[tnorm]}                    # canonical spelling of the real master tag
+    return {**base, **dec}
+
+
 def decide(cand, ask, verify_ask=None, existing=None):
+    if existing is None: existing = existing_terms()
     near = shortlist(cand["tag"], existing)
     base = {"tag": cand["tag"], "count": cand.get("count", 0)}
     adv = parse_decision(ask(advocate_prompt(cand, near)))
@@ -107,10 +124,10 @@ def decide(cand, ask, verify_ask=None, existing=None):
         return {**base, "verdict": "reject", "target": "", "contested": False,
                 "reason": "advocate response unparseable", "confidence": "low"}
     if adv["verdict"] != "promote":
-        return {**base, **adv, "contested": False}                 # alias/reject accepted as proposed
+        return _finalize(base, {**adv, "contested": False}, existing)   # alias/reject (alias target validated)
     sk = parse_decision((verify_ask or ask)(skeptic_prompt(cand, adv, near)))
     if sk and sk["verdict"] in ("alias", "reject"):
-        return {**base, **sk, "contested": True}                   # skeptic refuted the promote
+        return _finalize(base, {**sk, "contested": True}, existing)     # skeptic refuted the promote
     if sk is None:
         return {**base, **adv, "contested": False,                 # skeptic inconclusive
                 "confidence": "low", "reason": adv.get("reason", "") + " [skeptic inconclusive]"}
@@ -147,6 +164,9 @@ def apply_decisions(review_path=REVIEW, vocab_path=None, tropes_path=None,
         if v == "promote":
             _append_line(vocab_path, tag)
         elif v == "alias":
+            if not target.strip() or norm(target) == norm(tag):    # hand-edited self/empty alias: never write a junk fold
+                print(f"  skipped {tag}: alias needs a distinct target (got {target!r})")
+                continue
             _append_row(tropes_path, ["variant", "canonical", "route"], [tag, target, "tag"], delim=";")
             _append_row(aliases_path, ["candidate", "target"], [tag, target])
         n[v] = n.get(v, 0) + 1
