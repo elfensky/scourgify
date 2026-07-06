@@ -127,6 +127,21 @@ def test_apply_decisions_routing():
     assert any(x.startswith("review_applied_") or "applied" in x for x in os.listdir(d))
 
 
+def test_parse_resp_applied_alias_snap(tmp=None):
+    import os, tempfile, csv
+    from scourgify import classify
+    d = tempfile.mkdtemp(); os.makedirs(os.path.join(d, "overrides"))
+    with open(os.path.join(d, "overrides", "promote_aliases.csv"), "w", newline="") as f:
+        w = csv.writer(f); w.writerow(["candidate", "target"]); w.writerow(["Post-Apocalyptic", "Angst"])
+    old = os.getcwd(); os.chdir(d); classify._ALIASES = None; classify._VOCAB = None
+    try:
+        vt, nt = classify.parse_resp('{"tags": [], "new": ["Post-Apocalyptic"]}')
+        assert "Angst" in vt          # snapped to the aliased vocab term, applied
+        assert "Post-Apocalyptic" not in nt
+    finally:
+        os.chdir(old); classify._ALIASES = None; classify._VOCAB = None
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

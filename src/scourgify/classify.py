@@ -59,6 +59,20 @@ def load_vocab():
         _VOCAB = terms
     return _VOCAB
 
+_ALIASES = None
+def load_aliases():
+    """candidate -> target snaps from overrides/promote_aliases.csv (written by `scourgify promote --apply`),
+    so tags we've decided are synonyms stop getting re-proposed as 'new'. {} if absent."""
+    global _ALIASES
+    if _ALIASES is None:
+        p = os.path.join(os.getcwd(), "overrides", "promote_aliases.csv")
+        _ALIASES = {}
+        if os.path.exists(p):
+            for r in csv.DictReader(open(p)):
+                if r.get("candidate") and r.get("target"):
+                    _ALIASES[r["candidate"].strip().lower()] = r["target"].strip()
+    return _ALIASES
+
 _AO3 = None
 def load_ao3_vocab():
     """The per-library AO3 canonical freeforms (data/ao3_vocab.csv 'name' column, built by ao3_import.py).
@@ -112,6 +126,10 @@ def parse_resp(text, maxtags=6, cutoff=DEDUP_CUTOFF):
         # first char must be alphanumeric: also blocks =/+/-/@ spreadsheet-formula injection in the review CSVs
         if not (t and t[0].isalnum() and 1 < len(t) <= 40): continue
         if tl in vlow: keep(vlow[tl]); continue                     # already a vocab term the model mislabeled "new"
+        al = load_aliases().get(tl)
+        if al is not None:                          # a decided synonym: snap to vocab, else drop
+            if al.lower() in vlow: keep(vlow[al.lower()])
+            continue
         if tl in seen: continue
         near = difflib.get_close_matches(tl, vkeys, n=1, cutoff=cutoff)
         if near: keep(vlow[near[0]])           # ponytail: fuzzy snap can mis-map look-alikes; --dedup-cutoff tunes it
