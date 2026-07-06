@@ -67,3 +67,28 @@ def skeptic_prompt(cand, proposed, near):
             "plot-specific / a character or fandom name / noise (=> reject)? Default to skeptical when "
             "unsure.\n\n" + _ctx(cand, near) +
             f'\nPROPOSED VERDICT: {proposed.get("verdict")} — {proposed.get("reason","")}\n\n' + _SCHEMA)
+
+
+def _ledger_tags(path):
+    if not os.path.exists(path): return set()
+    return {r["tag"] for r in csv.DictReader(open(path))}
+
+
+def candidates(ranked_path=RANK, proposal_path=PROP, ledger_path=LEDGER):
+    if not os.path.exists(ranked_path):
+        raise SystemExit(f"no candidates ({os.path.basename(ranked_path)} not found — run a classify pass first).")
+    decided = _ledger_tags(ledger_path)
+    examples = {}                                              # tag -> [titles]
+    if os.path.exists(proposal_path):
+        for r in csv.DictReader(open(proposal_path)):
+            for t in (r.get("proposed_new", "") or "").split("; "):
+                t = t.strip()
+                if t: examples.setdefault(t, []).append(r.get("title", ""))
+    out = []
+    for r in csv.DictReader(open(ranked_path)):
+        tag = r["proposed_tag"].strip()
+        if not tag or tag in decided: continue
+        out.append({"tag": tag, "count": int(r.get("count", 0) or 0),
+                    "examples": [t for t in examples.get(tag, []) if t]})
+    out.sort(key=lambda c: -c["count"])
+    return out

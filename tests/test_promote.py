@@ -63,6 +63,25 @@ def test_shortlist_and_prompts():
     assert "refute" in sp.lower() and "Post-Apocalypse" in sp
 
 
+def test_candidates_join_and_ledger_skip():
+    import csv, tempfile
+    from scourgify.promote import candidates
+    d = tempfile.mkdtemp()
+    ranked = os.path.join(d, "r.csv"); prop = os.path.join(d, "p.csv"); ledger = os.path.join(d, "l.csv")
+    with open(ranked, "w", newline="") as f:
+        w = csv.writer(f); w.writerow(["proposed_tag", "count"])
+        w.writerow(["Gacha Mechanic", "2"]); w.writerow(["Amoral Deity", "1"]); w.writerow(["Old Tag", "3"])
+    with open(prop, "w", newline="") as f:
+        w = csv.writer(f); w.writerow(["book_id", "title", "added_tags", "proposed_new"])
+        w.writerow(["1", "Rolls of Fate", "", "Gacha Mechanic"])
+        w.writerow(["2", "Cruel God", "", "Amoral Deity; Gacha Mechanic"])
+    with open(ledger, "w", newline="") as f:
+        w = csv.writer(f); w.writerow(["tag", "verdict", "target"]); w.writerow(["Old Tag", "reject", ""])
+    cs = candidates(ranked, prop, ledger)
+    assert [c["tag"] for c in cs] == ["Gacha Mechanic", "Amoral Deity"]        # Old Tag skipped, count-sorted
+    assert cs[0]["count"] == 2 and set(cs[0]["examples"]) == {"Rolls of Fate", "Cruel God"}
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
