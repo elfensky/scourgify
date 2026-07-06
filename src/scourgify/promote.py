@@ -107,3 +107,40 @@ def decide(cand, ask, verify_ask=None, existing=None):
     if sk and sk["verdict"] in ("alias", "reject"):
         return {**base, **sk, "contested": True}                   # skeptic refuted the promote
     return {**base, **adv, "contested": False}                     # promote stands
+
+
+def _append_line(path, line):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "a") as f: f.write(line + "\n")
+
+
+def _append_row(path, header, row, delim=","):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    new = not os.path.exists(path)
+    with open(path, "a", newline="") as f:
+        w = csv.writer(f, delimiter=delim)
+        if new: w.writerow(header)
+        w.writerow(row)
+
+
+def apply_decisions(review_path=REVIEW, vocab_path=None, tropes_path=None,
+                    aliases_path=ALIASES, ledger_path=LEDGER):
+    vocab_path = vocab_path or os.path.join(os.getcwd(), "overrides", "classify_vocab.txt")
+    tropes_path = tropes_path or os.path.join(os.getcwd(), "overrides", "tropes.csv")
+    if not os.path.exists(review_path):
+        raise SystemExit(f"no review to apply ({os.path.basename(review_path)} not found — run promote first).")
+    n = {"promote": 0, "alias": 0, "reject": 0}
+    for r in csv.DictReader(open(review_path)):
+        v, tag, target = r["verdict"], r["tag"], r.get("target", "")
+        if v == "promote":
+            _append_line(vocab_path, tag)
+        elif v == "alias":
+            _append_row(tropes_path, ["variant", "canonical", "route"], [tag, target, "tag"], delim=";")
+            _append_row(aliases_path, ["candidate", "target"], [tag, target])
+        n[v] = n.get(v, 0) + 1
+        _append_row(ledger_path, ["tag", "verdict", "target"], [tag, v, target])
+    arch = review_path.replace(".csv", f"_applied_{time.strftime('%Y%m%d-%H%M%S')}.csv")
+    os.rename(review_path, arch)
+    print(f"applied: {n['promote']} promoted, {n['alias']} aliased, {n['reject']} rejected; "
+          f"review archived -> {os.path.basename(arch)}")
+    return n

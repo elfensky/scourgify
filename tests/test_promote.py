@@ -104,6 +104,29 @@ def test_decide_reconciliation():
     assert d3["verdict"] == "promote" and d3["contested"] is False
 
 
+def test_apply_decisions_routing():
+    import csv, os, tempfile
+    from scourgify.promote import apply_decisions
+    d = tempfile.mkdtemp()
+    review = os.path.join(d, "review.csv"); vocab = os.path.join(d, "vocab.txt")
+    tropes = os.path.join(d, "tropes.csv"); aliases = os.path.join(d, "aliases.csv"); ledger = os.path.join(d, "l.csv")
+    with open(review, "w", newline="") as f:
+        w = csv.writer(f); w.writerow(["tag", "count", "verdict", "target", "reason", "confidence", "contested"])
+        w.writerow(["Gacha Mechanic", "2", "promote", "", "novel", "high", "False"])
+        w.writerow(["Amoral Deity", "1", "alias", "Morality", "same", "med", "True"])
+        w.writerow(["Chapter 3 Spoiler", "1", "reject", "", "plot", "high", "False"])
+    n = apply_decisions(review, vocab, tropes, aliases, ledger)
+    assert n == {"promote": 1, "alias": 1, "reject": 1}
+    assert "Gacha Mechanic" in open(vocab).read()
+    trows = list(csv.reader(open(tropes), delimiter=";"))
+    assert ["Amoral Deity", "Morality", "tag"] in trows
+    assert ["Amoral Deity", "Morality"] in list(csv.reader(open(aliases)))
+    ledger_tags = {r["tag"] for r in csv.DictReader(open(ledger))}
+    assert ledger_tags == {"Gacha Mechanic", "Amoral Deity", "Chapter 3 Spoiler"}
+    assert not os.path.exists(review)                                  # archived away
+    assert any(x.startswith("review_applied_") or "applied" in x for x in os.listdir(d))
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
