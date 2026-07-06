@@ -92,3 +92,18 @@ def candidates(ranked_path=RANK, proposal_path=PROP, ledger_path=LEDGER):
                     "examples": [t for t in examples.get(tag, []) if t]})
     out.sort(key=lambda c: -c["count"])
     return out
+
+
+def decide(cand, ask, verify_ask=None, existing=None):
+    near = shortlist(cand["tag"], existing)
+    base = {"tag": cand["tag"], "count": cand.get("count", 0)}
+    adv = parse_decision(ask(advocate_prompt(cand, near)))
+    if adv is None:
+        return {**base, "verdict": "reject", "target": "", "contested": False,
+                "reason": "advocate response unparseable", "confidence": "low"}
+    if adv["verdict"] != "promote":
+        return {**base, **adv, "contested": False}                 # alias/reject accepted as proposed
+    sk = parse_decision((verify_ask or ask)(skeptic_prompt(cand, adv, near)))
+    if sk and sk["verdict"] in ("alias", "reject"):
+        return {**base, **sk, "contested": True}                   # skeptic refuted the promote
+    return {**base, **adv, "contested": False}                     # promote stands

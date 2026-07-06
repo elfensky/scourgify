@@ -82,6 +82,28 @@ def test_candidates_join_and_ledger_skip():
     assert cs[0]["count"] == 2 and set(cs[0]["examples"]) == {"Rolls of Fate", "Cruel God"}
 
 
+def test_decide_reconciliation():
+    from scourgify.promote import decide
+    cand = {"tag": "Amoral Deity", "count": 1, "examples": ["A cruel god toys with mortals"]}
+    near = ["Morality", "Deity", "Dark"]
+    # advocate promotes, skeptic refutes -> reject, contested
+    adv = lambda p: '{"verdict":"promote","reason":"seems new","confidence":"med"}'
+    sk = lambda p: '{"verdict":"reject","reason":"too plot-specific","confidence":"high"}'
+    calls = iter([adv, sk])
+    ask = lambda p: next(calls)(p)
+    d = decide(cand, ask, existing=near)
+    assert d["verdict"] == "reject" and d["contested"] is True and d["tag"] == "Amoral Deity"
+
+    # advocate aliases -> accepted directly, not contested (skeptic not consulted)
+    d2 = decide(cand, lambda p: '{"verdict":"alias","target":"Morality","reason":"same idea"}', existing=near)
+    assert d2["verdict"] == "alias" and d2["target"] == "Morality" and d2["contested"] is False
+
+    # promote survives skepticism
+    seq = iter(['{"verdict":"promote","reason":"novel"}', '{"verdict":"promote","reason":"agree, novel"}'])
+    d3 = decide(cand, lambda p: next(seq), existing=near)
+    assert d3["verdict"] == "promote" and d3["contested"] is False
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
