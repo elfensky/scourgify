@@ -16,12 +16,12 @@ from scourgify.ui import console
 from rich import box
 from rich.table import Table
 
-from scourgify import common, wrangle, classify, staleness, select
+from scourgify import common, wrangle, classify, staleness, select, promote
 from scourgify.common import library, db_path, ro_connect, custom_column_id, calibre_open
 
 COLS = ["#fandoms", "#characters", "#relationships", "#genres", "#status", "#updated", "#wrangled"]
 ENGINE_KEYS = {"claude": ("ANTHROPIC_API_KEY",), "openai": ("OPENAI_API_KEY",),
-               "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY")}
+               "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"), "mistral": ("MISTRAL_API_KEY",)}
 
 
 # ---------------- status header ----------------
@@ -98,7 +98,7 @@ def _engines():
     """[(name, usable, hint)] — apple needs the afm binary or a swift toolchain; cloud engines need a key."""
     import shutil
     out = []
-    for e in ("apple", "claude", "openai", "gemini"):
+    for e in ("apple", "claude", "openai", "gemini", "mistral"):
         if e == "apple":
             ok = os.path.exists(os.path.join(common.HERE, "afm")) or bool(shutil.which("swift"))
             hint = "free, on-device" if ok else "needs the afm binary or a swift toolchain"
@@ -196,12 +196,65 @@ def stage_review():
         ui.say("(kept pending)", "dim")
 
 
+def stage_promote():
+    if not os.path.exists(classify.RANK):
+        ui.say("no new-tag candidates yet — run classify first ✓", "green"); return
+    cands = promote.candidates()
+    if not cands:
+        ui.say("no undecided tag candidates to adjudicate ✓", "green"); return
+    ui.say(f"[cyan]{len(cands)}[/] new-tag candidates to weigh against the master tag list "
+           "(promote / alias / reject)")
+    a = promote.normalize(promote.build_parser().parse_args([]))
+    a.yes = True                                  # the wizard's confirm below replaces the CLI guards
+    opts, usable = [], {}
+    for i, (e, ok, hint) in enumerate(_engines(), 1):
+        usable[e] = ok; opts.append((str(i), e, hint))
+    k = ui.menu("engine", opts, default="2")      # default claude; skip apple (too weak for this judgement)
+    a.engine = dict((key, lbl) for key, lbl, _ in opts)[k]
+    if not usable.get(a.engine):
+        ui.error(f"{a.engine} isn't usable here — {dict((e, h) for e, _, h in _engines())[a.engine]}"); return
+    if a.engine == "apple":
+        ui.say("note: on-device apple is weak at this reasoning — a cloud engine gives far better verdicts.", "yellow")
+    if a.engine != "apple" and not ui.confirm(f"send {len(cands)} candidates to the {a.engine} API?"):
+        ui.say("(skipped)", "dim"); return
+    promote.run(a)
+    rows = list(csv.DictReader(open(promote.REVIEW)))
+    by = collections.defaultdict(list)
+    for r in rows: by[r["verdict"]].append(r)
+    for v, col in (("promote", "green"), ("alias", "cyan"), ("reject", "dim")):
+        rs = by.get(v, [])
+        if not rs: continue
+        t = Table(box=box.SIMPLE, title=f"[{col}]{v}[/] — {len(rs)}")
+        t.add_column("candidate"); t.add_column("→ target" if v == "alias" else "reason", overflow="fold")
+        for r in rs[:20]:
+            mark = " [yellow]⚠[/]" if r.get("contested") == "True" else ""
+            t.add_row(r["tag"] + mark, r["target"] if v == "alias" else r.get("reason", "")[:80])
+        if len(rs) > 20: t.add_row("[dim]…[/]", f"[dim]+{len(rs) - 20} more[/]")
+        console.print(t)
+    ui.say(f"full verdicts (edit before applying if you like): {promote.REVIEW}", "dim")
+    npro, nal = len(by.get("promote", [])), len(by.get("alias", []))
+    choice = ui.menu("verdicts", [
+        ("a", "apply", f"promote {npro} to the vocab, fold {nal} aliases (writes overrides/)"),
+        ("k", "keep", "leave the review file to hand-edit; the wizard offers it again next run"),
+        ("d", "discard", "set aside without applying (archived; nothing written)"),
+    ], default="a" if (npro or nal) else "d")
+    if choice == "a":
+        promote.apply_decisions(); ui.say("done ✓", "green")
+    elif choice == "d":
+        arch = promote.REVIEW.replace(".csv", f"_discarded_{time.strftime('%Y%m%d-%H%M%S')}.csv")
+        os.rename(promote.REVIEW, arch); ui.say(f"set aside -> {os.path.basename(arch)}", "dim")
+    else:
+        ui.say("(kept pending)", "dim")
+
+
 STAGES = [
     ("wrangle",   "normalize raw tags/fandoms/characters/genres — deterministic cleanup first, so junk "
                   "tags don't hide books from the classifier", stage_wrangle),
     ("staleness", "re-derive #status from #updated age (free, no API)", stage_staleness),
     ("classify",  "AI content tagging — only books new/changed since the last run", stage_classify),
     ("review",    "inspect the proposal, then apply it to the library", stage_review),
+    ("promote",   "adjudicate new-tag candidates against the master list — promote / alias / reject",
+                  stage_promote),
 ]
 
 
