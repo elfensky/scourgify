@@ -144,3 +144,62 @@ def apply_decisions(review_path=REVIEW, vocab_path=None, tropes_path=None,
     print(f"applied: {n['promote']} promoted, {n['alias']} aliased, {n['reject']} rejected; "
           f"review archived -> {os.path.basename(arch)}")
     return n
+
+
+REVIEW_COLS = ["tag", "count", "verdict", "target", "reason", "confidence", "contested"]
+
+
+def run(a, ranked_path=RANK, proposal_path=PROP, review_path=REVIEW, existing=None):
+    cands = candidates(ranked_path, proposal_path)
+    if a.limit: cands = cands[:a.limit]
+    if a.batch: cands = cands[:a.batch]
+    if not cands:
+        print("no undecided candidates — nothing to do."); return
+    eng = ENGINES[a.engine](a.model, a.timeout)
+    veng = ENGINES[a.verify_with](a.model, a.timeout) if a.verify_with else None
+    ask = lambda p: ask_retry(eng, p)[0]
+    verify_ask = (lambda p: ask_retry(veng, p)[0]) if veng else None
+    print(f"engine={a.engine}{'  verify-with='+a.verify_with if veng else ''}  candidates: {len(cands)}")
+    rows = []
+    with ThreadPoolExecutor(max_workers=1 if a.engine == "apple" else a.workers) as ex:
+        futs = [ex.submit(decide, c, ask, verify_ask, existing) for c in cands]
+        for fut in as_completed(futs): rows.append(fut.result())
+    rows.sort(key=lambda r: (r["verdict"] != "promote", -r["count"]))   # promotes first, by count
+    os.makedirs(DATA, exist_ok=True)
+    with open(review_path, "w", newline="") as f:
+        w = csv.writer(f); w.writerow(REVIEW_COLS)
+        for r in rows: w.writerow([r.get(k, "") for k in REVIEW_COLS])
+    tally = {v: sum(1 for r in rows if r["verdict"] == v) for v in VERDICTS}
+    print(f"  {tally['promote']} promote, {tally['alias']} alias, {tally['reject']} reject "
+          f"-> {os.path.basename(review_path)} (review, then `scourgify promote --apply`)")
+
+
+def build_parser():
+    p = argparse.ArgumentParser(description="Adversarially decide promote/alias/reject for classify's proposed-new tags.")
+    p.add_argument("--engine", default="claude", choices=sorted(ENGINES))
+    p.add_argument("--verify-with", default="", choices=[""] + sorted(ENGINES),
+                   help="run the skeptic on a different engine (cross-model check)")
+    p.add_argument("--model", default="")
+    p.add_argument("--workers", type=int, default=8, metavar="N")
+    p.add_argument("--batch", type=int, default=0, metavar="N")
+    p.add_argument("--limit", type=int, default=0, metavar="N")
+    p.add_argument("--timeout", type=int, default=60, metavar="S")
+    p.add_argument("--yes", "-y", action="store_true")
+    p.add_argument("--apply", action="store_true", help="fold data/promote_review.csv into overrides/")
+    return p
+
+
+def normalize(a):
+    library()                                       # fail fast with the clear CALIBRE_LIBRARY message
+    os.makedirs(DATA, exist_ok=True)
+    return a
+
+
+def main():
+    a = normalize(build_parser().parse_args())
+    if a.apply: apply_decisions()
+    else: run(a)
+
+
+if __name__ == "__main__":
+    main()

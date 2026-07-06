@@ -22,6 +22,10 @@ def main():
         from scourgify import staleness
         sys.argv = ["scourgify staleness", *argv[1:]]
         return staleness.main()
+    if argv and argv[0] == "promote":
+        from scourgify import promote
+        sys.argv = ["scourgify promote", *argv[1:]]
+        return promote.main()
     # setup / audit / apply / (none -> wizard) all live in wrangle's main()
     from scourgify import wrangle
     return wrangle.main()

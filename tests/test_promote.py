@@ -142,6 +142,27 @@ def test_parse_resp_applied_alias_snap(tmp=None):
         os.chdir(old); classify._ALIASES = None; classify._VOCAB = None
 
 
+def test_promote_run_writes_review(tmp=None):
+    import os, csv, tempfile
+    from scourgify import classify, promote
+    class Fake:                                     # advocate promotes, skeptic agrees -> promote stands
+        def __init__(self, model, timeout): pass
+        def ask(self, prompt): return '{"verdict":"promote","reason":"novel reusable trope","confidence":"high"}'
+    classify.ENGINES["fake"] = Fake
+    d = tempfile.mkdtemp()
+    ranked = os.path.join(d, "r.csv"); prop = os.path.join(d, "p.csv")
+    with open(ranked, "w", newline="") as f:
+        w = csv.writer(f); w.writerow(["proposed_tag", "count"]); w.writerow(["Reality Warping", "3"])
+    with open(prop, "w", newline="") as f:
+        w = csv.writer(f); w.writerow(["book_id", "title", "added_tags", "proposed_new"]); w.writerow(["1", "Bend It", "", "Reality Warping"])
+    review = os.path.join(d, "promote_review.csv")
+    a = promote.build_parser().parse_args(["--engine", "fake", "--yes"])
+    promote.run(a, ranked_path=ranked, proposal_path=prop, review_path=review, existing=["Time Travel", "Fluff"])
+    rows = list(csv.DictReader(open(review)))
+    assert len(rows) == 1 and rows[0]["tag"] == "Reality Warping" and rows[0]["verdict"] == "promote"
+    del classify.ENGINES["fake"]
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
