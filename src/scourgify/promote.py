@@ -21,6 +21,10 @@ ALIASES = os.path.join(os.getcwd(), "overrides", "promote_aliases.csv")
 VERDICTS = ("promote", "alias", "reject")
 
 
+def _desanitize(s):
+    return s.lstrip("=+-@ ").strip()
+
+
 def parse_decision(text):
     m = re.search(r"\{.*\}", text or "", re.S)
     if not m: return None
@@ -28,12 +32,13 @@ def parse_decision(text):
     except Exception: return None
     v = str(obj.get("verdict", "")).strip().lower()
     if v not in VERDICTS: return None
-    target = str(obj.get("target", "")).strip()
+    target = _desanitize(str(obj.get("target", "")))
     if v == "alias" and not target: return None
     conf = str(obj.get("confidence", "med")).strip().lower()
     if conf not in ("low", "med", "high"): conf = "med"
+    reason = _desanitize(str(obj.get("reason", "")).strip()[:200])
     return {"verdict": v, "target": target if v == "alias" else "",
-            "reason": str(obj.get("reason", "")).strip()[:200], "confidence": conf}
+            "reason": reason, "confidence": conf}
 
 
 def shortlist(tag, existing=None, n=15):
@@ -106,6 +111,9 @@ def decide(cand, ask, verify_ask=None, existing=None):
     sk = parse_decision((verify_ask or ask)(skeptic_prompt(cand, adv, near)))
     if sk and sk["verdict"] in ("alias", "reject"):
         return {**base, **sk, "contested": True}                   # skeptic refuted the promote
+    if sk is None:
+        return {**base, **adv, "contested": False,                 # skeptic inconclusive
+                "confidence": "low", "reason": adv.get("reason", "") + " [skeptic inconclusive]"}
     return {**base, **adv, "contested": False}                     # promote stands
 
 
@@ -131,7 +139,11 @@ def apply_decisions(review_path=REVIEW, vocab_path=None, tropes_path=None,
         raise SystemExit(f"no review to apply ({os.path.basename(review_path)} not found — run promote first).")
     n = {"promote": 0, "alias": 0, "reject": 0}
     for r in csv.DictReader(open(review_path)):
-        v, tag, target = r["verdict"], r["tag"], r.get("target", "")
+        tag, target = r["tag"], r.get("target", "")
+        v = r["verdict"].strip().lower()
+        if v not in VERDICTS:
+            print(f"  skipped {tag}: unknown verdict {r['verdict']!r}")
+            continue
         if v == "promote":
             _append_line(vocab_path, tag)
         elif v == "alias":
@@ -150,13 +162,16 @@ REVIEW_COLS = ["tag", "count", "verdict", "target", "reason", "confidence", "con
 
 
 def run(a, ranked_path=RANK, proposal_path=PROP, review_path=REVIEW, existing=None):
+    if os.path.exists(review_path) and not getattr(a, "yes", False):
+        raise SystemExit(f"a pending review exists at {review_path} — apply it (scourgify promote --apply), "
+                         f"delete it, or re-run with --yes to overwrite.")
     cands = candidates(ranked_path, proposal_path)
     if a.limit: cands = cands[:a.limit]
     if a.batch: cands = cands[:a.batch]
     if not cands:
         print("no undecided candidates — nothing to do."); return
     eng = ENGINES[a.engine](a.model, a.timeout)
-    veng = ENGINES[a.verify_with](a.model, a.timeout) if a.verify_with else None
+    veng = ENGINES[a.verify_with]("", a.timeout) if a.verify_with else None
     ask = lambda p: ask_retry(eng, p)[0]
     verify_ask = (lambda p: ask_retry(veng, p)[0]) if veng else None
     print(f"engine={a.engine}{'  verify-with='+a.verify_with if veng else ''}  candidates: {len(cands)}")

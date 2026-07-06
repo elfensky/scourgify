@@ -240,8 +240,9 @@ to refute a promote, and the difflib shortlist of nearest master tags grounds bo
 `data/promote_review.csv` for review; `scourgify promote --apply` folds them into `overrides/`
 (promotes → vocab, aliases → `tropes.csv` + a snap-map that stops re-proposal). Engines and keys are
 exactly classify's (`--engine claude|openai|gemini|mistral|apple`; your own API key in the env; `apple`
-is free/on-device). Grow the *shipped* vocab by running it with a cloud engine from the repo and
-committing the `defaults/classify_vocab.txt` diff.
+is free/on-device). To grow the *shipped* vocab: run `scourgify promote`, review, then `--apply`
+(writes to `overrides/classify_vocab.txt`); manually copy the keeper terms into
+`src/scourgify/defaults/classify_vocab.txt` and commit that file.
 
 ## Custom maps from your library (`overrides/`)
 The bundled `defaults/` are generic. Two helper workflows mined library-specific maps into `overrides/`

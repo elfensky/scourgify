@@ -163,6 +163,95 @@ def test_promote_run_writes_review(tmp=None):
     del classify.ENGINES["fake"]
 
 
+def test_apply_decisions_normalizes_verdict():
+    import csv, os, tempfile
+    from scourgify.promote import apply_decisions
+    d = tempfile.mkdtemp()
+    review = os.path.join(d, "review.csv"); vocab = os.path.join(d, "vocab.txt")
+    tropes = os.path.join(d, "tropes.csv"); aliases = os.path.join(d, "aliases.csv"); ledger = os.path.join(d, "l.csv")
+    with open(review, "w", newline="") as f:
+        w = csv.writer(f); w.writerow(["tag", "count", "verdict", "target", "reason", "confidence", "contested"])
+        w.writerow(["Soul Bond", "3", "Promote ", "", "novel", "high", "False"])   # capitalized + trailing space
+        w.writerow(["Chapter 7 Reveal", "1", "bogus", "", "noise", "low", "False"])  # invalid verdict
+    n = apply_decisions(review, vocab, tropes, aliases, ledger)
+    # "Promote " normalizes to promote -> routed to vocab
+    assert "Soul Bond" in open(vocab).read()
+    # "bogus" -> skipped: not written to ledger
+    ledger_tags = {r["tag"] for r in csv.DictReader(open(ledger))}
+    assert "Soul Bond" in ledger_tags
+    assert "Chapter 7 Reveal" not in ledger_tags
+    assert n == {"promote": 1, "alias": 0, "reject": 0}
+
+
+def test_parse_decision_strips_formula_chars():
+    from scourgify.promote import parse_decision
+    # formula char in reason is stripped
+    d = parse_decision('{"verdict":"promote","reason":"=cmd()","confidence":"low"}')
+    assert d is not None and not d["reason"].startswith("=")
+    assert d["reason"] == "cmd()"
+    # formula char in alias target: if sanitized target is non-empty, alias is valid
+    d2 = parse_decision('{"verdict":"alias","target":"=EVIL","reason":"x"}')
+    # "=EVIL" lstripped of "=" -> "EVIL" (non-empty): alias should return with target "EVIL"
+    # OR if implementation collapses it to empty, alias returns None — both acceptable, but must be deterministic
+    if d2 is None:
+        # alias with empty sanitized target -> None is correct
+        pass
+    else:
+        assert not d2["target"].startswith("=")
+    # fully formula-only target (all stripped away) -> alias returns None
+    d3 = parse_decision('{"verdict":"alias","target":"=+-@","reason":"x"}')
+    assert d3 is None
+
+
+def test_decide_skeptic_inconclusive_marks_low():
+    from scourgify.promote import decide
+    cand = {"tag": "Dream Logic", "count": 2, "examples": ["A dreamscape adventure"]}
+    near = ["Dreams", "Surreal"]
+    # advocate promotes; skeptic returns "" (unparseable)
+    responses = iter([
+        '{"verdict":"promote","reason":"novel surreal subgenre","confidence":"high"}',
+        "",  # skeptic transport failure
+    ])
+    ask = lambda p: next(responses)
+    d = decide(cand, ask, existing=near)
+    assert d["verdict"] == "promote"
+    assert d["confidence"] == "low"
+    assert d["contested"] is False
+    assert "[skeptic inconclusive]" in d["reason"]
+
+
+def test_run_raises_on_existing_review():
+    import os, csv, tempfile
+    from scourgify import classify, promote
+    class Fake:
+        def __init__(self, model, timeout): pass
+        def ask(self, prompt): return '{"verdict":"promote","reason":"novel","confidence":"high"}'
+    classify.ENGINES["fake2"] = Fake
+    d = tempfile.mkdtemp()
+    ranked = os.path.join(d, "r.csv"); prop = os.path.join(d, "p.csv")
+    with open(ranked, "w", newline="") as f:
+        w = csv.writer(f); w.writerow(["proposed_tag", "count"]); w.writerow(["Ghost Bond", "2"])
+    with open(prop, "w", newline="") as f:
+        w = csv.writer(f); w.writerow(["book_id", "title", "added_tags", "proposed_new"])
+    review = os.path.join(d, "promote_review.csv")
+    # pre-create the review file to simulate a pending review
+    with open(review, "w") as f: f.write("existing content")
+    # without --yes, should raise SystemExit
+    a = promote.build_parser().parse_args(["--engine", "fake2"])
+    raised = False
+    try:
+        promote.run(a, ranked_path=ranked, proposal_path=prop, review_path=review)
+    except SystemExit as e:
+        raised = True
+        assert "pending review" in str(e)
+    assert raised, "expected SystemExit when review file exists and --yes not set"
+    # with --yes, should overwrite without error
+    a2 = promote.build_parser().parse_args(["--engine", "fake2", "--yes"])
+    # candidates list is empty (prop has no rows), so run exits early with "nothing to do"
+    promote.run(a2, ranked_path=ranked, proposal_path=prop, review_path=review)
+    del classify.ENGINES["fake2"]
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
