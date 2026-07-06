@@ -39,7 +39,21 @@ top-1), then the agent reasons semantically over: the candidate + that shortlist
 books that proposed it. The agent's job is precisely to fix `difflib`'s semantic errors within a
 generous candidate set.
 
-## Architecture — shared core, two orchestration shells
+> **Revision (2026-07-06, after `/octo:debate`):** collapsed from two shells to a **single
+> pluggable-engine `scourgify promote`** subcommand. A four-voice debate (Gemini/Antigravity,
+> Copilot, Sonnet-implementer, Opus) was unanimous: the separate maintainer Claude Code Workflow
+> shell is architectural debt — it can't ship, can't run in CI, and isn't user-reproducible, violating
+> scourgify's one-honest-path ethos; model-tiering (Haiku→Sonnet→Opus) is a scale optimization this
+> tool doesn't need (~96 candidates, run weekly). The maintainer "grow shipped vocab" case becomes
+> simply: run `scourgify promote --engine <cloud>` and commit the resulting `classify_vocab.txt` diff.
+> Two refinements adopted: **`--verify-with <engine>`** (re-run the skeptic on a different model
+> family on demand — recovers cross-model diversity, ~10 lines, no second code path) and a
+> **`parse_decision()`** JSON-normalization layer (engine JSON-adherence varies; Mistral especially).
+> The **difflib shortlist** is the real defense against the core blind spot (promoting a tag that
+> already exists under a synonym) — not model diversity. Mistral is added as an engine in the same work.
+> Sections below are updated to this single-shell design; the maintainer-Workflow shell is dropped.
+
+## Architecture — one command, pluggable engine
 
 ### Shared reasoning core — `src/scourgify/promote.py` (in-package)
 
@@ -55,6 +69,9 @@ Consumed by both shells so the review format and apply path are identical.
 - Prompt builders: `advocate_prompt(cand, examples, shortlist, vocab)` and
   `skeptic_prompt(cand, proposed_verdict, shortlist, examples)`.
 - Verdict schema (validated): `{verdict: promote|alias|reject, target?: str, reason: str, confidence: low|med|high}`.
+- `parse_decision(text)` — a thin JSON-normalization layer that extracts/repairs the verdict object
+  from any engine's reply (regex-first `{...}`, tolerant of markdown fences and trailing prose).
+  Engine JSON-adherence varies; Mistral especially. Mirrors classify's existing `parse_resp`.
 - `apply_decisions(review_path, vocab_path, tropes_path)` — fold **promote** → append to
   `vocab_path`; **alias** → append `(candidate, target, tag)` to `tropes_path`; **reject** →
   record only. All three verdicts append to `data/promote_ledger.csv` (the skip-list). Archive the
@@ -71,31 +88,39 @@ Consumed by both shells so the review format and apply path are identical.
   fails to refute → **promote**. Advocate/skeptic disagreement on a promote → **referee** (a third
   call / higher tier).
 
-### Shell A — `scourgify promote` (ships; per-user; recurring)
+### `scourgify promote` — the single shipped command
 
-- In-package subcommand. Runs advocate + skeptic (+ referee on disagreement) per candidate via
-  classify's existing engine adapters (`classify.ENGINES`, `.ask(prompt)`), reusing the
-  ThreadPoolExecutor + retry/backoff pattern currently a **nested closure `ask_retry` at
-  `classify.py:407`** — factor that out into a reusable module-level helper (targeted improvement)
-  so both classify and promote share it.
-- Flags mirror classify: `--engine`, `--batch N`, `--workers`, `--limit`, `--dedup-cutoff`,
-  `--yes`, plus `--apply`.
+- In-package subcommand. Runs advocate → skeptic (→ referee on disagreement) per candidate via
+  classify's existing engine adapters (`classify.ENGINES`, `.ask(prompt)`) — three `.ask()` calls to
+  the same engine instance, reusing the ThreadPoolExecutor + retry/backoff pattern currently a
+  **nested closure `ask_retry` at `classify.py:407`** — factor that out into a reusable module-level
+  helper (targeted improvement) so both classify and promote share it.
+- Flags mirror classify: `--engine`, `--model`, `--batch N`, `--workers`, `--limit`,
+  `--dedup-cutoff`, `--yes`, plus `--apply`. New: **`--verify-with <engine>`** — re-run the skeptic
+  pass on a *different* model family (cross-model diversity on demand; ~10 lines: instantiate a
+  second engine, feed it the advocate's output). Default off.
 - Dry run writes `data/promote_review.csv` (candidate, verdict, target, reason, confidence, +
-  advocate/skeptic notes). `scourgify promote --apply` calls `apply_decisions` targeting the user's
-  `overrides/classify_vocab.txt` and `overrides/tropes.csv`. Same dry-run → confirm → write shape
-  as the rest of the tool.
+  advocate/skeptic notes). `scourgify promote --apply` calls `apply_decisions`. Same dry-run →
+  confirm → write shape as the rest of the tool.
 - CLI wiring: add a `promote` branch in `cli.py` (alongside `classify` / `staleness`) and a
   `promote.main()`.
 
-### Shell B — maintainer Claude Code workflow (grows the *shipped* vocab)
+### Growing the *shipped* vocab (no separate shell)
 
-- A Workflow-tool script (like the franchise-clustering one): Haiku advocates in batches → Sonnet
-  skeptic-verifies every promote → Opus referees disagreements. Reads the same `candidates()`
-  input, writes the **same `promote_review.csv` format**.
-- The identical in-package `apply_decisions` folds that review into the **shipped**
-  `src/scourgify/defaults/classify_vocab.txt` and `defaults/tropes.csv`. One review format, one
-  apply path, two producers. The workflow script is authored/run in Claude Code (not shipped in the
-  wheel); its result JSON is committed for reproducibility, matching `build_ao3_layer.py --assemble`.
+The maintainer uses the **exact same command** with a cloud engine —
+`scourgify promote --engine claude` (optionally `--verify-with openai`) run from the repo, then
+commit the resulting `src/scourgify/defaults/classify_vocab.txt` (and `tropes.csv`) diff. Maintainer
+and user share one code path, one prompt set, one test surface; the committed vocab diff *is* the
+reproducible record. No Claude Code Workflow tool, no model-tiering orchestration, no second
+implementation of promotion.
+
+### Mistral (and future engines)
+
+Add a ~15-line `Mistral` adapter to `classify.ENGINES` (urllib POST to `api.mistral.ai`,
+`MISTRAL_API_KEY` env var) + one `PRICING` row. It then works for **both** classify and promote
+automatically — the payoff of the single-command design (no "engine X only runs classify" debt).
+scourgify never ships or brokers keys; every cloud engine reads the user's own env var, `apple` needs
+none.
 
 ## Feedback loop (why it compounds)
 
@@ -123,11 +148,10 @@ classify → classify_proposal.csv + classify_newtags_ranked.csv (difflib-annota
 ## Files
 
 - **New:** `src/scourgify/promote.py`; `data/promote_review.csv`, `data/promote_ledger.csv`,
-  `data/promote_review_applied_<ts>.csv` (all gitignored under `data/`); the maintainer Workflow
-  script + its committed result JSON.
+  `data/promote_review_applied_<ts>.csv` (all gitignored under `data/`).
 - **Changed:** `src/scourgify/cli.py` (dispatch `promote`); `src/scourgify/classify.py` (factor
-  `ask_retry` out of `classify_run`; extend `parse_resp` with the applied-alias hard-map);
-  `tests/test_core.py` or a new `tests/test_promote.py`.
+  `ask_retry` out of `classify_run` into a shared helper; add the `Mistral` engine + `PRICING` row;
+  extend `parse_resp` with the applied-alias hard-map); `tests/test_promote.py` (new).
 - **Docs:** README + CLAUDE.md — the promotion step in the classify/vocab-growth loop.
 
 ## Testing
@@ -156,5 +180,7 @@ Pure-function, plain-assert (no network), matching the existing suites:
    (`Amoral Deity` not aliased to `Morality`; `Post-Apocalyptic` aliased to `Post-Apocalypse`).
 3. `promote --apply` folds into `overrides/`, archives the review, appends the ledger; a second
    `promote` run skips the decided candidates.
-4. Maintainer Workflow produces the same-format review; in-package `apply_decisions` folds it into
-   the shipped vocab.
+4. `--verify-with <other-engine>` re-runs the skeptic on a different family; a candidate the two
+   families disagree on is flagged in the review for human attention.
+5. Maintainer path: `scourgify promote --engine claude` from the repo → commit the
+   `defaults/classify_vocab.txt` diff; a second run skips the now-decided candidates via the ledger.
