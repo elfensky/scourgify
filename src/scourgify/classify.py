@@ -8,7 +8,7 @@
   scourgify classify --apply                    # apply 'added_tags' + stamp #wrangled (Calibre CLOSED; writes shell to calibre-debug)
 
 Engines (--engine):  apple = on-device Apple Foundation Models via ./afm (free; macOS 26+).
-          claude = Anthropic (ANTHROPIC_API_KEY) | openai = OpenAI (OPENAI_API_KEY) | gemini = Google (GEMINI_API_KEY).
+          claude = Anthropic (ANTHROPIC_API_KEY) | openai = OpenAI (OPENAI_API_KEY) | gemini = Google (GEMINI_API_KEY) | mistral = Mistral (MISTRAL_API_KEY).
           --model overrides the per-engine default. Only books with < --min-tags tags AND a description are processed.
           Runs are resumable (skip books already in the proposal; --fresh restarts). Dry-run until --apply.
 --incremental = cheap maintenance after new downloads: (re)process ONLY new/changed books — never classified,
@@ -40,7 +40,7 @@ SPEND_GATE = 200        # cloud runs above this many books require an explicit y
 DEDUP_CUTOFF = 0.86     # difflib ratio at/above which a proposed tag counts as a variant of an existing one
 
 # $/MTok (input, output) for each engine's default model — public list prices as of 2026-07; edit when they change.
-PRICING = {"apple": (0.0, 0.0), "claude": (1.00, 5.00), "openai": (0.15, 0.60), "gemini": (0.30, 2.50)}
+PRICING = {"apple": (0.0, 0.0), "claude": (1.00, 5.00), "openai": (0.15, 0.60), "gemini": (0.30, 2.50), "mistral": (0.20, 0.60)}
 
 _VOCAB = None
 def load_vocab():
@@ -199,7 +199,20 @@ class Gemini:
         if not parts: raise RuntimeError("nocontent:" + str(cands[0].get("finishReason")))
         return parts[0]["text"]
 
-ENGINES = {"apple": Apple, "claude": Claude, "openai": OpenAI, "gemini": Gemini}
+class Mistral:
+    def __init__(self, model, timeout):
+        self.key = os.environ.get("MISTRAL_API_KEY")
+        if not self.key: raise SystemExit("mistral engine needs MISTRAL_API_KEY.")
+        self.model = model or "mistral-small-latest"; self.timeout = timeout
+    def ask(self, prompt):
+        import urllib.request
+        body = json.dumps({"model": self.model, "max_tokens": 300,
+                           "messages": [{"role": "user", "content": prompt}]}).encode()
+        req = urllib.request.Request("https://api.mistral.ai/v1/chat/completions", data=body,
+            headers={"Authorization": f"Bearer {self.key}", "content-type": "application/json"})
+        return json.load(urllib.request.urlopen(req, timeout=self.timeout))["choices"][0]["message"]["content"]
+
+ENGINES = {"apple": Apple, "claude": Claude, "openai": OpenAI, "gemini": Gemini, "mistral": Mistral}
 
 
 # ---- live run display ----

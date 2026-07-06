@@ -28,6 +28,17 @@ def test_ask_retry_success_and_block():
     assert out == "" and "ValueError" in err
 
 
+def test_mistral_registered_and_keyguard():
+    import os
+    from scourgify import classify
+    assert "mistral" in classify.ENGINES and "mistral" in classify.PRICING
+    os.environ.pop("MISTRAL_API_KEY", None)
+    try:
+        classify.ENGINES["mistral"]("", 60); assert False, "expected SystemExit"
+    except SystemExit as e:
+        assert "MISTRAL_API_KEY" in str(e)
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
