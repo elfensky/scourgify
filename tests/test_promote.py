@@ -39,6 +39,18 @@ def test_mistral_registered_and_keyguard():
         assert "MISTRAL_API_KEY" in str(e)
 
 
+def test_parse_decision():
+    from scourgify.promote import parse_decision
+    assert parse_decision('{"verdict":"promote","reason":"novel","confidence":"high"}') == \
+        {"verdict": "promote", "target": "", "reason": "novel", "confidence": "high"}
+    # fenced + prose around it
+    d = parse_decision('Sure!\n```json\n{"verdict":"alias","target":"Time Travel","reason":"same"}\n```')
+    assert d["verdict"] == "alias" and d["target"] == "Time Travel" and d["confidence"] == "med"
+    assert parse_decision('{"verdict":"alias","reason":"no target"}') is None    # alias needs target
+    assert parse_decision('{"verdict":"maybe"}') is None                          # bad verdict
+    assert parse_decision("not json") is None
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
