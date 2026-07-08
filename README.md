@@ -25,8 +25,9 @@ without installing; [uv](https://docs.astral.sh/uv/) handles the environment (on
 **The wizard** (no arguments) is the intended way in. It opens on a **status header** (book count,
 column health, how many books are **new/changed**, any pending proposal / new-tag candidates / rejects)
 and then **asks what you want to do** — run the whole guided lifecycle, or jump straight to a single
-task — with any unfinished work flagged inline on the menu. On a fresh library it detects missing
-columns/config and runs **setup** first. The guided run walks the lifecycle in order — **wrangle →
+task — with any unfinished work flagged inline on the menu. A single task then offers to continue to its
+natural next step, so you can flow onward from wherever you jumped in. On a fresh library it detects
+missing columns/config and runs **setup** first. The guided run walks the lifecycle in order — **wrangle →
 staleness → classify → review → promote → backfill** — where every stage dry-runs first, shows its
 report, and asks *apply-all / review 1-by-1 / skip* before writing. The classify stage targets only
 new/changed books, prices each engine for the run (public list prices), runs cloud requests **8-wide**,
