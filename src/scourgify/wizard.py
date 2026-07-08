@@ -35,9 +35,11 @@ def snapshot():
         con.close()
     except Exception as e:
         raise SystemExit(f"can't read {db_path()} — is CALIBRE_LIBRARY correct? ({e})")
-    pending = 0
+    pending = to_stamp = 0
     if os.path.exists(classify.PROP):
-        pending = sum(1 for r in csv.DictReader(open(classify.PROP)) if r.get("added_tags", "").strip())
+        for r in csv.DictReader(open(classify.PROP)):
+            if r.get("added_tags", "").strip(): pending += 1     # books that will gain tags
+            else: to_stamp += 1                                  # no-match books awaiting a stamp (so they aren't re-sent)
     # cheap file-based signals of unfinished work, surfaced as menu hints
     candidates = 0
     if os.path.exists(classify.RANK):
@@ -53,7 +55,7 @@ def snapshot():
         try: backfill_n = len(promote.backfill_plan()[0])
         except Exception: backfill_n = 0
     return {"books": books, "missing": missing, "changed": changed,
-            "pending": pending, "calibre": calibre_open(),
+            "pending": pending, "to_stamp": to_stamp, "calibre": calibre_open(),
             "candidates": candidates, "verdicts_pending": verdicts_pending,
             "rejects": rejects, "backfill": backfill_n,
             "setup_needed": bool(missing) or not os.path.exists(os.path.join(os.getcwd(), "config.toml"))}
@@ -187,6 +189,21 @@ def stage_review():
     vintage = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(classify.PROP)))
     rows = list(csv.DictReader(open(classify.PROP)))
     tagged = [r for r in rows if r.get("added_tags", "").strip()]
+    if not rows:
+        ui.say("proposal is empty — nothing to apply ✓", "green"); return
+    if not tagged:                                    # every book was classified but matched no new vocab tags
+        ui.say(f"{len(rows)} books were classified but got no new vocab tags this run.", "yellow")
+        ui.say("apply to STAMP them as processed — else they're re-sent to the LLM every run.", "dim")
+        choice = ui.menu("proposal", [
+            ("a", "apply", f"stamp {len(rows)} processed books so they aren't re-classified (no tags to add)"),
+            ("d", "discard", "set aside — books stay unstamped and WILL be re-classified next run"),
+        ], default="a")
+        if choice == "a":
+            classify.apply_proposal(); ui.say("done ✓", "green")
+        else:
+            arch = classify.PROP.replace(".csv", f"_discarded_{time.strftime('%Y%m%d-%H%M%S')}.csv")
+            os.rename(classify.PROP, arch); ui.say(f"set aside -> {os.path.basename(arch)}", "dim")
+        return
     cnt = collections.Counter(t for r in tagged for t in r["added_tags"].split("; ") if t.strip())
     t = Table(box=box.SIMPLE, title=f"proposal from {vintage} — {len(tagged)} of {len(rows)} books get tags")
     t.add_column("vocab tag"); t.add_column("books", justify="right")
@@ -206,7 +223,7 @@ def stage_review():
         ("r", "review 1-by-1", "walk each book's tags; untick to reject an AI-guessed tag before it's written"),
         ("k", "keep", "leave it pending — hand-review the CSV first; the wizard offers it again next run"),
         ("d", "discard", "set it aside without applying (archived as *_discarded_*.csv, nothing written)"),
-    ], default="a" if tagged else "d")
+    ], default="a")
     if choice == "a":
         classify.apply_proposal()
         ui.say("done ✓", "green")
@@ -377,7 +394,9 @@ def run_workflow():
 def _task_hint(name, info):
     """The cyan 'pending work' marker for a task, from the file-based snapshot signals."""
     if name == "classify": return f"{info['changed']} new/changed" if info.get("changed") else ""
-    if name == "review":   return f"{info['pending']} books to apply" if info["pending"] else ""
+    if name == "review":
+        if info["pending"]: return f"{info['pending']} books to apply"
+        return f"{info['to_stamp']} to stamp" if info.get("to_stamp") else ""
     if name == "promote":
         bits = [f"{info['candidates']} candidates" if info.get("candidates") else "",
                 "verdicts ready to apply" if info.get("verdicts_pending") else ""]

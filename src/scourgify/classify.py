@@ -505,7 +505,9 @@ def classify_run(a):
             for fut in as_completed(futs):
                 b, err, vt, nt = fut.result()
                 if err: failures.append((b, err))
-                if vt or nt: proposal[b] = (vt, nt)
+                else: proposal[b] = (vt, nt)          # record EVERY non-errored book, even a no-match (vt=nt=[]):
+                                                      # --apply stamps every proposal row, so it isn't re-sent forever.
+                                                      # errors are excluded on purpose — they retry (e.g. --engine apple).
                 dash.update(vt, nt, err)
                 if dash.n % 50 == 0: dump()           # checkpoint regardless of UI
     except KeyboardInterrupt:
