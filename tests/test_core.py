@@ -123,6 +123,11 @@ def test_parse_resp_rejects_formula_injection():
     _, nt = parse_resp('{"tags": [], "new": ["=SUM(A1:A9)", "+curse", "@cmd", "Sentient Toaster Romance"]}')
     assert nt == ["Sentient Toaster Romance"]
 
+def test_parse_resp_null_arrays_dont_crash():
+    # a model may emit `null` instead of `[]`; must degrade to empty, not raise TypeError (whole-run crash)
+    assert parse_resp('{"tags": null, "new": null}') == ([], [])
+    assert parse_resp('{"tags": null, "new": ["Sentient Toaster Romance"]}') == ([], ["Sentient Toaster Romance"])
+
 def test_parse_resp_snaps_near_miss_into_vocab():
     assert "Slow Burn" in VOCAB and "Enemies to Lovers" in VOCAB       # guard: test data still valid
     vt, nt = parse_resp('{"tags": [], "new": ["Slow-Burn", "Enemies-To-Lovers", "Sentient Toaster Romance"]}')

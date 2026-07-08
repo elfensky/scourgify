@@ -116,12 +116,12 @@ def parse_resp(text, maxtags=6, cutoff=DEDUP_CUTOFF):
     except Exception: return [], []
     vlow = {v.lower(): v for v in load_vocab()}
     vkeys = list(vlow)                          # lowercased vocab, for the fuzzy near-miss snap below
-    vt = [vlow[str(t).strip().lower()] for t in obj.get("tags", []) if str(t).strip().lower() in vlow]
+    vt = [vlow[str(t).strip().lower()] for t in (obj.get("tags") or []) if str(t).strip().lower() in vlow]
     if len(vt) > maxtags * 2: vt = []          # model echoed the list, not selecting
     def keep(canon):
         if canon not in vt: vt.append(canon)   # snapped/exact hit -> apply the canonical vocab spelling
     nt, seen = [], set()
-    for t in obj.get("new", []):
+    for t in (obj.get("new") or []):        # `or []`: a model may emit "tags"/"new": null — None isn't iterable
         t = str(t).strip(); tl = t.lower()
         # first char must be alphanumeric: also blocks =/+/-/@ spreadsheet-formula injection in the review CSVs
         if not (t and t[0].isalnum() and 1 < len(t) <= 40): continue
