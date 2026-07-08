@@ -465,7 +465,7 @@ def _step_walk(m, beh, cols, perbook, changes, unique, known_chars, tagcanon):
     lab2key = {v: k for k, v in cols.items()}
     ids = sorted(unique, reverse=True)                         # newest ids first
     con = ro_connect()
-    titles = dict(con.execute(f"SELECT id,title FROM books WHERE id IN ({','.join('?' * len(ids))})", ids)) if ids else {}
+    titles = dict(con.execute("SELECT id, title FROM books")) if ids else {}   # fetch all: --step's id set is unbounded, so an IN(?) list could exceed SQLite's variable cap
     rejects = []
     for pos, b in enumerate(ids):
         edits = unique[b]
