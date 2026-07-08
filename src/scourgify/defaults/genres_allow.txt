@@ -35,6 +35,8 @@ Steampunk
 Cyberpunk
 Dark Fantasy
 Urban Fantasy
+High Fantasy
+Low Fantasy
 Western
 # sub-genres
 Body Horror

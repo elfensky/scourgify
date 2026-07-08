@@ -8,7 +8,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from scourgify import common
 from scourgify.common import norm, ascii_fold, load_config
 from scourgify.wrangle import transform, resolve_trope_chains, build_tagcanon, is_junk
-from scourgify.classify import parse_resp, sparkline, VOCAB
+from scourgify.classify import parse_resp, sparkline, load_vocab
+VOCAB = load_vocab()
 from scourgify.staleness import derive
 
 BEH = load_config(path="/nonexistent/config.toml")["behavior"]     # shipped defaults
@@ -92,6 +93,14 @@ def test_transform_ascii_and_tagcanon():
                          tagcanon={norm("time travel"): "Time Travel"})
     assert "cafe" in nd["tags"] and "Time Travel" in nd["tags"]
 
+def test_transform_routed_genre_goes_through_tag_pipeline():
+    # a genre outside the allowlist routes to tags AND trope-folds there — no raw/canonical duplicates
+    m = maps(trope={"Overpowered Protagonist": ("Overpowered", "tag")}, gallow={"fantasy"})
+    d = {"fandoms": ["X"], "characters": [], "genres": ["Fantasy", "Overpowered Protagonist"], "tags": []}
+    nd, _, _ = transform(d, m, BEH, set(), {})
+    assert nd["genres"] == ["Fantasy"]
+    assert nd["tags"] == ["Overpowered"]                               # folded, not duplicated
+
 def test_build_tagcanon_majority_spelling():
     tc = build_tagcanon(["Time Travel", "Time Travel", "time-travel"], maps())
     assert tc[norm("time travel")] == "Time Travel"
@@ -113,6 +122,27 @@ def test_parse_resp_rejects_list_echo_and_garbage():
 def test_parse_resp_rejects_formula_injection():
     _, nt = parse_resp('{"tags": [], "new": ["=SUM(A1:A9)", "+curse", "@cmd", "Sentient Toaster Romance"]}')
     assert nt == ["Sentient Toaster Romance"]
+
+def test_parse_resp_null_arrays_dont_crash():
+    # a model may emit `null` instead of `[]`; must degrade to empty, not raise TypeError (whole-run crash)
+    assert parse_resp('{"tags": null, "new": null}') == ([], [])
+    assert parse_resp('{"tags": null, "new": ["Sentient Toaster Romance"]}') == ([], ["Sentient Toaster Romance"])
+
+def test_parse_resp_snaps_near_miss_into_vocab():
+    assert "Slow Burn" in VOCAB and "Enemies to Lovers" in VOCAB       # guard: test data still valid
+    vt, nt = parse_resp('{"tags": [], "new": ["Slow-Burn", "Enemies-To-Lovers", "Sentient Toaster Romance"]}')
+    assert "Slow Burn" in vt and "Enemies to Lovers" in vt             # hyphen/case variants snap to canonical spelling
+    assert nt == ["Sentient Toaster Romance"]                          # genuinely novel still surfaces as new
+
+def test_annotate_new_verdict_split():
+    import collections
+    from scourgify.classify import annotate_new
+    ranked = collections.Counter({"Slow-Burn": 5, "Dragon Politics": 2})
+    rows = annotate_new(ranked, cutoff=0.86, existing=["Slow Burn", "Time Travel"])
+    by = {r[0]: r for r in rows}
+    assert by["Slow-Burn"][4] == "near-duplicate" and by["Slow-Burn"][2] == "Slow Burn"   # variant -> nearest existing
+    assert by["Dragon Politics"][4] == "new"                          # no close match -> genuinely new
+    assert rows[0][4] == "new"                                        # new sorted ahead of near-duplicates
 
 def test_sparkline():
     assert sparkline([]) == ""
@@ -138,6 +168,96 @@ def test_load_config_toml_reader():
     assert cfg["columns"]["tags"] == "#my tags"
     assert cfg["behavior"]["fold_characters"] is False
     assert cfg["behavior"]["ascii_only_tags"] is True                  # untouched default survives
+
+def test_vocab_overrides_merge():
+    from scourgify import classify
+    with tempfile.TemporaryDirectory() as td:
+        os.makedirs(os.path.join(td, "overrides"))
+        with open(os.path.join(td, "overrides", "classify_vocab.txt"), "w") as f:
+            f.write("# my terms\nSentient Toaster Romance\n-Time Travel\n")
+        old = os.getcwd(); os.chdir(td); classify._VOCAB = None       # vocab is cached per CWD
+        try:
+            v = classify.load_vocab()
+            assert "Sentient Toaster Romance" in v                     # appended
+            assert "Time Travel" not in v                              # '-term' removed a bundled term
+        finally:
+            os.chdir(old); classify._VOCAB = None
+
+def test_est_cost():
+    from scourgify.classify import est_cost
+    assert est_cost(100, "apple") == 0.0                               # on-device is free
+    assert 0 < est_cost(100, "gemini") < est_cost(100, "claude")       # scales with list price
+    assert est_cost(200, "gemini") == 2 * est_cost(100, "gemini")      # linear in books
+
+
+# ---- 1-by-1 step review: reconstruct + rejects → overrides ----
+def test_reconstruct_reverts_only_rejected():
+    from scourgify.wrangle import reconstruct
+    nd = {"#fandoms": ["Naruto (anime)"]}; orig = {"#fandoms": ["Naruto"]}
+    rename = ("rename", "#fandoms", "Naruto", "Naruto (anime)")
+    assert reconstruct(nd, orig, []) == {"#fandoms": ["Naruto (anime)"]}   # accept all -> full change stands
+    assert reconstruct(nd, orig, [rename]) == {}                           # reject -> back to original, nothing to write
+    # drop / add invert to the original too
+    assert reconstruct({"tags": []}, {"tags": ["WIP"]}, [("drop", "tags", "WIP", "")]) == {}
+    assert reconstruct({"tags": ["Time Travel"]}, {"tags": []}, [("add", "tags", "", "Time Travel")]) == {}
+    # move back across columns
+    assert reconstruct({"#genres": [], "tags": ["Fluffy"]}, {"#genres": ["Fluffy"], "tags": []},
+                       [("move", "#genres → tags", "Fluffy", "")]) == {}
+
+def test_reconstruct_keeps_accepted_alongside_rejected():
+    from scourgify.wrangle import reconstruct
+    nd = {"#fandoms": ["Naruto (anime)"], "tags": []}
+    orig = {"#fandoms": ["Naruto"], "tags": ["WIP"]}
+    # reject the fandom rename, keep the tag drop
+    net = reconstruct(nd, orig, [("rename", "#fandoms", "Naruto", "Naruto (anime)")])
+    assert net == {"tags": []}                                            # fandom reverted (==orig, unwritten); drop kept
+
+def test_synth_reject_auto_kinds():
+    from scourgify.wrangle import synth_reject
+    assert synth_reject("fandoms", "rename", "Naruto", "Naruto (anime)") == ("auto", [("fandoms.csv", "Naruto,Naruto")], "")
+    assert synth_reject("characters", "rename", "Harry P.", "Harry Potter") == ("auto", [("characters.csv", "Harry P.,Harry P.,")], "")
+    cls, actions, _ = synth_reject("genres", "rename", "Angsty", "Angst")
+    assert cls == "auto" and ("genres_canon.csv", "Angsty,Angsty") in actions and ("genres_allow.txt", "Angsty") in actions
+    assert synth_reject("tags", "rename", "fixit", "Fix-It") == ("auto", [("tropes.csv", "fixit,fixit,tag")], "")
+    assert synth_reject("genres", "move", "Fluffy", "", dest="tags") == ("auto", [("genres_allow.txt", "Fluffy")], "")
+
+def test_synth_reject_manual_kinds():
+    from scourgify.wrangle import synth_reject
+    assert synth_reject("tags", "drop", "WIP", "")[0] == "manual"             # junk/redundancy drop
+    assert synth_reject("tags", "add", "", "Time Travel")[0] == "manual"      # injected value
+    assert synth_reject("characters", "move", "Akeno", "", dest="tags")[0] == "manual"   # cross-column rescue
+
+def test_promote_backfill_targets():
+    from scourgify.promote import resolve_ledger, backfill_wanted
+    res = resolve_ledger([
+        {"tag": "Gacha System", "verdict": "promote", "target": ""},
+        {"tag": "Isekai'd", "verdict": "alias", "target": "Isekai"},
+        {"tag": "Plot Specific", "verdict": "reject", "target": ""},   # rejects don't backfill
+        {"tag": "", "verdict": "promote", "target": ""},               # blank ignored
+    ])
+    assert res == {"gacha system": "Gacha System", "isekai'd": "Isekai"}
+    want = backfill_wanted(res, [
+        {"book_id": "10", "proposed_new": "Gacha System; Plot Specific"},
+        {"book_id": "11", "proposed_new": "Isekai'd; Unrelated"},
+        {"book_id": "10", "proposed_new": "Isekai'd"},                 # accumulates across proposal files
+        {"book_id": "bad", "proposed_new": "Gacha System"},           # unparseable id skipped
+    ])
+    assert want == {10: {"Gacha System", "Isekai"}, 11: {"Isekai"}}   # promoted->itself, aliased->target
+
+def test_synth_identity_override_is_a_noop_in_transform():
+    # the round-trip that the whole `overrides` design rests on: an identity map cancels the fold.
+    def flatten(fan):                                    # mirrors load_maps' chain-flattening
+        for a in list(fan):
+            t, seen = fan[a], {a}
+            while t in fan and t not in seen: seen.add(t); t = fan[t]
+            fan[a] = t
+        return fan
+    fan = {"Naruto": "Naruto (anime)"}
+    assert transform({"fandoms": ["Naruto"]}, maps(fan=dict(fan)), BEH)[0]["fandoms"] == ["Naruto (anime)"]
+    fan.update({"Naruto": "Naruto"})                     # override loads LAST -> identity wins
+    assert transform({"fandoms": ["Naruto"]}, maps(fan=flatten(fan)), BEH)[0]["fandoms"] == ["Naruto"]
+    char = {"Harry P.": "Harry Potter"}; char.update({"Harry P.": "Harry P."})
+    assert transform({"characters": ["Harry P."]}, maps(char=char), BEH)[0]["characters"] == ["Harry P."]
 
 
 if __name__ == "__main__":

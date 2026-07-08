@@ -9,7 +9,7 @@ used to each carry a private copy of:
   - the single write funnel: run_writer() -> calibre-debug -e _writer.py
     (backs up metadata.db to /tmp before every write; refuses to run while Calibre is open)
 """
-import os, re, sys, sqlite3, collections, unicodedata
+import os, re, sys, csv, time, sqlite3, collections, unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))   # the installed package dir (read-only)
 DEFAULTS = os.path.join(HERE, "defaults")            # bundled generic maps — ship inside the package
@@ -17,6 +17,23 @@ DEFAULTS = os.path.join(HERE, "defaults")            # bundled generic maps — 
 # (proposals/intermediates), config.toml, and overrides/ are all resolved against CWD.
 # When run from the repo via `uv run`, CWD == repo root, so dev layout is unchanged.
 DATA = os.path.join(os.getcwd(), "data")             # personal review maps, proposals, intermediates (gitignored)
+REJECTS = os.path.join(DATA, "rejects.csv")          # per-item rejects from `--step` review (see wrangle.overrides)
+REJECT_COLS = ["ts", "stage", "book", "title", "kind", "column", "before", "after", "class"]
+
+
+def log_rejects(rows):
+    """Append reject dicts (REJECT_COLS keys; ts auto-stamped) to data/rejects.csv, creating
+    the header on first write. The "separate list" that `scourgify overrides` reads back."""
+    rows = [r for r in rows if r]
+    if not rows: return 0
+    os.makedirs(DATA, exist_ok=True)
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+    new = not os.path.exists(REJECTS)
+    with open(REJECTS, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=REJECT_COLS, extrasaction="ignore")
+        if new: w.writeheader()
+        for r in rows: w.writerow({"ts": ts, **r})
+    return len(rows)
 
 
 # ---------------- library resolution (lazy — importing this module never exits) ----------------

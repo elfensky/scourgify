@@ -15,21 +15,31 @@ reversible.
 pipx install scourgify                                # or: uv tool install scourgify  (one dependency: rich)
 
 export CALIBRE_LIBRARY="$HOME/Calibre/fanfiction"     # folder containing metadata.db
-scourgify                                             # ← the wizard: everything below, menu-driven
+scourgify                                             # ← the wizard: the whole lifecycle, guided
 ```
 
 Requires **Calibre installed** — the tool reads via read-only sqlite and shells out to Calibre's own
 `calibre-debug` for writes. From a checkout, `uv run scourgify` (or `uvx --from . scourgify`) runs it
 without installing; [uv](https://docs.astral.sh/uv/) handles the environment (one dependency: rich).
 
-**The wizard** (no arguments) is the intended way in — and it steers you: on a fresh library it
-detects missing columns/config and offers to run **setup** immediately; afterwards the status header
-shows book count, column health, how many books are **new/changed since the last run**, and any
-pending proposal, and the menu **defaults to whatever the library needs next**. Menu item **0 —
-maintenance** walks the whole loop in the right order (wrangle → staleness → classify → review),
-each step explained, previewed, and skippable. Classify runs show a **live dashboard** (progress +
-tagged/failed/rate + throughput sparkline + rising tag candidates). Every write previews first,
-asks for confirmation, and auto-backs-up `metadata.db`.
+**The wizard** (no arguments) is the intended way in. It opens on a **status header** (book count,
+column health, how many books are **new/changed**, any pending proposal / new-tag candidates / rejects)
+and then **asks what you want to do** — run the whole guided lifecycle, or jump straight to a single
+task — with any unfinished work flagged inline on the menu. A single task then offers to continue to its
+natural next step, so you can flow onward from wherever you jumped in. On a fresh library it detects
+missing columns/config and runs **setup** first. The guided run walks the lifecycle in order — **wrangle →
+staleness → classify → review → promote → backfill** — where every stage dry-runs first, shows its
+report, and asks *apply-all / review 1-by-1 / skip* before writing. The classify stage targets only
+new/changed books, prices each engine for the run (public list prices), runs cloud requests **8-wide**,
+and can **compare engines on a 5-book sample** before you commit; runs show a **live dashboard**
+(progress + tagged/failed/rate + throughput sparkline + rising tag candidates). Every write previews
+first, asks for confirmation, and auto-backs-up `metadata.db`.
+
+**Review 1-by-1** (`--step`) walks the changed books one at a time — a per-item checklist, everything
+pre-ticked, untick to reject — for both the wrangle stage's per-book oddities and the classify stage's
+AI-guessed tags. A rejected *deterministic* (wrangle) change is a rule bug: it's logged so `scourgify
+overrides` can fold it into a personal override that stops it recurring. A rejected *classify* tag is
+just an AI miss: dropped and logged, nothing to fix.
 
 Each step is also a plain scriptable subcommand:
 
@@ -37,6 +47,8 @@ Each step is also a plain scriptable subcommand:
 scourgify setup                                      # interactive health check + setup (FanFicFare, columns, config)
 scourgify audit                                      # read-only dry-run report of every pass
 scourgify apply --apply                              # write changes (Calibre CLOSED for this step)
+scourgify apply --step                               # review each changed book 1-by-1 (untick items to reject)
+scourgify overrides                                  # turn rejected deterministic changes into personal override rules
 ```
 
 Everything runs under plain `python3`. The tool reads via read-only sqlite and, for the actual writes,
@@ -56,12 +68,22 @@ behavior toggles). Safe to re-run anytime.
 subcommands still degrade to text without it (rich is `try/except`-imported in the core tools, so
 scripting/CI without rich keeps working, and `_writer.py` under Calibre's bundled Python needs none).
 
-The engine reads:
-- **`defaults/`** — bundled, generic fanfic knowledge (FFN `Harry P.`→`Harry Potter`, JP→English
-  fandom titles, `no beta we die like…` = junk, …). Ships with the tool; not specific to anyone.
+The engine reads, first to last (later wins):
+- **`defaults/ao3/`** — the bundled **master taxonomy**, generated from AO3's official
+  [tag dump](https://archiveofourown.org/admin_posts/18804): ~15 years of volunteer tag-wrangler
+  knowledge as `master,name,rel` pair rows — **universes** (one name per franchise, media splits and
+  renamed adaptations folded in: `Game of Thrones (TV)` → `A Song of Ice and Fire`), **tags** (93k
+  canonical-spelling folds), **characters** (38k name folds), **genres** (3.5k synonyms). Covers
+  *every* fandom above ~10 AO3 uses, not just one library. Machine-generated — never hand-edit.
+- **`defaults/`** — curated generic knowledge on top (franchise taste, junk rules, the genre
+  allowlist, `ao3_exceptions.txt` for AO3 mergers deliberately not followed). Edit **here** to change
+  behavior for everyone; a re-point of a generated master cascades over its whole subtree.
 - **`config.toml`** — your column mapping + opinionated behavior toggles (generated by `setup`).
-- **`overrides/`** *(optional)* — your own files (same formats as `defaults/`) that **extend and win
-  over** the defaults.
+- **`overrides/`** *(optional)* — your own files (same formats) that **win over everything** and
+  survive pip upgrades. For personal taste that shouldn't ship.
+
+Data from the [OTW's Selective data dump for fan statisticians](https://archiveofourown.org/admin_posts/18804)
+(2021-02-26), released for public reuse — thank you, Tag Wrangling volunteers.
 
 ---
 
@@ -175,10 +197,13 @@ scourgify staleness --apply            # 2. free: re-derive #status from #update
 scourgify classify --incremental       # 3. cheap: content-tag only new/changed books -> proposal
                                        # 4. review data/classify_proposal.csv
 scourgify classify --apply             # 5. apply the reviewed tags + stamp #wrangled
+scourgify promote --apply --backfill   # 6. grow the vocab from new-tag candidates, AND apply the
+                                       #    promoted/aliased tags back onto the books that suggested them
 ```
 
-Or just `scourgify` and walk the wizard menu in order: **3 wrangle → 4 staleness →
-5 classify → 6 review**. Re-running wrangle is always safe — it's idempotent and won't regress
+Or just `scourgify` — the wizard runs exactly this loop, guided. Need a specific redo instead?
+`scourgify classify --last 30` (the 30 most recently added) or `--since 2026-06-01` (added or
+site-updated since a date). Re-running wrangle is always safe — it's idempotent and won't regress
 curated genres (it uses the full `genres_allow.txt`).
 
 ---
@@ -192,6 +217,7 @@ review and **promote** the recurring ones into the vocab. Grows the tag set deli
 ```bash
 scourgify classify --engine apple --limit 50        # propose -> data/classify_proposal.csv (dry-run, read-only)
 scourgify classify --apply                          # add the proposed tags (Calibre CLOSED)
+scourgify classify --apply --step                   # review each book's tags 1-by-1 first (untick to reject)
 ```
 - `--engine apple` — on-device **Apple Foundation Models** via `afm.swift` (free, private; macOS 26+,
   Apple Intelligence). Ships as source; a `swift` toolchain runs it as-is, or from a checkout build the
@@ -199,18 +225,51 @@ scourgify classify --apply                          # add the proposed tags (Cal
   so the prompt caps at `--max-tags 6` and dumps (>2× cap) are rejected.
 - `--engine claude|openai|gemini` — cloud APIs (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY`);
   defaults `claude-haiku-4-5` / `gpt-4o-mini` / `gemini-2.5-flash`, override with `--model`. Sharper; cheap.
-- Only books with `< --min-tags` (default 2) tags **and** a description are touched. Always dry-run
-  until `--apply`. Edit `defaults/classify_vocab.txt` to shape the allowed tag set.
+- **Scope — which books a run touches** (`select.py` owns this; newest-added-first, so `--batch`/`--limit`
+  caps hit the new books first): `--incremental` = only new/changed books; `--last N` = the N most recently
+  added; `--since DATE` = added or site-updated on/after DATE; no scope flag = books with `< --min-tags`
+  (default 2) tags. Books whose description is too thin (<40 chars) are reported, not silently dropped —
+  `--text-fallback` samples the book's own prose for them. Always dry-run until `--apply`.
+- The allowed tag set is the bundled `defaults/classify_vocab.txt` **plus your
+  `overrides/classify_vocab.txt`** (a line appends a term, `-term` removes one) — editable even for a
+  pipx/uv-tool install, where the bundled file lives read-only in site-packages.
 - Long runs **save incrementally and resume** on re-run (skip books already in the proposal; `--fresh`
   to restart). `--batch N` processes only N new books per run — handy for pacing API spend/rate limits.
-  A **spend gate** asks for confirmation (or `--yes`) before sending more than 200 books to a cloud engine.
+  Cloud engines run `--workers` requests concurrently (default 8); `apple` is single-threaded (one
+  on-device pipe). A **spend gate** asks for confirmation (or `--yes`) before sending more than 200 books to a cloud engine.
+- `--apply --step` reviews the proposal **1-by-1** before writing: each book's proposed tags as a
+  checklist you untick to reject. Accepted tags are applied and the book stamped; rejected tags are
+  dropped and logged (an AI miss, not a rule bug); *skip*/*quit* leave a book pending for a later run.
 - Proposals/outputs live in `data/` (gitignored): `classify_proposal.csv`, `classify_newtags_ranked.csv`,
   `classify_failures.csv`. On `--apply` the proposal is **archived** to `classify_proposal_applied_<ts>.csv`,
   so a later apply can never re-add tags you've since hand-removed in Calibre.
-- **Incremental maintenance (`--incremental`):** after new FanFicFare downloads, `classify.py --incremental` (re)tags
-  only books whose `#updated` is newer than their own **`#wrangled`** marker (a datetime column auto-created and
-  stamped on `--apply`), plus any still untagged — cents instead of a full pass. State lives *in the library*
-  (travels with `metadata.db`, no external file). A full cloud `--fresh` run is expensive; reserve it for vocab changes.
+- **Incremental maintenance (`--incremental`):** after new FanFicFare downloads, (re)tags only **new/changed**
+  books — never classified, `#updated` newer than their own **`#wrangled`** marker, or **re-fetched** (added-date
+  newer, which FanFicFare bumps on re-download — catching updates fetched late) — cents instead of a full pass.
+  `--apply` auto-creates the marker column and stamps **every processed book** (tagged or not, so no-tag books
+  aren't re-sent forever). State lives *in the library* (travels with `metadata.db`, no external file). A full
+  cloud `--fresh` run is expensive; reserve it for vocab changes.
+
+### Growing the vocab — `scourgify promote`
+After a classify run, novel tag candidates land in `classify_newtags_ranked.csv`. `scourgify promote`
+adjudicates each one **adversarially against the master tag list**: an advocate proposes
+promote / alias / reject, a skeptic (optionally a *different* engine via `--verify-with openai`) tries
+to refute a promote, and the difflib shortlist of nearest master tags grounds both. Verdicts land in
+`data/promote_review.csv` for review; `scourgify promote --apply` folds them into `overrides/`
+(promotes → vocab, aliases → `tropes.csv` + a snap-map that stops re-proposal). Engines and keys are
+exactly classify's (`--engine claude|openai|gemini|mistral|apple`; your own API key in the env; `apple`
+is free/on-device). To grow the *shipped* vocab: run `scourgify promote`, review, then `--apply`
+(writes to `overrides/classify_vocab.txt`); manually copy the keeper terms into
+`src/scourgify/defaults/classify_vocab.txt` and commit that file.
+
+**Close the loop — `promote --backfill`.** The classifier only writes vocab tags; a `proposed_new`
+candidate is never written to its book, so promoting/aliasing one grows the vocab but leaves the books
+that *suggested* it un-tagged (and they're stamped, so `--incremental` skips them). `scourgify promote
+--backfill` fixes that **deterministically, with no API calls**: it reads the book↔`proposed_new` record
+kept in the (archived) proposals and the ledger's verdicts, and applies each promoted tag (or an alias's
+target) onto exactly the books that first proposed it — union with their current tags, previewed and
+confirmed, Calibre closed. Combine with apply as `promote --apply --backfill`, or run it alone anytime to
+retro-fix past promotions.
 
 ## Custom maps from your library (`overrides/`)
 The bundled `defaults/` are generic. Two helper workflows mined library-specific maps into `overrides/`
@@ -218,9 +277,16 @@ The bundled `defaults/` are generic. Two helper workflows mined library-specific
 (`overrides/fandoms.csv`, e.g. `Avengers`/`Captain America (Movies)` → `Marvel`, `Game of Thrones (TV)`
 → `A Song of Ice and Fire`). The engine loads these on top of the defaults automatically.
 
+`scourgify overrides` grows these files the easy way: it reads the deterministic changes you rejected
+in `apply --step` (logged to `data/rejects.csv`) and synthesizes the exact identity-override lines that
+suppress them — a rejected fandom fold → `fandoms.csv: X,X`, a rejected genre canon → `genres_canon.csv:
+X,X`, and so on. Dry-run by default; `--apply` appends the lines (de-duped), `--master` targets the
+shipped `defaults/` (maintainer, checkout only). Rejects it can't express as an additive override (junk
+un-drops, cross-column rescues) are listed for hand-editing rather than faked.
+
 ## Repo layout
 The package lives in **`src/scourgify/`**; the single `scourgify` command (`cli.py`) dispatches
-bare → wizard, `setup`/`audit`/`apply` → wrangle, `classify`, and `staleness`.
+bare → wizard, `setup`/`audit`/`apply`/`overrides` → wrangle, `classify`, `staleness`, and `promote`.
 - **`cli.py`** — the `scourgify` entry point (argv dispatcher over the tools below)
 - **`wrangle.py`** — the engine: `setup` / `audit` / `apply`; with no command it launches the wizard
 - **`wizard.py` + `ui.py`** — the interactive wizard and its rich terminal helpers (the one
@@ -240,3 +306,12 @@ bare → wizard, `setup`/`audit`/`apply` → wrangle, `classify`, and `staleness
 
 The per-library review-map CSVs in `data/` are gitignored (they contain your library's actual data);
 only the generic `defaults/` ship with the repo.
+
+## Development
+`develop` is the integration branch (all work + PRs, **rebase-merged so its history stays linear** — no merge
+commits; CI runs the tests on Python 3.10 + 3.13). `main` is release-only and branch-protected — one
+`Release vX.Y.Z` merge commit per release, each arcing back to the `develop` commit it was cut from.
+Publishing is automated on release via **Trusted Publishing** (OIDC, no tokens): a merge to `main` ships to
+TestPyPI, a manual workflow dispatch promotes to PyPI. Tests need no Calibre or network:
+`uv run tests/test_core.py` and `uv run tests/test_selection.py`. Release steps live in
+`CLAUDE.md → Branching & releases`.

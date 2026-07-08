@@ -26,16 +26,36 @@ uv run scourgify apply --apply                       # write changes (Calibre CL
 
 (`uv run scourgify` from a checkout; an installed copy — `pipx install scourgify` — drops the `uv run`.)
 
-**`wizard.py`** (launched by bare `scourgify`) is a guiding menu wizard: on launch it
-detects an un-set-up library (missing columns / no config.toml) and routes to setup; the header shows
-books, column health, new/changed-since-last-run count, pending proposal, Calibre-open warning; the
-menu default adapts via `recommend()` (setup → review-pending → maintenance → audit). Item 0
-(`act_flow`) is a guided maintenance run sequencing wrangle → staleness → classify → review with
-per-step explanations and skips. It calls the same engine functions the subcommands do (previews →
-confirm → write), so guardrails and auto-backup apply identically; guardrail `SystemExit`s return to
-the menu. `ui.py` holds the shared rich Console + prompt helpers (lintle `term.py` pattern). classify
+**`wizard.py`** (launched by bare `scourgify`) is a **guided lifecycle behind a landing menu**: header
+(books, column health, new/changed count via `select.changed`, pending proposal, Calibre-open
+warning) → setup if columns/config are missing → then a **menu** (`landing_menu`) that asks what to do —
+the **full maintenance run** (`run_workflow` over `WORKFLOW`) or a **single task** (`TASKS`), with
+unfinished work flagged inline from cheap file signals in `snapshot()` (pending proposal, undecided
+new-tag candidates, `--step` rejects, backfillable promotions). The menu loops (re-`snapshot` after each
+task) until quit. The guided run is the stages in order — **wrangle → staleness → classify → review →
+promote → backfill** — each dry-running first, showing its report, and asking before writing (a clean
+stage auto-skips). There is no separate audit step — the wrangle stage's dry run IS the audit;
+`scourgify audit` stays for the full per-value detail. The classify stage auto-targets
+new/changed books only, shows per-engine cost estimates (`classify.est_cost`, list prices in
+`classify.PRICING`), offers an engine **bake-off** (`classify.bakeoff`: the same ~5 sample books
+through every usable engine, display-only), and enables `--text-fallback` so thin descriptions get
+sampled rather than dropped. The review stage offers apply / keep / discard (discard archives to
+`*_discarded_*.csv`). The wrangle and review stages also offer a **1-by-1 review** (`ui.checklist`,
+CLI `apply --step` / `classify --apply --step`): walk each book's changes, untick to reject
+individual items. Rejects land in `data/rejects.csv` (see `docs/superpowers/specs/2026-07-06-…`);
+`scourgify overrides` turns the deterministic (wrangle) ones into identity-override lines so the same
+change never recurs (dry-run default, `--apply` writes, `--master` targets `defaults/`), while
+classify rejects are log-only (an AI hallucination, not a rule bug). Stages call the same engine functions the subcommands do (previews → confirm →
+write), so guardrails and auto-backup apply identically; guardrail `SystemExit`s skip the stage, not
+the run. `ui.py` holds the shared rich Console + prompt helpers (lintle `term.py` pattern). classify
 runs render a live dashboard (`classify._Dashboard`: progress, tagged/failed/rate, throughput
 sparkline, rising candidates).
+
+**`select.py`** — the one owner of "which books does this run operate on"; classify's scope flags and
+the wizard header both go through it, so they can never disagree. A book is new/changed iff unstamped
+∨ `#updated` > stamp ∨ added-date (`books.timestamp`) > stamp — the added-date clock catches re-fetches
+(FanFicFare bumps it) while staying immune to scourgify's own writes (`last_modified` is deliberately
+NOT used). All pickers return newest-added-first.
 
 **Packaging.** The code is a proper installable package under `src/scourgify/` (hatchling; on PyPI as
 `scourgify`). The single `scourgify` console command (`cli.py`) dispatches argv to the tools: bare → wizard,
@@ -61,7 +81,9 @@ dir (use it only for shipped read-only files); anything user-writable keys off `
   and `run_writer()`. Don't re-implement any of these in a tool script.
 
 Verification: `uv run tests/test_core.py` (plain asserts, pytest-compatible, no library/network needed) pins the
-pure core — `transform`, trope-chain resolution, `parse_resp`, the TOML reader. `scourgify audit` remains the
+pure core — `transform`, trope-chain resolution, `parse_resp`, the TOML reader — and
+`uv run tests/test_selection.py` pins the selection semantics against a throwaway sqlite `metadata.db` built
+by `tests/fixture_db.py` (covers both custom-column storage shapes). CI runs both. `scourgify audit` remains the
 against-your-library check: full new state, before/after counts, and SAFETY lines asserting **no book loses its
 last fandom or character** plus a **tag mass-deletion guardrail** (`apply` aborts if tags would shrink >25% and
 >200 assignments — the signature of an over-broad junk rule; `--force` overrides).
@@ -74,12 +96,15 @@ junk tags inflate a book's tag count and would hide it from the classifier's spa
 ```
 FFF fetch → uv run scourgify apply --apply           # 1. junk-drop/canonicalize the new raw tags (idempotent)
           → uv run scourgify staleness --apply       # 2. free; re-derive #status from #updated age
-          → uv run scourgify classify --incremental  # 3. cheap; only books changed since last wrangle
+          → uv run scourgify classify --incremental  # 3. cheap; only new/changed books (see select.py)
           → review data/classify_proposal.csv        # 4.
           → uv run scourgify classify --apply        # 5. Calibre closed (writes shell to calibre-debug)
+          → scourgify promote                         # adjudicate new-tag candidates → review → promote --apply
+          → scourgify promote --backfill              # apply promoted/aliased tags onto the books that proposed them (deterministic, no LLM)
 ```
 
-(Or the wizard: `uv run scourgify` → menu 3 → 4 → 5 → 6.)
+(Or the wizard: `uv run scourgify` walks exactly this loop, guided. Targeted redo:
+`classify --last 30` / `--since DATE`.)
 
 **⚠️ Cost:** a full Gemini `classify --fresh` pass over the library ≈ **€50** in tokens. Never run `--fresh`
 casually — use `--incremental` (only changed/new books), `--batch N`, or `--engine apple` (free, on-device).
@@ -89,9 +114,12 @@ confirmation / `--yes`). **Do NOT bulk re-fetch FFF metadata** — it re-pollute
 
 ## Architecture
 
-**`wrangle.py` — the unified engine.** Subcommands `audit` / `apply` / `setup`. Loads three layers:
-`defaults/` (generic, shipped) ← `config.toml` (column map + behavior toggles) ← `overrides/` (per-user,
-**gitignored**, same file formats, wins on conflict). `load_maps()` builds the in-memory maps; `transform()`
+**`wrangle.py` — the unified engine.** Subcommands `audit` / `apply` / `setup`. Loads the data layers
+(first to last, later wins): **`defaults/ao3/`** (generated master lists — see below) ← `defaults/`
+(curated generic taste) ← `config.toml` (column map + behavior toggles) ← `overrides/` (per-user,
+**gitignored**, same file formats, survives pip upgrades). `load_maps()` builds the in-memory maps
+(fandom and trope chains are flattened, so a curated re-point of a generated master cascades);
+`transform()`
 is the per-book core: fandom alias→canonical, character folding (global + fandom-scoped), genre
 split→canon→route, tag junk-drop / trope-route / redundancy-strip. Strips a redundant tag only when the
 concept already lives in that book's structured column (**backfill-before-strip**).
@@ -102,20 +130,41 @@ concept already lives in that book's structured column (**backfill-before-strip*
 into the numbered Series field, and aggressive franchise unification (e.g. all Fate/Nasuverse → `Type-Moon`).
 
 **`classify.py` — content-based tagging** (separate from the deterministic engine; uses an LLM). Two outputs
-per book: `added_tags` (chosen from the controlled vocab `defaults/classify_vocab.txt` → applied) and
-`proposed_new` (novel candidates → aggregated to `classify_newtags_ranked.csv` for review→promotion, so the
-vocab grows without freeform noise). Engines `--engine apple|claude|openai|gemini` (keys via env:
-`ANTHROPIC_/OPENAI_/GEMINI_API_KEY`); `apple` = on-device, free, single-threaded. Concurrency via
-`ThreadPoolExecutor` (`--workers`), retry/backoff, incremental save + resume. `--text-fallback` samples the
-book's own prose (EPUB via zipfile, other formats via `ebook-convert`) when the `#comments` description is
-too thin. `--incremental` re-tags only books whose `#updated` is newer than their per-book **`#wrangled`**
-datetime marker (auto-created and stamped on `--apply`) — state lives in the library, no external file.
+per book: `added_tags` (chosen from the controlled vocab — bundled `defaults/classify_vocab.txt` merged with
+the user's `overrides/classify_vocab.txt` via `load_vocab()`, lazily, so installed copies stay overridable →
+applied) and `proposed_new` (novel candidates → aggregated to `classify_newtags_ranked.csv` for
+review→promotion, so the vocab grows without freeform noise). Engines `--engine apple|claude|openai|gemini`
+(keys via env: `ANTHROPIC_/OPENAI_/GEMINI_API_KEY`); `apple` = on-device, free, single-threaded. Concurrency
+via `ThreadPoolExecutor` (`--workers`), retry/backoff, incremental save + resume. `--text-fallback` samples
+the book's own prose (EPUB via zipfile, other formats via `ebook-convert`) when the description (Calibre's
+built-in `comments` table) is too thin. Scope flags (`--incremental` / `--last N` / `--since DATE`) go through
+`select.pick` and select ONLY their books; the sparse-book default (`< --min-tags`) applies only with no scope
+flag. `--apply` auto-creates the **`#wrangled`** datetime marker and stamps **every processed book** (a no-tag
+book left unstamped would be re-sent to the LLM forever) — state lives in the library, no external file.
 Proposals/outputs live in `data/` (gitignored); `--apply` archives the proposal to
-`classify_proposal_applied_<ts>.csv` so stale rows never re-add hand-removed tags.
+`classify_proposal_applied_<ts>.csv` so stale rows never re-add hand-removed tags. `est_cost`/`PRICING` hold
+the public list prices behind the wizard's per-engine estimates; `bakeoff()` is the sample comparison. **`promote.py`** reuses classify's engines/`ask_retry`/`existing_terms` to adjudicate `proposed_new` (advocate→skeptic, `--verify-with` for cross-model, human review is the referee), writes `data/promote_review.csv`, and `--apply` folds into `overrides/` + feeds `parse_resp`'s alias snap.
+`--backfill` closes the loop deterministically (no LLM): `proposed_new` candidates are never written to
+books, so a promotion/alias otherwise leaves the source books un-tagged (and stamped, so `--incremental`
+skips them). `backfill_plan()` reads the book↔`proposed_new` record from the (archived) proposals + the
+`promote_ledger.csv` verdicts (`resolve_ledger`/`backfill_wanted` are pure, tested) and applies each
+promoted tag / alias target onto exactly the books that proposed it (union, previewed, Calibre closed).
 
 **`staleness.py`** — re-derives `#status` for the activity family {In-Progress, Hiatus, Abandoned} from
 `#updated` age (`<2y`→In-Progress, `2–5y`→Hiatus, `≥5y`→Abandoned); idempotent + self-correcting on re-run.
 Completed/Dropped/Rewritten and date-less books are never touched.
+
+**`defaults/ao3/` — the generated master taxonomy** (universes/tags/characters/genres as `master,name,rel`
+pair rows; ~150k rows, ~7MB, ships in the wheel). Built by **`build_ao3_layer.py`** from the OTW
+["Selective data dump for fan statisticians"](https://archiveofourown.org/admin_posts/18804) (2021-02-26):
+mechanical extraction of canonical+merger pairs, then an LLM batch workflow clusters fandoms
+one-universe-per-franchise (Haiku bulk → Sonnet adversarial verify → Opus referee;
+`--assemble <result.json>` combines the verdict-gated decisions into `universes.csv`). NEVER hand-edit
+these files — regeneration overwrites them; hand decisions go in curated `defaults/` (re-points cascade)
+or `defaults/ao3_exceptions.txt` (pairs excluded from generation, with reasons — e.g. AO3 warning-shadow
+mergers that don't transfer to a Calibre library, since Calibre has no warnings field). Policy: **adapt
+AO3 everywhere except franchise unification** — curated/override rows that merely fight AO3 spellings
+get pruned, not kept.
 
 **`build_defaults.py`** — maintainer tool: regenerates `defaults/` from the source library's gitignored
 review-map CSVs (in `data/`). Curated cross-library knowledge (e.g. franchise unification) lives in its `CURATED_FAN`.
@@ -148,6 +197,39 @@ review-map CSVs (in `data/`). Curated cross-library knowledge (e.g. franchise un
 - `src/scourgify/afm.swift` is the Apple Foundation Models bridge for `scourgify classify --engine apple`;
   it ships in the package (a `swift` toolchain runs it as-is), or build the faster binary with
   `swiftc -O src/scourgify/afm.swift -o src/scourgify/afm` (requires macOS 26+ / Apple Intelligence).
-- **Publishing:** `uv build` → `uv publish --index testpypi` (dry-run) → `uv publish` (PyPI). The wheel must
-  contain `scourgify/defaults/*`, `_writer.py`, `afm.swift` and **not** `data/`, `overrides/`, or the `afm`
-  binary — verify with `unzip -l dist/*.whl` after a layout change.
+- **Publishing is automated** via `.github/workflows/publish.yml` (PyPI/TestPyPI **Trusted Publishing** —
+  OIDC, no stored tokens): a push to `main` touching `src/**`/`pyproject.toml` auto-publishes to **TestPyPI**;
+  production **PyPI** is a manual `gh workflow run publish.yml -f target=pypi`. Local dry-run before a layout
+  change: `uv build` then `unzip -l dist/*.whl` — the wheel must contain `scourgify/defaults/*`, `_writer.py`,
+  `afm.swift` and **not** `data/`, `overrides/`, or the `afm` binary. Full release flow: **Branching & releases** below.
+
+## Branching & releases
+
+Git-flow-lite (mirrors the sibling `lintle` repo):
+- **`develop`** — the integration branch and your everyday working branch. All work (features, fixes, docs, vocab)
+  lands here via PR; CI (`ci.yml` — tests on Python 3.10 + 3.13) runs on every push/PR to `develop` or `main`.
+  **`develop` history stays LINEAR** — land feature PRs with `gh pr merge --rebase` (or `git merge --ff-only`),
+  never a merge commit: history should read as if the commits were made on `develop` directly. Merge commits
+  are reserved for Release PRs into `main` (below), where the 2nd-parent arc is the point.
+- **`main`** — release-only and **branch-protected**: PRs required (0 approvals, so you self-merge), both CI
+  checks must pass, no force-push/deletion, **enforced for admins** — i.e. *no direct pushes, even for the owner*.
+  Its **first-parent history is exactly one `Release vX.Y.Z` commit per release**; each is a `--no-ff` merge of
+  `develop`, so the merge's 2nd parent arcs back to the exact develop commit it was cut from (visible in any git
+  GUI). `git log --first-parent main` is the clean release ledger; full `git log main` still reaches every commit
+  via those 2nd parents — nothing is lost.
+- **GitHub default branch is `main`** (so the repo homepage shows the released state). GitHub therefore defaults a
+  new PR's base to `main` — **open feature PRs against `develop`**; only release PRs target `main`.
+
+**Cut a release** (all from `develop`; `main` is only ever reached through a PR merge):
+1. Bump `__version__` in `src/scourgify/__init__.py` — versions are immutable on PyPI, always bump. Commit + push `develop`.
+2. `gh pr create --base main --head develop --title "Release vX.Y.Z"`; let CI pass, then
+   `gh pr merge --merge --subject "Release vX.Y.Z"` (a **merge commit** — not squash/rebase; the 2nd-parent arc is
+   the point). The merge lands on `main` → `publish.yml` auto-publishes to **TestPyPI**.
+3. Tag it: `git fetch origin main && git tag -a vX.Y.Z origin/main -m "scourgify X.Y.Z" && git push origin vX.Y.Z`
+   (annotated, on the Release commit; tags aren't branch-protected).
+4. Promote to **PyPI**: `gh workflow run publish.yml -f target=pypi`, then
+   `gh release create vX.Y.Z --title "scourgify X.Y.Z" --notes …`.
+
+`main` was migrated to this shape once via a `git commit-tree` snapshot (tree = the released 1.0.0; parents =
+[repo root, develop tip]); `develop` kept the full granular history. To temporarily bypass protection for an
+emergency fix, edit the rule at *Settings → Branches* (or `gh api -X DELETE …/branches/main/protection`).

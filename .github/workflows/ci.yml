@@ -1,15 +1,16 @@
 name: CI
 
-# Runs the plain-assert core tests on every PR to main and every push to main,
-# across the requires-python floor and the current release — turning the
-# pyproject `requires-python = ">=3.10"` claim into an enforced fact.
-# (No lint leg: scourgify ships no ruff config or dev deps — the tests are the gate.)
+# Runs the plain-assert core tests on every push/PR to develop (the integration
+# branch) or main (the release branch), across the requires-python floor and the
+# current release — turning the pyproject `requires-python = ">=3.10"` claim into
+# an enforced fact. (No lint leg: scourgify ships no ruff config or dev deps — the
+# tests are the gate.)
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
 
 permissions:
   contents: read
@@ -37,4 +38,6 @@ jobs:
         run: uv sync --locked
 
       - name: Tests
-        run: uv run tests/test_core.py
+        run: |
+          uv run tests/test_core.py
+          uv run tests/test_selection.py

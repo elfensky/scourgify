@@ -4,7 +4,7 @@
 # is committed and ships with the tool. Generic fanfic facts only — personal preference folds excluded.
 import csv, os
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEF = os.path.join(HERE, "defaults"); os.makedirs(DEF, exist_ok=True)
+DEF = os.path.join(HERE, "src", "scourgify", "defaults"); os.makedirs(DEF, exist_ok=True)   # defaults ship inside the package
 DATA = os.path.join(HERE, "data")
 
 def rows(fn):

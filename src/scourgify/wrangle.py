@@ -7,7 +7,7 @@ writes shell out to calibre-debug automatically):
   scourgify audit            # read-only dry-run report of every pass
   scourgify apply --apply    # write changes  (Calibre must be CLOSED)
 """
-import os, sys, re, csv, collections
+import os, sys, re, csv, time, collections
 from scourgify.common import DEFAULTS as DEF, norm, ascii_fold, load_config, library, ro_connect, read_custom_column, run_writer
 try:                                   # rich is optional (present in system python3 for `audit`; absent under calibre-debug)
     from rich.console import Console
@@ -53,25 +53,40 @@ def resolve_trope_chains(raw):
 
 def load_maps(cfg):
     odir = os.path.join(os.getcwd(), cfg["overrides"].get("dir", "overrides"))
+    ao3 = os.path.join(DEF, "ao3")               # generated AO3 layer (build_ao3_layer.py) — loaded FIRST, everything overrides it
+    def ao3_pairs(fn):                           # master,name,rel pair rows -> {name: master}; {} if the layer is absent
+        return {r["name"]: r["master"] for r in read_csv(os.path.join(ao3, fn))}
     def both(fn):  # defaults first, overrides last (override wins)
         return read_csv(os.path.join(DEF, fn)) + read_csv(os.path.join(odir, fn))
     m = {}
-    m["char"] = {}; m["char_fd"] = {}            # global variant->canon ; (variant,fandom)->canon
+    m["gallow"] = {norm(x) for x in read_lines(os.path.join(DEF, "genres_allow.txt")) + read_lines(os.path.join(odir, "genres_allow.txt")) if x and not x.startswith("#")}
+    m["char"] = ao3_pairs("characters.csv"); m["char_fd"] = {}   # global variant->canon ; (variant,fandom)->canon
     for r in both("characters.csv"):
         if r.get("fandom"): m["char_fd"][(r["variant"], r["fandom"])] = r["canonical"]
         else: m["char"][r["variant"]] = r["canonical"]
-    m["fan"] = {r["alias"]: r["canonical"] for r in both("fandoms.csv")}
-    m["fanvals"] = {norm(v) for v in m["fan"].values()}
-    m["trope"] = resolve_trope_chains({v: (cn, rt) for v, cn, rt in
+    m["fan"] = ao3_pairs("universes.csv")
+    curated_fan = {r["alias"]: r["canonical"] for r in both("fandoms.csv")}
+    m["fan"].update(curated_fan)
+    for a in m["fan"]:                           # flatten chains so a curated re-point of an ao3 master cascades
+        t, seen = m["fan"][a], {a}
+        while t in m["fan"] and t not in seen: seen.add(t); t = m["fan"][t]
+        m["fan"][a] = t
+    # fanvals feeds the misfiled-genre rescue — CURATED names only: the 22k AO3 universe names
+    # include generic words (Empire, Hero, Kingdom) that would hijack ordinary genre values
+    m["fanvals"] = {norm(v) for v in curated_fan.values()}
+    # AO3 freeform folds route dynamically: allowlisted canonical -> genre, else tag; curated rows win
+    tropes = {a: (c, "genre" if norm(c) in m["gallow"] else "tag") for a, c in ao3_pairs("tags.csv").items()}
+    tropes.update({v: (cn, rt) for v, cn, rt in
         (read_tropes(os.path.join(DEF, "tropes.csv")) + read_tropes(os.path.join(odir, "tropes.csv")))})
+    m["trope"] = resolve_trope_chains(tropes)
     m["fan_block"] = {norm(x) for x in read_lines(os.path.join(DEF, "fandom_blocklist.txt")) + read_lines(os.path.join(odir, "fandom_blocklist.txt")) if x and not x.startswith("#")}  # values that are never fandoms
     m["decompose"] = {}                          # one contextual value -> parts in several columns (e.g. "Fate SI" -> Type-Moon + SI/OC)
     for r in both("decompose.csv"):
         m["decompose"][norm(r["value"])] = {k: [x.strip() for x in (r.get(k) or "").split(";") if x.strip()]
                                              for k in ("fandoms", "characters", "tags", "genres")}
     m["gsplit"] = {r["combined"]: r["atoms"].split("|") for r in both("genres_split.csv")}
-    m["gcanon"] = {r["variant"]: r["canonical"] for r in both("genres_canon.csv")}
-    m["gallow"] = {norm(x) for x in read_lines(os.path.join(DEF, "genres_allow.txt")) + read_lines(os.path.join(odir, "genres_allow.txt")) if x and not x.startswith("#")}
+    m["gcanon"] = ao3_pairs("genres.csv")        # AO3 genre synonyms first; curated rows win
+    m["gcanon"].update({r["variant"]: r["canonical"] for r in both("genres_canon.csv")})
     m["rating"] = {norm(x) for x in read_lines(os.path.join(DEF, "ratings.txt")) + read_lines(os.path.join(odir, "ratings.txt")) if x and not x.startswith("#")}
     m["junk_exact"], m["junk_rx"] = set(), []
     for ln in read_lines(os.path.join(DEF, "junk.txt")) + read_lines(os.path.join(odir, "junk.txt")):
@@ -137,7 +152,7 @@ def transform(d, m, beh, known_chars=frozenset(), tagcanon=None):
         nC.add(ch)
     nC |= seedC                                                # decomposed characters
     # genres: split -> canon -> allowlist(keep) else move to tags
-    nG = set(); extra_tags = set()
+    nG = set(); routed = set()
     ga = lambda na: na in m["gallow"] or any(na.startswith(x + " ") for x in m["gallow"] if len(x) >= 4)  # allowed genre?
     for g in G0:
         for atom in (m["gsplit"].get(g, [g])):
@@ -146,12 +161,13 @@ def transform(d, m, beh, known_chars=frozenset(), tagcanon=None):
                 nG.add(a)                                       # allowlisted genre or a subtype of one (AU - Canon Divergence)
             elif na in m["fanvals"]: nF.add(a)                  # misfiled fandom
             elif na in known_chars: nC.add(a)                   # misfiled character (e.g. Akeno Himejima in #genres)
-            else: extra_tags.add(a)                             # freeform -> tag
+            else: routed.add(a)                                 # freeform -> through the tag pipeline below
     nG |= seedG                                                 # decomposed genres
     # tags: junk drop / trope route / surface-fold / ascii / redundancy-strip
-    nT = set(extra_tags) | seedT                                # decomposed tags
+    # (routed ex-genres go through the same pipeline, so they trope-fold/dedupe like any tag)
+    nT = set(seedT)                                             # decomposed tags
     homes = {norm(x) for x in nF | nC | nG | R | (set(st) if isinstance(st, list) else {st} if st else set())}
-    for t in T:
+    for t in sorted(set(T) | routed):
         if is_junk(t, m): continue
         if t in m["trope"]:
             canon, route = m["trope"][t]; route = trope_route(canon, route, beh)
@@ -174,21 +190,15 @@ def transform(d, m, beh, known_chars=frozenset(), tagcanon=None):
     had_real_F = any(m["fan"].get(f, f) and norm(m["fan"].get(f, f)) not in m["fan_block"] for f in F)
     return newd, (had_real_F and not nF), (had_C and not nC)
 
-# ---------------- column resolution ----------------
-def fff_columns_from_prefs(get_pref):
-    """Read FanFicFare's custom_cols mapping from the library prefs, if present."""
-    try:
-        s = get_pref("namespaced:FanFicFarePlugin:settings") or {}
-        return s.get("custom_cols", {}) or {}
-    except Exception:
-        return {}
-
 # ---------------- AUDIT (read-only sqlite) ----------------
 def col_key_label(cfg):
     return {k: v for k, v in cfg["columns"].items() if v}     # col_key -> calibre label
 
 def read_library(cfg):
-    """Read all configured columns per book via read-only sqlite. -> (cols, perbook, present, nb, allb)."""
+    """Read all configured columns per book via read-only sqlite. -> (cols, perbook, present, nb, allb).
+    Always the whole library, deliberately: transform() needs global context (tagcanon majority
+    spelling, known_chars), runs in seconds, and apply only writes books that actually changed —
+    scoped selection (select.py) is for the expensive LLM pass, not this one."""
     cols = col_key_label(cfg)
     con = ro_connect(); c = con.cursor()
     perbook = collections.defaultdict(lambda: collections.defaultdict(list)); present = {}
@@ -275,6 +285,8 @@ def audit(cfg, m):
         if folds: print(f"tags fold/route ({len(folds)}):{ex(folds)}")
 
 # ---------------- APPLY (standalone: compute via sqlite, write via calibre-debug helper) ----------------
+DETAIL_BOOKS = 10        # per-book diff lines shown in the apply preview before deferring to `audit`
+
 def tag_loss_guard(tags_before, tags_after, force):
     """Abort on a suspicious mass-deletion of tags (e.g. an over-broad junk.txt regex).
     ponytail: heuristic ceiling — >25% shrink AND >200 assignments lost; --force overrides."""
@@ -283,28 +295,252 @@ def tag_loss_guard(tags_before, tags_after, force):
         raise SystemExit(f"ABORT: tags would shrink {tags_before} -> {tags_after} assignments (-{lost}). "
                          "Check junk.txt / overrides for an over-broad rule, or re-run with --force.")
 
-def apply_changes(cfg, m, do_write, force=False):
+def apply_changes(cfg, m, do_write, force=False, cli_hint=True, detail=True, step=False):
+    """-> number of distinct books that would change (the wizard uses it to auto-skip a clean library).
+    detail=True prints per-book -removed/+added values for the first DETAIL_BOOKS changed books.
+    step=True walks the per-book UNIQUE edits through ui.checklist() (rich+interactive only) and
+    writes only the accepted subset; rejected edits are logged for `scourgify overrides`."""
     beh = cfg["behavior"]
     cols, perbook, present, nb, allb = read_library(cfg)
     known_chars = {norm(v) for bb in perbook for v in perbook[bb].get("characters", [])}
     tagcanon = build_tagcanon((t for bb in perbook for t in perbook[bb].get("tags", [])), m)
-    changes = collections.defaultdict(dict); lostF = lostC = tagsB = tagsA = 0
+    changes = collections.defaultdict(dict); diffs = collections.defaultdict(dict)
+    lostF = lostC = tagsB = tagsA = 0
     for b in allb:
         d = {k: perbook[b].get(k, []) for k in cols}
         nd, lf, lc = transform(d, m, beh, known_chars, tagcanon); lostF += lf; lostC += lc
         tagsB += len(d.get("tags", [])); tagsA += len(nd.get("tags", []))
+        booknorms = None
         for k, lab in cols.items():
             if k in nd and tuple(sorted(nd[k])) != tuple(sorted(d.get(k, []))):
                 changes[lab][b] = sorted(nd[k])
+                old, new = set(d.get(k, [])), set(nd[k])
+                if booknorms is None:   # after-state of every column, for "where did it go" annotations
+                    booknorms = {l2: {norm(x) for x in nd.get(k2, d.get(k2, []))} for k2, l2 in cols.items()}
+                gone = [(v, next((l2 for l2, ns in booknorms.items() if l2 != lab and norm(v) in ns), None))
+                        for v in sorted(old - new)]
+                diffs[b][lab] = (gone, sorted(new - old))
     print("APPLY" if do_write else "PRE-APPLY (no write)")
     for lab, ch in changes.items(): print(f"  {lab:14} books changed: {len(ch)}")
+    if detail and diffs:
+        _preview_report(m, diffs)
     print(f"  SAFETY losing last fandom: {lostF} | character: {lostC} | tag assignments: {tagsB} -> {tagsA}")
     if lostF or lostC: raise SystemExit("ABORT: data loss detected")
     tag_loss_guard(tagsB, tagsA, force)
+    if step and diffs:
+        from scourgify import ui
+        if not ui.interactive():
+            raise SystemExit("--step needs an interactive terminal (omit it for a bulk apply).")
+        _, unique = _classify_edits(m, diffs)
+        if unique:
+            rejects = _step_walk(m, beh, cols, perbook, changes, unique, known_chars, tagcanon)
+            if rejects:
+                from scourgify.common import log_rejects, REJECTS
+                log_rejects(rejects)
+                nauto = sum(1 for r in rejects if r["class"] == "auto")
+                print(f"  logged {len(rejects)} reject(s) -> {os.path.basename(REJECTS)}"
+                      + (f"  ({nauto} → run `scourgify overrides` to stop them recurring)" if nauto else ""))
     if do_write:
         run_writer([{"op": "set_field", "field": lab, "values": {str(b): v for b, v in ch.items()}} for lab, ch in changes.items()])
-    else:
+    elif cli_hint:
         print("Re-run: scourgify apply --apply   (Calibre closed; writes shell out to calibre-debug)")
+    return len({b for ch in changes.values() for b in ch})
+
+MASS_MIN = 3             # a change on this many books is "mass" — aggregated, not listed per book
+
+def _colmap(m, lab, v):
+    """Where would this column's engine fold v? (for pairing a removal with its rename target)"""
+    if lab == "tags": return m["trope"].get(v, (None,))[0]
+    if "fandom" in lab: return m["fan"].get(v)
+    if "character" in lab: return m["char"].get(v)
+    if "genre" in lab: return m["gcanon"].get(v)
+    return None
+
+
+def _classify_edits(m, diffs):
+    """diffs -> (mass Counter{(kind, where, before, after): n_books}, unique {book: [(kind, where, before, after)]}).
+    kind: 'rename' (fold within a column — incl. merging into an already-present canonical),
+    'move' (crossed columns), 'drop' (gone), 'add' (appeared)."""
+    per_book = {}
+    for b, bylab in diffs.items():
+        edits = []
+        for lab, (rm, ad) in bylab.items():
+            added = set(ad)
+            bynorm = {norm(w): w for w in ad}
+            for v, dest in rm:
+                if dest:
+                    edits.append(("move", f"{lab} → {dest}", v, "")); continue
+                w = _colmap(m, lab, v) or bynorm.get(norm(v))   # engine fold, else a same-norm respelling
+                if w:
+                    edits.append(("rename", lab, v, w)); added.discard(w)
+                else:
+                    edits.append(("drop", lab, v, ""))
+            moved_in = {norm(v) for l2, (rm2, _) in bylab.items() for v, dest in rm2 if dest == lab}
+            for w in sorted(added):
+                if norm(w) not in moved_in:                     # a move-in is already shown from its source side
+                    edits.append(("add", lab, "", w))
+        per_book[b] = edits
+    mass = collections.Counter(e for edits in per_book.values() for e in set(edits))
+    mass = {e: n for e, n in mass.items() if n >= MASS_MIN}
+    unique = {b: [e for e in edits if e not in mass] for b, edits in per_book.items()}
+    return mass, {b: es for b, es in unique.items() if es}
+
+
+# ---------------- 1-by-1 review (`--step`): reconstruct + rejects → overrides ----------------
+def _edit_label(kind, where, before, after):
+    """A checklist display line for one unique edit (label-space `where`)."""
+    body = {"rename": f"{before} → {after}", "move": f"{before}  → {where.split('→')[-1].strip()}",
+            "drop": f"− {before} (dropped)", "add": f"+ {after}"}[kind]
+    col = where.split("→")[0].strip() if kind == "move" else where
+    return f"{col:<14} {body}"
+
+
+def reconstruct(nd_lab, orig_lab, rejected):
+    """Revert only the rejected edits from the full transform result.
+    nd_lab/orig_lab: {label: iterable of values} (new state / original). rejected: iterable of
+    (kind, where, before, after) in label space (where='label', or 'src → dst' for a move).
+    Returns {label: sorted list} for labels that STILL differ from the original — the accepted
+    net change. Invert per kind: rename→restore before, drop→re-add, add→remove, move→move back."""
+    rev = {lab: set(vs) for lab, vs in nd_lab.items()}
+    for lab, vs in orig_lab.items(): rev.setdefault(lab, set(vs))
+    for kind, where, before, after in rejected:
+        if kind == "rename":
+            rev[where].discard(after); rev[where].add(before)
+        elif kind == "drop":
+            rev[where].add(before)
+        elif kind == "add":
+            rev[where].discard(after)
+        elif kind == "move":
+            src, dst = [x.strip() for x in where.split("→")]
+            rev[dst] = {x for x in rev.get(dst, set()) if norm(x) != norm(before)}
+            rev.setdefault(src, set()).add(before)
+    return {lab: sorted(vs) for lab, vs in rev.items() if set(vs) != set(orig_lab.get(lab, []))}
+
+
+# override file -> its CSV header (a line list has none). Written when the override file is new.
+_OV_HEADERS = {"fandoms.csv": "alias,canonical", "characters.csv": "variant,canonical,fandom",
+               "genres_canon.csv": "variant,canonical", "tropes.csv": "variant,canonical,route"}
+
+
+def synth_reject(key, kind, before, after, dest=None):
+    """A wrangle reject -> how to suppress it. Returns (cls, actions, reason):
+      cls='auto'   -> actions=[(override_file, line), ...] identity overrides to append.
+      cls='manual' -> actions=[], reason=why it can't be an additive override (hand-edit).
+    'auto' works because overrides load LAST and an identity map (X→X) is a no-op (verified against
+    load_maps): re-pointing X to itself cancels the fold the built-in maps produced. A suppressed
+    genre canon can leave X non-allowlisted (→ route to tags), so genres also allowlist X."""
+    if kind == "rename":
+        if key == "fandoms":    return "auto", [("fandoms.csv", f"{before},{before}")], ""
+        if key == "characters": return "auto", [("characters.csv", f"{before},{before},")], ""
+        if key == "genres":     return "auto", [("genres_canon.csv", f"{before},{before}"),
+                                                 ("genres_allow.txt", before)], ""
+        if key == "tags":       return "auto", [("tropes.csv", f"{before},{before},tag")], ""
+    if kind == "move" and key == "genres" and dest == "tags":
+        return "auto", [("genres_allow.txt", before)], ""
+    reason = {"drop": "junk-drop or redundancy-strip — remove the junk.txt rule (or keep by hand)",
+              "add": "an injected value (decompose/trope route) — remove the rule that adds it",
+              "move": "cross-column move (character rescue / blocklist / decompose) — hand-edit the source map",
+              "rename": "rename with no additive inverse — hand-edit the source map"}.get(kind, "hand-edit the map")
+    return "manual", [], reason
+
+
+def _reject_row(lab2key, b, title, kind, where, before, after):
+    """One rejects.csv row for a wrangle reject (class computed by the shared synth_reject)."""
+    if "→" in where:
+        src, dst = [x.strip() for x in where.split("→")]
+        key, dest = lab2key.get(src, src), lab2key.get(dst, dst)
+        col = f"{key} → {dest}"
+    else:
+        key = lab2key.get(where, where); dest = None; col = key
+    cls, _, _ = synth_reject(key, kind, before, after, dest)
+    return {"stage": "wrangle", "book": b, "title": title, "kind": kind,
+            "column": col, "before": before, "after": after, "class": cls}
+
+
+def _step_walk(m, beh, cols, perbook, changes, unique, known_chars, tagcanon):
+    """Interactive 1-by-1 review of the per-book UNIQUE edits. Mass folds are already baked into
+    `changes` and never shown. Mutates `changes` in place (revert-rejected-from-full-result) and
+    returns the rejects to log. rich-only — the caller guards with ui.interactive()."""
+    from scourgify import ui
+    lab2key = {v: k for k, v in cols.items()}
+    ids = sorted(unique, reverse=True)                         # newest ids first
+    con = ro_connect()
+    titles = dict(con.execute("SELECT id, title FROM books")) if ids else {}   # fetch all: --step's id set is unbounded, so an IN(?) list could exceed SQLite's variable cap
+    rejects = []
+    for pos, b in enumerate(ids):
+        edits = unique[b]
+        title = str(titles.get(b, ""))
+        items = [_edit_label(*e) for e in edits]
+        acc, rej, action = ui.checklist(f"[bold]#{b}[/]  {title[:64]}", items, subtitle=f"book {pos + 1}/{len(ids)}")
+        if action == "quit":                                   # leave this + all remaining un-walked books untouched
+            for bb in ids[pos:]:
+                for lab in cols.values(): changes.get(lab, {}).pop(bb, None)
+            break
+        if action == "skip":                                   # defer the whole book (reappears next run); NOT a reject
+            for lab in cols.values(): changes.get(lab, {}).pop(b, None)
+            continue
+        if not rej: continue                                   # accepted all — `changes` already correct
+        rej_edits = [edits[i] for i in rej]                    # only an explicit untick-then-apply is a declared reject
+        d = {k: perbook[b].get(k, []) for k in cols}
+        nd, _, _ = transform(d, m, beh, known_chars, tagcanon)
+        nd_lab = {lab: nd.get(k, []) for k, lab in cols.items()}
+        orig_lab = {lab: d.get(k, []) for k, lab in cols.items()}
+        net = reconstruct(nd_lab, orig_lab, rej_edits)
+        for lab in cols.values():
+            if lab in net: changes.setdefault(lab, {})[b] = net[lab]
+            else: changes.get(lab, {}).pop(b, None)
+        rejects += [_reject_row(lab2key, b, title, *e) for e in rej_edits]
+    return rejects
+
+
+def _preview_report(m, diffs, top=15, books=DETAIL_BOOKS):
+    """The human-readable change report: aggregated mass folds + per-book unique changes.
+    rich tables/tree when available; aligned plain text otherwise."""
+    mass, unique = _classify_edits(m, diffs)
+    def fmt(kind, where, before, after):
+        return {"rename": (where, f"{before} → {after}"), "move": (where, before),
+                "drop": (where, f"− {before} (dropped)"), "add": (where, f"+ {after}")}[kind]
+    top_mass = sorted(mass.items(), key=lambda kv: -kv[1])[:top]
+    rest = len(mass) - len(top_mass)
+    ids = sorted(unique)[-books:]                               # highest ids = newest books
+    con = ro_connect()
+    titles = dict(con.execute(f"SELECT id, title FROM books WHERE id IN ({','.join('?' * len(ids))})", ids)) if ids else {}
+    def grouped(edits):
+        """[(kind, where, joined-values)] — one line per relation, values joined."""
+        g = {}
+        for kind, where, before, after in sorted(edits):
+            g.setdefault((kind, where), []).append(
+                {"rename": f"{before} → {after}", "move": before, "drop": before, "add": after}[kind])
+        label = {"rename": "", "move": "", "drop": "dropped: ", "add": "added: "}
+        return [(where if kind in ("rename", "move") else f"{label[kind]}{where}", " · ".join(vals))
+                for (kind, where), vals in g.items()]
+    if RICH:
+        from rich.tree import Tree
+        t = Table(title=f"mass folds — same change on {MASS_MIN}+ books", title_justify="left")
+        t.add_column("books", justify="right", style="cyan"); t.add_column("where", style="dim"); t.add_column("change")
+        for (kind, where, before, after), n in top_mass:
+            w, c = fmt(kind, where, before, after); t.add_row(f"{n:,}", w, c)
+        if rest > 0: t.add_row("…", "", f"+{rest} more mass folds (scourgify audit shows every value)")
+        _con.print(t)
+        if unique:
+            tree = Tree(f"[bold]unique changes[/] — newest {len(ids)} of {len(unique):,} books")
+            for b in reversed(ids):
+                node = tree.add(f"[bold]#{b}[/]  {str(titles.get(b, ''))[:64]}")
+                for w, vals in grouped(unique[b]):
+                    node.add(f"[dim]{w:22}[/] {vals}")
+            _con.print(tree)
+    else:
+        print(f"  mass folds (same change on {MASS_MIN}+ books):")
+        for (kind, where, before, after), n in top_mass:
+            w, c = fmt(kind, where, before, after); print(f"  {n:6,}x  {w:22} {c}")
+        if rest > 0: print(f"          … +{rest} more mass folds")
+        if unique:
+            print(f"  unique changes (newest {len(ids)} of {len(unique):,} books):")
+            for b in reversed(ids):
+                print(f"  #{b}  {str(titles.get(b, ''))[:64]}")
+                for w, vals in grouped(unique[b]):
+                    print(f"      {w:22} {vals}")
+
 
 def write_config(colmap, beh=None):
     b = beh or {}                                     # preserve existing toggles on re-run; defaults on first run
@@ -430,6 +666,99 @@ def setup(cfg):
     print("  scourgify apply --apply  # write changes (Calibre closed; backs up first)")
     print("  scourgify classify --incremental # content-tag new/updated books (cheap)")
 
+# ---------------- overrides: logged wrangle rejects -> override rules ----------------
+def _append_override(path, lines):
+    """Append lines to an override CSV (with header if new) / .txt list, skipping ones already present.
+    -> the lines actually added."""
+    fn = os.path.basename(path)
+    existing, new = set(), not os.path.exists(path)
+    if not new:
+        existing = {l.strip() for l in read_lines(path)}
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    added = []
+    with open(path, "a", newline="") as f:
+        if new and fn in _OV_HEADERS:
+            f.write(_OV_HEADERS[fn] + "\n"); existing.add(_OV_HEADERS[fn])
+        for ln in lines:
+            if ln.strip() in existing: continue
+            f.write(ln + "\n"); existing.add(ln.strip()); added.append(ln)
+    return added
+
+
+def build_overrides(do_apply=False, master=False):
+    """Read data/rejects.csv, turn the auto-suppressible wrangle rejects into identity-override lines
+    (grouped by target file), and list the manual ones for hand-editing. Dry-run unless do_apply."""
+    from scourgify.common import REJECTS
+    if not os.path.exists(REJECTS):
+        print(f"no rejects logged yet ({os.path.basename(REJECTS)} not found — reject something in `apply --step` first)."); return
+    rows = [r for r in read_csv(REJECTS) if r.get("stage") == "wrangle"]
+    if not rows:
+        print("no wrangle rejects to act on (classify rejects are AI hallucinations — log-only)."); return
+    seen, auto, manual = set(), collections.defaultdict(list), []
+    for r in rows:
+        key = (r["kind"], r["column"], r["before"], r["after"])
+        if key in seen: continue
+        seen.add(key)
+        col = r["column"]; src, dest = (col.split("→") + [None])[:2]
+        src = src.strip(); dest = dest.strip() if dest else None
+        cls, actions, reason = synth_reject(src, r["kind"], r["before"], r["after"], dest)
+        if cls == "auto":
+            for fn, line in actions: auto[fn].append(line)
+        else:
+            manual.append((r["kind"], col, r["before"], r["after"], reason))
+    tgt = DEF if master else os.path.join(os.getcwd(), "overrides")
+    where = "defaults/ (MASTER — checkout only; installed defaults are read-only)" if master else "overrides/"
+    print(f"{'APPLY' if do_apply else 'DRY-RUN'} — {sum(len(v) for v in auto.values())} auto-suppressible line(s) → {where}")
+    total_added = 0
+    for fn in sorted(auto):
+        lines = sorted(set(auto[fn]))
+        print(f"\n  {fn}")
+        for ln in lines: print(f"      {ln}")
+        if do_apply:
+            added = _append_override(os.path.join(tgt, fn), lines)
+            total_added += len(added)
+            print(f"    → appended {len(added)} new (skipped {len(lines) - len(added)} already present)")
+    if manual:
+        print(f"\n  MANUAL — {len(manual)} reject(s) with no additive override (hand-edit; kept in the log):")
+        for kind, col, before, after, reason in manual:
+            v = f"{before} → {after}" if after else before
+            print(f"      [{kind}] {col}: {v}\n          {reason}")
+    if not auto and not manual:
+        print("  (nothing to do)")
+    if do_apply and auto:
+        _archive_consumed_rejects()
+        print(f"\napplied {total_added} override line(s); consumed auto rejects archived out of the log.")
+    elif not do_apply and auto:
+        print("\n(dry-run — re-run `scourgify overrides --apply` to write these"
+              + (" to the master defaults" if master else "") + ".)")
+
+
+def _archive_consumed_rejects():
+    """Move the auto (now-suppressed) wrangle rejects out of rejects.csv into a timestamped archive;
+    keep manual wrangle rows and all classify rows (still actionable / informational)."""
+    from scourgify.common import REJECTS, REJECT_COLS
+    rows = read_csv(REJECTS)
+    keep = [r for r in rows if not (r.get("stage") == "wrangle" and r.get("class") == "auto")]
+    gone = [r for r in rows if r.get("stage") == "wrangle" and r.get("class") == "auto"]
+    if gone:
+        arch = REJECTS.replace(".csv", f"_applied_{time.strftime('%Y%m%d-%H%M%S')}.csv")
+        with open(arch, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=REJECT_COLS, extrasaction="ignore"); w.writeheader(); w.writerows(gone)
+    with open(REJECTS, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=REJECT_COLS, extrasaction="ignore"); w.writeheader(); w.writerows(keep)
+
+
+def overrides_cmd(argv):
+    import argparse
+    p = argparse.ArgumentParser(prog="scourgify overrides",
+        description="Turn logged wrangle rejects (from `apply --step`) into override rules so the same "
+                    "wrong change never recurs. Dry-run until --apply; only appends to override files.")
+    p.add_argument("--apply", action="store_true", help="write the override lines (default: preview only)")
+    p.add_argument("--master", action="store_true", help="target bundled defaults/ instead of overrides/ (maintainer; checkout only)")
+    a = p.parse_args(argv)
+    build_overrides(a.apply, a.master)
+
+
 # ---------------- main ----------------
 def main():
     import argparse
@@ -439,6 +768,7 @@ def main():
     p.add_argument("command", nargs="?", default=None, choices=["setup", "audit", "apply"],
                    help="setup: interactive health check + configure | audit: read-only dry-run | apply: write changes | (none): wizard")
     p.add_argument("--apply", action="store_true", help="with `apply`: actually write (Calibre closed)")
+    p.add_argument("--step", action="store_true", help="with `apply`: review each book's unique changes 1-by-1 (interactive)")
     p.add_argument("--force", action="store_true", help="override the tag mass-deletion guardrail")
     p.add_argument("--yes", "-y", action="store_true", help="non-interactive: take the recommended default for every prompt")
     a = p.parse_args()
@@ -452,7 +782,7 @@ def main():
     library()                      # fail fast with a clear message before doing any work
     cfg = load_config(); maps = load_maps(cfg)
     if a.command == "audit": audit(cfg, maps)
-    elif a.command == "apply": apply_changes(cfg, maps, a.apply, a.force)
+    elif a.command == "apply": apply_changes(cfg, maps, a.apply or a.step, a.force, step=a.step)
     elif a.command == "setup": setup(cfg)
 
 

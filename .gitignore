@@ -1,9 +1,10 @@
 # Personal library data — review maps, proposals, intermediates (derived from YOUR Calibre library)
 data/
 
-# Ignore stray CSVs anywhere; the bundled generic defaults/ are the only tracked CSVs
+# Ignore stray CSVs anywhere; the bundled defaults (curated + generated ao3/ layer) are the only tracked CSVs
 *.csv
 !src/scourgify/defaults/*.csv
+!src/scourgify/defaults/ao3/*.csv
 
 # Calibre DB snapshots / backups
 *.db
