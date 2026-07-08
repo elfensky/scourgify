@@ -8,12 +8,12 @@ proposed_new list should be promoted to the vocab, aliased to an existing tag, o
 
 Reasons each candidate against a difflib shortlist of the master tag list (curated vocab ∪ ao3_vocab)
 plus the example books that proposed it. Audit-first: verdicts are a reviewed artifact you apply."""
-import argparse, csv, json, os, re, time
+import argparse, csv, glob, json, os, re, time, collections
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import difflib
 
 from scourgify.classify import RANK, PROP, ENGINES, existing_terms, ask_retry
-from scourgify.common import DATA, library, norm
+from scourgify.common import DATA, library, norm, ro_connect, run_writer
 
 LEDGER = f"{DATA}/promote_ledger.csv"
 REVIEW = f"{DATA}/promote_review.csv"
@@ -178,6 +178,79 @@ def apply_decisions(review_path=REVIEW, vocab_path=None, tropes_path=None,
     return n
 
 
+# ---------------- backfill: apply promoted/aliased tags to the books that first proposed them ----------------
+# The classifier only writes vocab `added_tags`; a `proposed_new` candidate is never written to its book.
+# So promoting/aliasing a candidate grows the vocab but leaves the source books un-tagged (and they're
+# stamped #wrangled, so --incremental skips them). Backfill closes that loop deterministically — no LLM —
+# by reading the book↔proposed_new record kept in the (archived) proposals and the ledger's verdicts.
+def resolve_ledger(rows):
+    """[{tag,verdict,target}] -> {candidate_lower: tag_to_apply}. promote->itself, alias->target, reject->skip."""
+    res = {}
+    for r in rows:
+        v = (r.get("verdict") or "").strip().lower(); tag = (r.get("tag") or "").strip()
+        if not tag: continue
+        if v == "promote": res[tag.lower()] = tag
+        elif v == "alias" and (r.get("target") or "").strip(): res[tag.lower()] = r["target"].strip()
+    return res
+
+
+def backfill_wanted(resolution, proposal_rows):
+    """resolution + proposal rows [{book_id, proposed_new}] -> {book_id:int : set(tags to apply)}. Pure."""
+    want = collections.defaultdict(set)
+    for r in proposal_rows:
+        try: b = int(r["book_id"])
+        except (KeyError, ValueError, TypeError): continue
+        for c in (r.get("proposed_new") or "").split("; "):
+            t = resolution.get(c.strip().lower())
+            if t: want[b].add(t)
+    return dict(want)
+
+
+def _proposal_files():
+    """Every file carrying the book↔proposed_new record: archived applied proposals + the current one."""
+    fs = sorted(glob.glob(f"{DATA}/classify_proposal_applied_*.csv"))
+    if os.path.exists(PROP): fs.append(PROP)
+    return fs
+
+
+def backfill_plan(ledger_path=LEDGER):
+    """-> (chg {str(book): sorted full tag set}, adds {book:int : set(new tags)}) for books that
+    should carry a promoted/aliased tag but don't yet. Reads the ledger + all proposals + live tags."""
+    if not os.path.exists(ledger_path):
+        return {}, {}
+    res = resolve_ledger(list(csv.DictReader(open(ledger_path))))
+    rows = [r for pf in _proposal_files() for r in csv.DictReader(open(pf))]
+    want = backfill_wanted(res, rows)
+    if not want: return {}, {}
+    con = ro_connect(); cur = collections.defaultdict(set)
+    for b, t in con.execute("SELECT l.book, t.name FROM books_tags_link l JOIN tags t ON t.id=l.tag"): cur[b].add(t)
+    chg, adds = {}, {}
+    for b, w in want.items():
+        new = w - cur.get(b, set())
+        if new: chg[str(b)] = sorted(cur.get(b, set()) | w); adds[b] = new
+    return chg, adds
+
+
+def backfill(yes=False):
+    """CLI entry: preview, confirm, then write the promoted/aliased tags onto their source books."""
+    chg, adds = backfill_plan()
+    if not chg:
+        print("backfill: nothing to do — source books already carry their promoted tags ✓"); return 0
+    total = sum(len(v) for v in adds.values())
+    print(f"backfill: {len(chg)} book(s) gain {total} promoted/aliased tag-assignment(s), e.g.:")
+    for b in list(adds)[:8]: print(f"  #{b}: + {', '.join(sorted(adds[b]))}")
+    if len(adds) > 8: print(f"  … +{len(adds) - 8} more books")
+    if not yes:
+        import sys
+        if not sys.stdin.isatty():
+            print("  non-interactive: re-run with --yes to write."); return 0
+        if input("apply this backfill? (Calibre closed) [y/N] ").strip().lower() not in ("y", "yes"):
+            print("aborted (nothing written)."); return 0
+    run_writer([{"op": "set_field", "field": "tags", "values": chg}])
+    print(f"backfilled promoted tags onto {len(chg)} book(s).")
+    return len(chg)
+
+
 REVIEW_COLS = ["tag", "count", "verdict", "target", "reason", "confidence", "contested"]
 
 
@@ -221,6 +294,8 @@ def build_parser():
     p.add_argument("--timeout", type=int, default=60, metavar="S")
     p.add_argument("--yes", "-y", action="store_true")
     p.add_argument("--apply", action="store_true", help="fold data/promote_review.csv into overrides/")
+    p.add_argument("--backfill", action="store_true",
+                   help="apply promoted/aliased tags to the books that first proposed them (deterministic, no LLM; Calibre closed)")
     return p
 
 
@@ -232,8 +307,13 @@ def normalize(a):
 
 def main():
     a = normalize(build_parser().parse_args())
-    if a.apply: apply_decisions()
-    else: run(a)
+    if a.apply:
+        apply_decisions()
+        if a.backfill: backfill(yes=a.yes)
+    elif a.backfill:
+        backfill(yes=a.yes)
+    else:
+        run(a)
 
 
 if __name__ == "__main__":

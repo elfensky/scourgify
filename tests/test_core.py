@@ -222,6 +222,23 @@ def test_synth_reject_manual_kinds():
     assert synth_reject("tags", "add", "", "Time Travel")[0] == "manual"      # injected value
     assert synth_reject("characters", "move", "Akeno", "", dest="tags")[0] == "manual"   # cross-column rescue
 
+def test_promote_backfill_targets():
+    from scourgify.promote import resolve_ledger, backfill_wanted
+    res = resolve_ledger([
+        {"tag": "Gacha System", "verdict": "promote", "target": ""},
+        {"tag": "Isekai'd", "verdict": "alias", "target": "Isekai"},
+        {"tag": "Plot Specific", "verdict": "reject", "target": ""},   # rejects don't backfill
+        {"tag": "", "verdict": "promote", "target": ""},               # blank ignored
+    ])
+    assert res == {"gacha system": "Gacha System", "isekai'd": "Isekai"}
+    want = backfill_wanted(res, [
+        {"book_id": "10", "proposed_new": "Gacha System; Plot Specific"},
+        {"book_id": "11", "proposed_new": "Isekai'd; Unrelated"},
+        {"book_id": "10", "proposed_new": "Isekai'd"},                 # accumulates across proposal files
+        {"book_id": "bad", "proposed_new": "Gacha System"},           # unparseable id skipped
+    ])
+    assert want == {10: {"Gacha System", "Isekai"}, 11: {"Isekai"}}   # promoted->itself, aliased->target
+
 def test_synth_identity_override_is_a_noop_in_transform():
     # the round-trip that the whole `overrides` design rests on: an identity map cancels the fold.
     def flatten(fan):                                    # mirrors load_maps' chain-flattening

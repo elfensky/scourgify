@@ -38,8 +38,22 @@ def snapshot():
     pending = 0
     if os.path.exists(classify.PROP):
         pending = sum(1 for r in csv.DictReader(open(classify.PROP)) if r.get("added_tags", "").strip())
+    # cheap file-based signals of unfinished work, surfaced as menu hints
+    candidates = 0
+    if os.path.exists(classify.RANK):
+        try: candidates = len(promote.candidates())          # new-tag candidates not yet adjudicated
+        except SystemExit: candidates = 0
+    verdicts_pending = os.path.exists(promote.REVIEW)         # adjudicated promote verdicts awaiting apply
+    rejects = 0
+    if os.path.exists(common.REJECTS):
+        rejects = sum(1 for r in csv.DictReader(open(common.REJECTS))
+                      if r.get("stage") == "wrangle" and r.get("class") == "auto")
+    backfill_avail = os.path.exists(promote.LEDGER) and any(
+        (r.get("verdict") or "").lower() in ("promote", "alias") for r in csv.DictReader(open(promote.LEDGER)))
     return {"books": books, "missing": missing, "changed": changed,
             "pending": pending, "calibre": calibre_open(),
+            "candidates": candidates, "verdicts_pending": verdicts_pending,
+            "rejects": rejects, "backfill_avail": backfill_avail,
             "setup_needed": bool(missing) or not os.path.exists(os.path.join(os.getcwd(), "config.toml"))}
 
 
@@ -205,28 +219,8 @@ def stage_review():
         ui.say("(kept pending)", "dim")
 
 
-def stage_promote():
-    if not os.path.exists(classify.RANK):
-        ui.say("no new-tag candidates yet — run classify first ✓", "green"); return
-    cands = promote.candidates()
-    if not cands:
-        ui.say("no undecided tag candidates to adjudicate ✓", "green"); return
-    ui.say(f"[cyan]{len(cands)}[/] new-tag candidates to weigh against the master tag list "
-           "(promote / alias / reject)")
-    a = promote.normalize(promote.build_parser().parse_args([]))
-    a.yes = True                                  # the wizard's confirm below replaces the CLI guards
-    opts, usable = [], {}
-    for i, (e, ok, hint) in enumerate(_engines(), 1):
-        usable[e] = ok; opts.append((str(i), e, hint))
-    k = ui.menu("engine", opts, default="2")      # default claude; skip apple (too weak for this judgement)
-    a.engine = dict((key, lbl) for key, lbl, _ in opts)[k]
-    if not usable.get(a.engine):
-        ui.error(f"{a.engine} isn't usable here — {dict((e, h) for e, _, h in _engines())[a.engine]}"); return
-    if a.engine == "apple":
-        ui.say("note: on-device apple is weak at this reasoning — a cloud engine gives far better verdicts.", "yellow")
-    if a.engine != "apple" and not ui.confirm(f"send {len(cands)} candidates to the {a.engine} API?"):
-        ui.say("(skipped)", "dim"); return
-    promote.run(a)
+def _promote_review_menu():
+    """Show the adjudicated verdicts and apply / keep / discard them (shared: fresh run + pending review)."""
     rows = list(csv.DictReader(open(promote.REVIEW)))
     by = collections.defaultdict(list)
     for r in rows: by[r["verdict"]].append(r)
@@ -248,7 +242,7 @@ def stage_promote():
         ("d", "discard", "set aside without applying (archived; nothing written)"),
     ], default="a" if (npro or nal) else "d")
     if choice == "a":
-        promote.apply_decisions(); ui.say("done ✓", "green")
+        promote.apply_decisions(); ui.say("done ✓  (run the backfill step to tag the source books)", "green")
     elif choice == "d":
         arch = promote.REVIEW.replace(".csv", f"_discarded_{time.strftime('%Y%m%d-%H%M%S')}.csv")
         os.rename(promote.REVIEW, arch); ui.say(f"set aside -> {os.path.basename(arch)}", "dim")
@@ -256,18 +250,133 @@ def stage_promote():
         ui.say("(kept pending)", "dim")
 
 
-STAGES = [
-    ("wrangle",   "normalize raw tags/fandoms/characters/genres — deterministic cleanup first, so junk "
-                  "tags don't hide books from the classifier", stage_wrangle),
-    ("staleness", "re-derive #status from #updated age (free, no API)", stage_staleness),
-    ("classify",  "AI content tagging — only books new/changed since the last run", stage_classify),
-    ("review",    "inspect the proposal, then apply it to the library", stage_review),
-    ("promote",   "adjudicate new-tag candidates against the master list — promote / alias / reject",
-                  stage_promote),
+def stage_promote():
+    if os.path.exists(promote.REVIEW):            # verdicts already adjudicated — apply them, don't re-spend the API
+        ui.say("a previously-adjudicated review is pending — apply it, or discard to re-adjudicate.", "dim")
+        _promote_review_menu(); return
+    if not os.path.exists(classify.RANK):
+        ui.say("no new-tag candidates yet — run classify first ✓", "green"); return
+    cands = promote.candidates()
+    if not cands:
+        ui.say("no undecided tag candidates to adjudicate ✓", "green"); return
+    ui.say(f"[cyan]{len(cands)}[/] new-tag candidates to weigh against the master tag list "
+           "(promote / alias / reject)")
+    a = promote.normalize(promote.build_parser().parse_args([]))
+    a.yes = True                                  # the wizard's confirm below replaces the CLI guards
+    opts, usable = [], {}
+    for i, (e, ok, hint) in enumerate(_engines(), 1):
+        usable[e] = ok; opts.append((str(i), e, hint))
+    k = ui.menu("engine", opts, default="2")      # default claude; skip apple (too weak for this judgement)
+    a.engine = dict((key, lbl) for key, lbl, _ in opts)[k]
+    if not usable.get(a.engine):
+        ui.error(f"{a.engine} isn't usable here — {dict((e, h) for e, _, h in _engines())[a.engine]}"); return
+    if a.engine == "apple":
+        ui.say("note: on-device apple is weak at this reasoning — a cloud engine gives far better verdicts.", "yellow")
+    if a.engine != "apple" and not ui.confirm(f"send {len(cands)} candidates to the {a.engine} API?"):
+        ui.say("(skipped)", "dim"); return
+    promote.run(a)
+    _promote_review_menu()
+
+
+def stage_backfill():
+    chg, adds = promote.backfill_plan()
+    if not chg:
+        ui.say("no promoted tags to backfill — source books are already up to date ✓", "green")
+        ui.say("(backfill applies vocab-promoted tags to the books that first suggested them)", "dim")
+        return
+    total = sum(len(v) for v in adds.values())
+    con = ro_connect(); titles = {b: t for b, t in con.execute("SELECT id, title FROM books")}; con.close()
+    t = Table(box=box.SIMPLE, title=f"backfill — {len(chg)} books gain {total} promoted/aliased tags")
+    t.add_column("book"); t.add_column("adds")
+    for b in list(adds)[:12]:
+        t.add_row(f"#{b} {str(titles.get(b, ''))[:36]}", ", ".join(sorted(adds[b])))
+    if len(adds) > 12: t.add_row("[dim]…[/]", f"[dim]+{len(adds) - 12} more books[/]")
+    console.print(t)
+    if ui.confirm(f"apply promoted tags to {len(chg)} source books? (Calibre closed; auto-backup)", default=True):
+        common.run_writer([{"op": "set_field", "field": "tags", "values": chg}])
+        ui.say("done ✓", "green")
+    else:
+        ui.say("(skipped — nothing written)", "dim")
+
+
+def stage_overrides():
+    if not os.path.exists(common.REJECTS):
+        ui.say("no rejected changes logged — nothing to convert ✓", "green")
+        ui.say("(reject deterministic changes in `apply --step` to feed this)", "dim")
+        return
+    wrangle.build_overrides(do_apply=False)                    # dry-run preview (grouped by target file)
+    if ui.confirm("write these override lines to overrides/?", default=False):
+        wrangle.build_overrides(do_apply=True)
+        ui.say("done ✓", "green")
+    else:
+        ui.say("(previewed only — nothing written)", "dim")
+
+
+# key, name, one-line description, stage fn, in-the-guided-workflow?
+TASKS = [
+    ("1", "wrangle",   "normalize raw tags/fandoms/characters/genres — deterministic cleanup first, so "
+                       "junk tags don't hide books from the classifier", stage_wrangle, True),
+    ("2", "staleness", "re-derive #status from #updated age (free, no API)", stage_staleness, True),
+    ("3", "classify",  "AI content tagging — only books new/changed since the last run", stage_classify, True),
+    ("4", "review",    "inspect the pending proposal, then apply it to the library", stage_review, True),
+    ("5", "promote",   "adjudicate new-tag candidates against the master list — promote / alias / reject",
+                       stage_promote, True),
+    ("6", "backfill",  "apply vocab-promoted tags to the books that first suggested them (deterministic)",
+                       stage_backfill, True),
+    ("7", "overrides", "turn --step-rejected deterministic changes into personal override rules",
+                       stage_overrides, False),
 ]
+WORKFLOW = [(name, why, fn) for k, name, why, fn, wf in TASKS if wf]
 
 
 # ---------------- the guided run ----------------
+def _stage_guard(fn):
+    """Run one stage, absorbing its guardrail SystemExit / Ctrl-C so the menu survives. -> ok?"""
+    try:
+        fn(); return True
+    except SystemExit as e:                    # guardrails/aborts skip the stage, not the session
+        if str(e): ui.error(str(e))
+    except (KeyboardInterrupt, EOFError):
+        ui.say("\n(cancelled — nothing written beyond what was already confirmed)", "dim")
+    return False
+
+
+def run_workflow():
+    """The guided lifecycle: every workflow stage in order, each dry-running + asking before it writes."""
+    for i, (name, why, fn) in enumerate(WORKFLOW, 1):
+        console.rule(f"[bold]step {i}/{len(WORKFLOW)} · {name}[/]", style="cyan")
+        ui.say(why, "dim")
+        if not _stage_guard(fn):
+            if not ui.confirm("continue with the remaining steps?", default=True): return
+    console.rule(style="green")
+    ui.say("maintenance run complete ✓", "bold green")
+
+
+def _task_hint(name, info):
+    """The cyan 'pending work' marker for a task, from the file-based snapshot signals."""
+    if name == "classify": return f"{info['changed']} new/changed" if info.get("changed") else ""
+    if name == "review":   return f"{info['pending']} books to apply" if info["pending"] else ""
+    if name == "promote":
+        bits = [f"{info['candidates']} candidates" if info.get("candidates") else "",
+                "verdicts ready to apply" if info.get("verdicts_pending") else ""]
+        return " · ".join(b for b in bits if b)
+    if name == "backfill": return "promoted tags to apply" if info.get("backfill_avail") else ""
+    if name == "overrides":return f"{info['rejects']} rejects to convert" if info.get("rejects") else ""
+    return ""
+
+
+def landing_menu(info):
+    """Ask what to do: the whole guided run, or a single task. Pending work is flagged inline."""
+    opts = [("w", "full maintenance run", "the guided lifecycle end to end: " +
+             " → ".join(name for name, _, _ in WORKFLOW))]
+    for k, name, why, fn, wf in TASKS:
+        hint = _task_hint(name, info)
+        short = why.split(" — ")[0].split(",")[0][:60]        # keep the menu row tight
+        opts.append((k, name, (f"[cyan]● {hint}[/]  " if hint else "") + f"[dim]{short}[/]"))
+    opts.append(("q", "quit", "leave the wizard"))
+    return ui.menu("what would you like to do?", opts, default="w")
+
+
 def _run():
     library()                                 # fail fast with the clear CALIBRE_LIBRARY message
     if not ui.interactive():
@@ -275,30 +384,27 @@ def _run():
                          "(scourgify --help).")
     ui.clear()
     info = snapshot()
-    header(info)
     if info["setup_needed"]:
+        header(info)
         ui.say("this library isn't fully set up yet — the tools need their columns and config.toml.", "yellow")
         if not ui.confirm("run setup now?", default=True):
             ui.say("(the rest of the lifecycle needs setup — exiting)", "dim"); return
-        try:
-            stage_setup()
-        except SystemExit as e:
-            if str(e): ui.error(str(e))
-            return
-        info = snapshot(); header(info)       # fresh header after setup
-    for i, (name, why, fn) in enumerate(STAGES, 1):
-        console.rule(f"[bold]step {i}/{len(STAGES)} · {name}[/]", style="cyan")
-        ui.say(why, "dim")
-        try:
-            fn()
-        except SystemExit as e:               # guardrails/aborts skip the stage, not the run
-            if str(e): ui.error(str(e))
-            if not ui.confirm("continue with the remaining steps?", default=True): return
-        except (KeyboardInterrupt, EOFError):
-            ui.say("\n(step cancelled — nothing written beyond what was already confirmed)", "dim")
-            if not ui.confirm("continue with the remaining steps?", default=True): return
-    console.rule(style="green")
-    ui.say("maintenance run complete ✓", "bold green")
+        if not _stage_guard(stage_setup): return
+        info = snapshot()
+    fn_by_key = {k: fn for k, name, why, fn, wf in TASKS}
+    name_by_key = {k: name for k, name, why, fn, wf in TASKS}
+    while True:
+        header(info)
+        choice = landing_menu(info)
+        if choice == "q":
+            break
+        elif choice == "w":
+            run_workflow()
+        else:
+            console.rule(f"[bold]{name_by_key[choice]}[/]", style="cyan")
+            _stage_guard(fn_by_key[choice])
+        info = snapshot()                     # refresh so the next menu reflects what just changed
+    console.print(); ui.say("done — run `scourgify` any time to pick up where you left off.", "dim")
 
 
 def run():

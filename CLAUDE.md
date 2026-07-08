@@ -26,12 +26,16 @@ uv run scourgify apply --apply                       # write changes (Calibre CL
 
 (`uv run scourgify` from a checkout; an installed copy — `pipx install scourgify` — drops the `uv run`.)
 
-**`wizard.py`** (launched by bare `scourgify`) is a **linear guided lifecycle — no menu**: header
+**`wizard.py`** (launched by bare `scourgify`) is a **guided lifecycle behind a landing menu**: header
 (books, column health, new/changed count via `select.changed`, pending proposal, Calibre-open
-warning) → setup if columns/config are missing → then the four stages in order, **wrangle →
-staleness → classify → review**, each dry-running first, showing its report, and asking before
-writing (a clean stage auto-skips). There is no separate audit step — the wrangle stage's dry run IS
-the audit; `scourgify audit` stays for the full per-value detail. The classify stage auto-targets
+warning) → setup if columns/config are missing → then a **menu** (`landing_menu`) that asks what to do —
+the **full maintenance run** (`run_workflow` over `WORKFLOW`) or a **single task** (`TASKS`), with
+unfinished work flagged inline from cheap file signals in `snapshot()` (pending proposal, undecided
+new-tag candidates, `--step` rejects, backfillable promotions). The menu loops (re-`snapshot` after each
+task) until quit. The guided run is the stages in order — **wrangle → staleness → classify → review →
+promote → backfill** — each dry-running first, showing its report, and asking before writing (a clean
+stage auto-skips). There is no separate audit step — the wrangle stage's dry run IS the audit;
+`scourgify audit` stays for the full per-value detail. The classify stage auto-targets
 new/changed books only, shows per-engine cost estimates (`classify.est_cost`, list prices in
 `classify.PRICING`), offers an engine **bake-off** (`classify.bakeoff`: the same ~5 sample books
 through every usable engine, display-only), and enables `--text-fallback` so thin descriptions get
@@ -96,6 +100,7 @@ FFF fetch → uv run scourgify apply --apply           # 1. junk-drop/canonicali
           → review data/classify_proposal.csv        # 4.
           → uv run scourgify classify --apply        # 5. Calibre closed (writes shell to calibre-debug)
           → scourgify promote                         # adjudicate new-tag candidates → review → promote --apply
+          → scourgify promote --backfill              # apply promoted/aliased tags onto the books that proposed them (deterministic, no LLM)
 ```
 
 (Or the wizard: `uv run scourgify` walks exactly this loop, guided. Targeted redo:
@@ -139,6 +144,11 @@ book left unstamped would be re-sent to the LLM forever) — state lives in the 
 Proposals/outputs live in `data/` (gitignored); `--apply` archives the proposal to
 `classify_proposal_applied_<ts>.csv` so stale rows never re-add hand-removed tags. `est_cost`/`PRICING` hold
 the public list prices behind the wizard's per-engine estimates; `bakeoff()` is the sample comparison. **`promote.py`** reuses classify's engines/`ask_retry`/`existing_terms` to adjudicate `proposed_new` (advocate→skeptic, `--verify-with` for cross-model, human review is the referee), writes `data/promote_review.csv`, and `--apply` folds into `overrides/` + feeds `parse_resp`'s alias snap.
+`--backfill` closes the loop deterministically (no LLM): `proposed_new` candidates are never written to
+books, so a promotion/alias otherwise leaves the source books un-tagged (and stamped, so `--incremental`
+skips them). `backfill_plan()` reads the book↔`proposed_new` record from the (archived) proposals + the
+`promote_ledger.csv` verdicts (`resolve_ledger`/`backfill_wanted` are pure, tested) and applies each
+promoted tag / alias target onto exactly the books that proposed it (union, previewed, Calibre closed).
 
 **`staleness.py`** — re-derives `#status` for the activity family {In-Progress, Hiatus, Abandoned} from
 `#updated` age (`<2y`→In-Progress, `2–5y`→Hiatus, `≥5y`→Abandoned); idempotent + self-correcting on re-run.

@@ -22,15 +22,17 @@ Requires **Calibre installed** — the tool reads via read-only sqlite and shell
 `calibre-debug` for writes. From a checkout, `uv run scourgify` (or `uvx --from . scourgify`) runs it
 without installing; [uv](https://docs.astral.sh/uv/) handles the environment (one dependency: rich).
 
-**The wizard** (no arguments) is the intended way in — one guided pass, no menu to navigate: on a
-fresh library it detects missing columns/config and runs **setup** first; then it walks the whole
-lifecycle in the right order — **wrangle → staleness → classify → review** — where every stage
-dry-runs first, shows its report, and asks *apply-all / review 1-by-1 / skip*. The status header shows
-book count, column health, how many books are **new/changed since the last classify**, and any pending
-proposal. The classify stage targets only those new/changed books, prices each engine for the run (public
-list prices), and can **compare engines on a 5-book sample** before you commit; runs show a **live
-dashboard** (progress + tagged/failed/rate + throughput sparkline + rising tag candidates). Every
-write previews first, asks for confirmation, and auto-backs-up `metadata.db`.
+**The wizard** (no arguments) is the intended way in. It opens on a **status header** (book count,
+column health, how many books are **new/changed**, any pending proposal / new-tag candidates / rejects)
+and then **asks what you want to do** — run the whole guided lifecycle, or jump straight to a single
+task — with any unfinished work flagged inline on the menu. On a fresh library it detects missing
+columns/config and runs **setup** first. The guided run walks the lifecycle in order — **wrangle →
+staleness → classify → review → promote → backfill** — where every stage dry-runs first, shows its
+report, and asks *apply-all / review 1-by-1 / skip* before writing. The classify stage targets only
+new/changed books, prices each engine for the run (public list prices), runs cloud requests **8-wide**,
+and can **compare engines on a 5-book sample** before you commit; runs show a **live dashboard**
+(progress + tagged/failed/rate + throughput sparkline + rising tag candidates). Every write previews
+first, asks for confirmation, and auto-backs-up `metadata.db`.
 
 **Review 1-by-1** (`--step`) walks the changed books one at a time — a per-item checklist, everything
 pre-ticked, untick to reject — for both the wrangle stage's per-book oddities and the classify stage's
@@ -194,6 +196,8 @@ scourgify staleness --apply            # 2. free: re-derive #status from #update
 scourgify classify --incremental       # 3. cheap: content-tag only new/changed books -> proposal
                                        # 4. review data/classify_proposal.csv
 scourgify classify --apply             # 5. apply the reviewed tags + stamp #wrangled
+scourgify promote --apply --backfill   # 6. grow the vocab from new-tag candidates, AND apply the
+                                       #    promoted/aliased tags back onto the books that suggested them
 ```
 
 Or just `scourgify` — the wizard runs exactly this loop, guided. Need a specific redo instead?
@@ -256,6 +260,15 @@ exactly classify's (`--engine claude|openai|gemini|mistral|apple`; your own API 
 is free/on-device). To grow the *shipped* vocab: run `scourgify promote`, review, then `--apply`
 (writes to `overrides/classify_vocab.txt`); manually copy the keeper terms into
 `src/scourgify/defaults/classify_vocab.txt` and commit that file.
+
+**Close the loop — `promote --backfill`.** The classifier only writes vocab tags; a `proposed_new`
+candidate is never written to its book, so promoting/aliasing one grows the vocab but leaves the books
+that *suggested* it un-tagged (and they're stamped, so `--incremental` skips them). `scourgify promote
+--backfill` fixes that **deterministically, with no API calls**: it reads the book↔`proposed_new` record
+kept in the (archived) proposals and the ledger's verdicts, and applies each promoted tag (or an alias's
+target) onto exactly the books that first proposed it — union with their current tags, previewed and
+confirmed, Calibre closed. Combine with apply as `promote --apply --backfill`, or run it alone anytime to
+retro-fix past promotions.
 
 ## Custom maps from your library (`overrides/`)
 The bundled `defaults/` are generic. Two helper workflows mined library-specific maps into `overrides/`
