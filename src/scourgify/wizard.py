@@ -329,6 +329,11 @@ TASKS = [
                        stage_overrides, False),
 ]
 WORKFLOW = [(name, why, fn) for k, name, why, fn, wf in TASKS if wf]
+_FN = {name: fn for k, name, why, fn, wf in TASKS}
+_NAME_BY_KEY = {k: name for k, name, why, fn, wf in TASKS}
+_WF_NAMES = [name for name, why, fn in WORKFLOW]
+# natural successor for a standalone task = the next stage in the guided workflow (overrides has none)
+NEXT = {_WF_NAMES[i]: _WF_NAMES[i + 1] for i in range(len(_WF_NAMES) - 1)}
 
 
 # ---------------- the guided run ----------------
@@ -341,6 +346,21 @@ def _stage_guard(fn):
     except (KeyboardInterrupt, EOFError):
         ui.say("\n(cancelled — nothing written beyond what was already confirmed)", "dim")
     return False
+
+
+def _run_stage(name):
+    console.rule(f"[bold]{name}[/]", style="cyan")
+    _stage_guard(_FN[name])
+
+
+def run_task(key):
+    """Run the chosen standalone task, then offer its natural workflow successor, one step at a time,
+    so a task you jumped into can flow onward like the guided run instead of dead-ending at the menu."""
+    _run_stage(_NAME_BY_KEY[key])
+    nxt = NEXT.get(_NAME_BY_KEY[key])
+    while nxt and ui.confirm(f"continue to the natural next step — [bold]{nxt}[/]?", default=True):
+        _run_stage(nxt)
+        nxt = NEXT.get(nxt)
 
 
 def run_workflow():
@@ -393,8 +413,6 @@ def _run():
             ui.say("(the rest of the lifecycle needs setup — exiting)", "dim"); return
         if not _stage_guard(stage_setup): return
         info = snapshot()
-    fn_by_key = {k: fn for k, name, why, fn, wf in TASKS}
-    name_by_key = {k: name for k, name, why, fn, wf in TASKS}
     while True:
         header(info)
         choice = landing_menu(info)
@@ -403,8 +421,7 @@ def _run():
         elif choice == "w":
             run_workflow()
         else:
-            console.rule(f"[bold]{name_by_key[choice]}[/]", style="cyan")
-            _stage_guard(fn_by_key[choice])
+            run_task(choice)                  # single task + offer of the natural next step(s)
         info = snapshot()                     # refresh so the next menu reflects what just changed
     console.print(); ui.say("done — run `scourgify` any time to pick up where you left off.", "dim")
 
