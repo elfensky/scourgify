@@ -48,12 +48,14 @@ def snapshot():
     if os.path.exists(common.REJECTS):
         rejects = sum(1 for r in csv.DictReader(open(common.REJECTS))
                       if r.get("stage") == "wrangle" and r.get("class") == "auto")
-    backfill_avail = os.path.exists(promote.LEDGER) and any(
-        (r.get("verdict") or "").lower() in ("promote", "alias") for r in csv.DictReader(open(promote.LEDGER)))
+    backfill_n = 0                                            # actual books that would gain a tag — clears once backfilled,
+    if os.path.exists(promote.LEDGER):                       # unlike a "ledger has promotions" flag, which never clears
+        try: backfill_n = len(promote.backfill_plan()[0])
+        except Exception: backfill_n = 0
     return {"books": books, "missing": missing, "changed": changed,
             "pending": pending, "calibre": calibre_open(),
             "candidates": candidates, "verdicts_pending": verdicts_pending,
-            "rejects": rejects, "backfill_avail": backfill_avail,
+            "rejects": rejects, "backfill": backfill_n,
             "setup_needed": bool(missing) or not os.path.exists(os.path.join(os.getcwd(), "config.toml"))}
 
 
@@ -360,7 +362,7 @@ def _task_hint(name, info):
         bits = [f"{info['candidates']} candidates" if info.get("candidates") else "",
                 "verdicts ready to apply" if info.get("verdicts_pending") else ""]
         return " · ".join(b for b in bits if b)
-    if name == "backfill": return "promoted tags to apply" if info.get("backfill_avail") else ""
+    if name == "backfill": return f"{info['backfill']} books to backfill" if info.get("backfill") else ""
     if name == "overrides":return f"{info['rejects']} rejects to convert" if info.get("rejects") else ""
     return ""
 
