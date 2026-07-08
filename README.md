@@ -25,12 +25,18 @@ without installing; [uv](https://docs.astral.sh/uv/) handles the environment (on
 **The wizard** (no arguments) is the intended way in — one guided pass, no menu to navigate: on a
 fresh library it detects missing columns/config and runs **setup** first; then it walks the whole
 lifecycle in the right order — **wrangle → staleness → classify → review** — where every stage
-dry-runs first, shows its report, and asks *apply / skip*. The status header shows book count,
-column health, how many books are **new/changed since the last classify**, and any pending proposal.
-The classify stage targets only those new/changed books, prices each engine for the run (public
+dry-runs first, shows its report, and asks *apply-all / review 1-by-1 / skip*. The status header shows
+book count, column health, how many books are **new/changed since the last classify**, and any pending
+proposal. The classify stage targets only those new/changed books, prices each engine for the run (public
 list prices), and can **compare engines on a 5-book sample** before you commit; runs show a **live
 dashboard** (progress + tagged/failed/rate + throughput sparkline + rising tag candidates). Every
 write previews first, asks for confirmation, and auto-backs-up `metadata.db`.
+
+**Review 1-by-1** (`--step`) walks the changed books one at a time — a per-item checklist, everything
+pre-ticked, untick to reject — for both the wrangle stage's per-book oddities and the classify stage's
+AI-guessed tags. A rejected *deterministic* (wrangle) change is a rule bug: it's logged so `scourgify
+overrides` can fold it into a personal override that stops it recurring. A rejected *classify* tag is
+just an AI miss: dropped and logged, nothing to fix.
 
 Each step is also a plain scriptable subcommand:
 
@@ -38,6 +44,8 @@ Each step is also a plain scriptable subcommand:
 scourgify setup                                      # interactive health check + setup (FanFicFare, columns, config)
 scourgify audit                                      # read-only dry-run report of every pass
 scourgify apply --apply                              # write changes (Calibre CLOSED for this step)
+scourgify apply --step                               # review each changed book 1-by-1 (untick items to reject)
+scourgify overrides                                  # turn rejected deterministic changes into personal override rules
 ```
 
 Everything runs under plain `python3`. The tool reads via read-only sqlite and, for the actual writes,
@@ -204,6 +212,7 @@ review and **promote** the recurring ones into the vocab. Grows the tag set deli
 ```bash
 scourgify classify --engine apple --limit 50        # propose -> data/classify_proposal.csv (dry-run, read-only)
 scourgify classify --apply                          # add the proposed tags (Calibre CLOSED)
+scourgify classify --apply --step                   # review each book's tags 1-by-1 first (untick to reject)
 ```
 - `--engine apple` — on-device **Apple Foundation Models** via `afm.swift` (free, private; macOS 26+,
   Apple Intelligence). Ships as source; a `swift` toolchain runs it as-is, or from a checkout build the
@@ -221,7 +230,11 @@ scourgify classify --apply                          # add the proposed tags (Cal
   pipx/uv-tool install, where the bundled file lives read-only in site-packages.
 - Long runs **save incrementally and resume** on re-run (skip books already in the proposal; `--fresh`
   to restart). `--batch N` processes only N new books per run — handy for pacing API spend/rate limits.
-  A **spend gate** asks for confirmation (or `--yes`) before sending more than 200 books to a cloud engine.
+  Cloud engines run `--workers` requests concurrently (default 8); `apple` is single-threaded (one
+  on-device pipe). A **spend gate** asks for confirmation (or `--yes`) before sending more than 200 books to a cloud engine.
+- `--apply --step` reviews the proposal **1-by-1** before writing: each book's proposed tags as a
+  checklist you untick to reject. Accepted tags are applied and the book stamped; rejected tags are
+  dropped and logged (an AI miss, not a rule bug); *skip*/*quit* leave a book pending for a later run.
 - Proposals/outputs live in `data/` (gitignored): `classify_proposal.csv`, `classify_newtags_ranked.csv`,
   `classify_failures.csv`. On `--apply` the proposal is **archived** to `classify_proposal_applied_<ts>.csv`,
   so a later apply can never re-add tags you've since hand-removed in Calibre.
@@ -250,9 +263,16 @@ The bundled `defaults/` are generic. Two helper workflows mined library-specific
 (`overrides/fandoms.csv`, e.g. `Avengers`/`Captain America (Movies)` → `Marvel`, `Game of Thrones (TV)`
 → `A Song of Ice and Fire`). The engine loads these on top of the defaults automatically.
 
+`scourgify overrides` grows these files the easy way: it reads the deterministic changes you rejected
+in `apply --step` (logged to `data/rejects.csv`) and synthesizes the exact identity-override lines that
+suppress them — a rejected fandom fold → `fandoms.csv: X,X`, a rejected genre canon → `genres_canon.csv:
+X,X`, and so on. Dry-run by default; `--apply` appends the lines (de-duped), `--master` targets the
+shipped `defaults/` (maintainer, checkout only). Rejects it can't express as an additive override (junk
+un-drops, cross-column rescues) are listed for hand-editing rather than faked.
+
 ## Repo layout
 The package lives in **`src/scourgify/`**; the single `scourgify` command (`cli.py`) dispatches
-bare → wizard, `setup`/`audit`/`apply` → wrangle, `classify`, and `staleness`.
+bare → wizard, `setup`/`audit`/`apply`/`overrides` → wrangle, `classify`, `staleness`, and `promote`.
 - **`cli.py`** — the `scourgify` entry point (argv dispatcher over the tools below)
 - **`wrangle.py`** — the engine: `setup` / `audit` / `apply`; with no command it launches the wizard
 - **`wizard.py` + `ui.py`** — the interactive wizard and its rich terminal helpers (the one

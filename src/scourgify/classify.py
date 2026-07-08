@@ -330,6 +330,48 @@ def apply_proposal():
     print(f"applied tags to {len(chg)} books + stamped #wrangled on {len(processed)} processed; proposal archived -> {os.path.basename(arch)}")
 
 
+PROP_COLS = ["book_id", "title", "added_tags", "proposed_new"]
+def _write_prop(rows):
+    with open(PROP, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=PROP_COLS, extrasaction="ignore"); w.writeheader()
+        for r in rows: w.writerow({k: r.get(k, "") for k in PROP_COLS})
+
+
+def apply_proposal_step():
+    """1-by-1 review of the proposal: each book's proposed tags as a checklist. Accepted tags are
+    applied + the book stamped; rejected tags are dropped and logged (class=ai, a hallucination filter,
+    NOT a rule bug). Skip/quit leave a book's row pending in the proposal for a later run."""
+    if not os.path.exists(PROP):
+        raise SystemExit(f"no proposal to apply ({os.path.basename(PROP)} not found — run a classify pass first).")
+    from scourgify import ui
+    if not ui.interactive():
+        raise SystemExit("--step needs an interactive terminal (omit it to apply the whole proposal).")
+    from scourgify.common import log_rejects
+    con = ro_connect()
+    desc = {b: strip_html(t) for b, t in con.execute("SELECT book, text FROM comments")}
+    titles = {b: t for b, t in con.execute("SELECT id, title FROM books")}
+    decided, pending, rejects, quit_ = [], [], [], False
+    for r in csv.DictReader(open(PROP)):
+        tags = [t for t in r.get("added_tags", "").split("; ") if t.strip()]
+        if quit_: pending.append(r); continue
+        if not tags: decided.append(r); continue               # no-tag book: stamp only (else re-sent forever)
+        b = int(r["book_id"]); title = str(r.get("title") or titles.get(b, ""))
+        acc, rej, action = ui.checklist(f"[bold]#{b}[/]  {title[:64]}", tags, subtitle=(desc.get(b, "")[:280] or "(no description)"))
+        if action == "quit": quit_ = True; pending.append(r); continue
+        if action == "skip": pending.append(r); continue
+        for i in rej:
+            rejects.append({"stage": "classify", "book": b, "title": title, "kind": "add",
+                            "column": "tags", "before": "", "after": tags[i], "class": "ai"})
+        decided.append({**r, "added_tags": "; ".join(tags[i] for i in acc)})
+    log_rejects(rejects)
+    if not decided:
+        print("(nothing decided — proposal left untouched.)"); return
+    _write_prop(decided); apply_proposal()                     # applies + stamps the decided rows, archives PROP
+    if pending:
+        _write_prop(pending)
+        print(f"{len(pending)} book(s) left pending for a later run -> {os.path.basename(PROP)}")
+
+
 # ---- gather books (read-only) ----
 def strip_html(s): return re.sub(r"<[^>]+>", " ", s or "").strip()
 
@@ -513,6 +555,7 @@ def build_parser():
     p = argparse.ArgumentParser(description="Content-based tagging from a controlled vocabulary (LLM engines; dry-run until --apply).")
     p.add_argument("--engine", default="apple", choices=sorted(ENGINES), help="apple = on-device, free (default)")
     p.add_argument("--apply", action="store_true", help="apply 'added_tags' from the proposal + stamp #wrangled (Calibre closed)")
+    p.add_argument("--step", action="store_true", help="with --apply: review each book's tags 1-by-1 (interactive; untick to reject)")
     p.add_argument("--incremental", action="store_true", help="only new/changed books (never classified, #updated newer than their #wrangled marker, or re-fetched)")
     p.add_argument("--last", type=int, default=0, metavar="N", help="(re)process the N most recently added books")
     p.add_argument("--since", default="", metavar="DATE", help="(re)process books added or site-updated on/after this ISO date")
@@ -539,7 +582,7 @@ def normalize(a):
 
 def main():
     a = normalize(build_parser().parse_args())
-    if a.apply: apply_proposal()
+    if a.apply: apply_proposal_step() if a.step else apply_proposal()
     else: classify_run(a)
 
 

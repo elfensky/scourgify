@@ -70,11 +70,15 @@ def stage_wrangle():
     if not n:
         ui.say("nothing to normalize ✓", "green"); return
     ui.say("(per-value detail any time: scourgify audit)", "dim")
-    if ui.confirm(f"\napply these normalizations to {n} books? (Calibre closed; auto-backup)", default=True):
-        wrangle.apply_changes(cfg, maps, do_write=True, detail=False)   # diff already shown by the dry run
-        ui.say("done ✓", "green")
-    else:
-        ui.say("(skipped — nothing written)", "dim")
+    choice = ui.menu(f"apply to {n} books? (Calibre closed; auto-backup)", [
+        ("a", "apply all", "write every book's normalizations in one pass"),
+        ("r", "review 1-by-1", "walk each book's unique changes; untick to reject (mass folds auto-apply)"),
+        ("s", "skip", "leave the library unchanged"),
+    ], default="a")
+    if choice == "s":
+        ui.say("(skipped — nothing written)", "dim"); return
+    wrangle.apply_changes(cfg, maps, do_write=True, detail=False, step=choice == "r")
+    ui.say("done ✓", "green")
 
 
 def stage_staleness():
@@ -117,7 +121,8 @@ def stage_classify():
         return
     why = collections.Counter(ch.values())
     ui.say(f"[cyan]{len(ch)}[/] books to tag: " + ", ".join(f"{n} {r}" for r, n in why.most_common()))
-    a = classify.normalize(classify.build_parser().parse_args([]))
+    a = classify.build_parser().parse_args([])    # normalize() runs ONCE below, AFTER the engine is chosen —
+                                                  # normalizing now (engine still defaults to apple) would clamp workers to 1
     a.incremental = a.yes = True                  # the wizard's own confirm below replaces the CLI spend gate
     a.text_fallback = True                        # thin descriptions sample the book text instead of being dropped
     targets, _, _ = classify.gather(a)
@@ -182,11 +187,15 @@ def stage_review():
     ui.say(f"full proposal: {classify.PROP}", "dim")
     choice = ui.menu("proposal", [
         ("a", "apply", f"write tags to {len(tagged)} books + stamp all {len(rows)} processed (Calibre closed; auto-backup)"),
+        ("r", "review 1-by-1", "walk each book's tags; untick to reject an AI-guessed tag before it's written"),
         ("k", "keep", "leave it pending — hand-review the CSV first; the wizard offers it again next run"),
         ("d", "discard", "set it aside without applying (archived as *_discarded_*.csv, nothing written)"),
     ], default="a" if tagged else "d")
     if choice == "a":
         classify.apply_proposal()
+        ui.say("done ✓", "green")
+    elif choice == "r":
+        classify.apply_proposal_step()
         ui.say("done ✓", "green")
     elif choice == "d":
         arch = classify.PROP.replace(".csv", f"_discarded_{time.strftime('%Y%m%d-%H%M%S')}.csv")

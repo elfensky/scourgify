@@ -36,7 +36,12 @@ new/changed books only, shows per-engine cost estimates (`classify.est_cost`, li
 `classify.PRICING`), offers an engine **bake-off** (`classify.bakeoff`: the same ~5 sample books
 through every usable engine, display-only), and enables `--text-fallback` so thin descriptions get
 sampled rather than dropped. The review stage offers apply / keep / discard (discard archives to
-`*_discarded_*.csv`). Stages call the same engine functions the subcommands do (previews → confirm →
+`*_discarded_*.csv`). The wrangle and review stages also offer a **1-by-1 review** (`ui.checklist`,
+CLI `apply --step` / `classify --apply --step`): walk each book's changes, untick to reject
+individual items. Rejects land in `data/rejects.csv` (see `docs/superpowers/specs/2026-07-06-…`);
+`scourgify overrides` turns the deterministic (wrangle) ones into identity-override lines so the same
+change never recurs (dry-run default, `--apply` writes, `--master` targets `defaults/`), while
+classify rejects are log-only (an AI hallucination, not a rule bug). Stages call the same engine functions the subcommands do (previews → confirm →
 write), so guardrails and auto-backup apply identically; guardrail `SystemExit`s skip the stage, not
 the run. `ui.py` holds the shared rich Console + prompt helpers (lintle `term.py` pattern). classify
 runs render a live dashboard (`classify._Dashboard`: progress, tagged/failed/rate, throughput

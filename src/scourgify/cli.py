@@ -26,6 +26,9 @@ def main():
         from scourgify import promote
         sys.argv = ["scourgify promote", *argv[1:]]
         return promote.main()
+    if argv and argv[0] == "overrides":
+        from scourgify import wrangle
+        return wrangle.overrides_cmd(argv[1:])
     # setup / audit / apply / (none -> wizard) all live in wrangle's main()
     from scourgify import wrangle
     return wrangle.main()

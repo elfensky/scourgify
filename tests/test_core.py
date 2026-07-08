@@ -185,6 +185,59 @@ def test_est_cost():
     assert est_cost(200, "gemini") == 2 * est_cost(100, "gemini")      # linear in books
 
 
+# ---- 1-by-1 step review: reconstruct + rejects → overrides ----
+def test_reconstruct_reverts_only_rejected():
+    from scourgify.wrangle import reconstruct
+    nd = {"#fandoms": ["Naruto (anime)"]}; orig = {"#fandoms": ["Naruto"]}
+    rename = ("rename", "#fandoms", "Naruto", "Naruto (anime)")
+    assert reconstruct(nd, orig, []) == {"#fandoms": ["Naruto (anime)"]}   # accept all -> full change stands
+    assert reconstruct(nd, orig, [rename]) == {}                           # reject -> back to original, nothing to write
+    # drop / add invert to the original too
+    assert reconstruct({"tags": []}, {"tags": ["WIP"]}, [("drop", "tags", "WIP", "")]) == {}
+    assert reconstruct({"tags": ["Time Travel"]}, {"tags": []}, [("add", "tags", "", "Time Travel")]) == {}
+    # move back across columns
+    assert reconstruct({"#genres": [], "tags": ["Fluffy"]}, {"#genres": ["Fluffy"], "tags": []},
+                       [("move", "#genres → tags", "Fluffy", "")]) == {}
+
+def test_reconstruct_keeps_accepted_alongside_rejected():
+    from scourgify.wrangle import reconstruct
+    nd = {"#fandoms": ["Naruto (anime)"], "tags": []}
+    orig = {"#fandoms": ["Naruto"], "tags": ["WIP"]}
+    # reject the fandom rename, keep the tag drop
+    net = reconstruct(nd, orig, [("rename", "#fandoms", "Naruto", "Naruto (anime)")])
+    assert net == {"tags": []}                                            # fandom reverted (==orig, unwritten); drop kept
+
+def test_synth_reject_auto_kinds():
+    from scourgify.wrangle import synth_reject
+    assert synth_reject("fandoms", "rename", "Naruto", "Naruto (anime)") == ("auto", [("fandoms.csv", "Naruto,Naruto")], "")
+    assert synth_reject("characters", "rename", "Harry P.", "Harry Potter") == ("auto", [("characters.csv", "Harry P.,Harry P.,")], "")
+    cls, actions, _ = synth_reject("genres", "rename", "Angsty", "Angst")
+    assert cls == "auto" and ("genres_canon.csv", "Angsty,Angsty") in actions and ("genres_allow.txt", "Angsty") in actions
+    assert synth_reject("tags", "rename", "fixit", "Fix-It") == ("auto", [("tropes.csv", "fixit,fixit,tag")], "")
+    assert synth_reject("genres", "move", "Fluffy", "", dest="tags") == ("auto", [("genres_allow.txt", "Fluffy")], "")
+
+def test_synth_reject_manual_kinds():
+    from scourgify.wrangle import synth_reject
+    assert synth_reject("tags", "drop", "WIP", "")[0] == "manual"             # junk/redundancy drop
+    assert synth_reject("tags", "add", "", "Time Travel")[0] == "manual"      # injected value
+    assert synth_reject("characters", "move", "Akeno", "", dest="tags")[0] == "manual"   # cross-column rescue
+
+def test_synth_identity_override_is_a_noop_in_transform():
+    # the round-trip that the whole `overrides` design rests on: an identity map cancels the fold.
+    def flatten(fan):                                    # mirrors load_maps' chain-flattening
+        for a in list(fan):
+            t, seen = fan[a], {a}
+            while t in fan and t not in seen: seen.add(t); t = fan[t]
+            fan[a] = t
+        return fan
+    fan = {"Naruto": "Naruto (anime)"}
+    assert transform({"fandoms": ["Naruto"]}, maps(fan=dict(fan)), BEH)[0]["fandoms"] == ["Naruto (anime)"]
+    fan.update({"Naruto": "Naruto"})                     # override loads LAST -> identity wins
+    assert transform({"fandoms": ["Naruto"]}, maps(fan=flatten(fan)), BEH)[0]["fandoms"] == ["Naruto"]
+    char = {"Harry P.": "Harry Potter"}; char.update({"Harry P.": "Harry P."})
+    assert transform({"characters": ["Harry P."]}, maps(char=char), BEH)[0]["characters"] == ["Harry P."]
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

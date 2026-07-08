@@ -1,6 +1,6 @@
 # 1-by-1 sequential review (`--step`) + rejects→overrides
 
-**Status:** approved design, ready for implementation plan
+**Status:** implemented (2026-07-08)
 **Date:** 2026-07-06
 
 ## Problem
