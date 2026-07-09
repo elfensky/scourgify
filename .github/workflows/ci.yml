@@ -41,3 +41,4 @@ jobs:
         run: |
           uv run tests/test_core.py
           uv run tests/test_selection.py
+          uv run tests/test_backup.py

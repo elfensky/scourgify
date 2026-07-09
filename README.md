@@ -183,8 +183,10 @@ aborts if tags would **mass-shrink** (>25% of assignments and >200 lost — the 
 over-broad `junk.txt` rule; `--force` overrides after you've checked). A redundant tag is only
 stripped when the concept already lives in that book's structured column. `audit` is read-only
 (plain `python3`, fine with Calibre open); `apply`/`setup` use the Calibre API (Calibre **closed**).
-**Every write automatically snapshots `metadata.db` to `/tmp/ff_<timestamp>.db` first** and prints
-the path — that's your instant rollback (master rollback = a full "Export all Calibre data" backup).
+**Every write automatically snapshots `metadata.db` to `data/backups/ff_<timestamp>.db` first**
+(pruned to the last 20) and prints the path — `scourgify rollback` restores the newest, or
+`scourgify rollback --list` to pick one; the current db is itself snapshotted before a restore, so a
+rollback is reversible too (master rollback = a full "Export all Calibre data" backup).
 
 ## Maintenance — after new downloads / updates
 New stories arrive **raw** (junky subject tags, unfolded names). **Order matters — deterministic
@@ -286,7 +288,7 @@ un-drops, cross-column rescues) are listed for hand-editing rather than faked.
 
 ## Repo layout
 The package lives in **`src/scourgify/`**; the single `scourgify` command (`cli.py`) dispatches
-bare → wizard, `setup`/`audit`/`apply`/`overrides` → wrangle, `classify`, `staleness`, and `promote`.
+bare → wizard, `setup`/`audit`/`apply`/`overrides` → wrangle, `classify`, `staleness`, `promote`, and `rollback`.
 - **`cli.py`** — the `scourgify` entry point (argv dispatcher over the tools below)
 - **`wrangle.py`** — the engine: `setup` / `audit` / `apply`; with no command it launches the wizard
 - **`wizard.py` + `ui.py`** — the interactive wizard and its rich terminal helpers (the one

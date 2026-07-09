@@ -59,7 +59,7 @@ NOT used). All pickers return newest-added-first.
 
 **Packaging.** The code is a proper installable package under `src/scourgify/` (hatchling; on PyPI as
 `scourgify`). The single `scourgify` console command (`cli.py`) dispatches argv to the tools: bare → wizard,
-`setup`/`audit`/`apply` → wrangle, `classify`, `staleness`. Bundled `defaults/` (and `_writer.py`, `afm.swift`)
+`setup`/`audit`/`apply` → wrangle, `classify`, `staleness`, `rollback` → common. Bundled `defaults/` (and `_writer.py`, `afm.swift`)
 ship **inside** the package (read-only at runtime); per-user `config.toml`, `overrides/`, and `data/` resolve
 against the **current working directory** — so `uv run` from the repo (CWD = repo root) behaves exactly as
 before, while an installed copy writes proposals under wherever it's invoked. `common.HERE` is the package
@@ -71,9 +71,10 @@ dir (use it only for shipped read-only files); anything user-writable keys off `
 - **Writes** — the standalone tool computes the change-set, serializes it to JSON, and shells out **once** to
   `calibre-debug -e _writer.py -- ops.json` (Calibre's API is the only fast batch-write path; `calibredb set_metadata`
   is one book per process). `run_writer()` (in **common.py**; imported by wrangle/classify/staleness) does this,
-  **automatically snapshots metadata.db to `/tmp/ff_<ts>.db` first** (prints the path — that's the rollback), and
-  **refuses to run while Calibre is open** (it locks the DB). The user never types `calibre-debug`. Master rollback =
-  the full "Export all Calibre data" backup.
+  **automatically snapshots metadata.db to `data/backups/ff_<ts>.db` first** (pruned to the last 20; `scourgify
+  rollback [--list]` restores one, and the current db is snapshotted before a restore so rollback is reversible), and
+  **refuses to run while Calibre is open** (`calibre_open()` detects via pgrep→ps and fails *closed* if neither
+  exists — it locks the DB). The user never types `calibre-debug`. Master rollback = the full "Export all Calibre data" backup.
 - **`_writer.py`** is the only file that imports Calibre — a generic ops executor (`create_column` / `set_field` /
   `stamp_now` / `set_pref`).
 - **`common.py`** is the shared core: lazy `CALIBRE_LIBRARY` resolution (importing any module never exits),
