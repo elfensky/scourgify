@@ -93,7 +93,16 @@ def load_maps(cfg):
         if not ln or ln.startswith("#"): continue
         if ln.startswith("re:"): m["junk_rx"].append(re.compile(ln[3:], re.I))
         else: m["junk_exact"].add(ln.strip().lower())
+    # case/spacing-insensitive fallback for the fold maps: a book value that differs only in casing or
+    # punctuation still matches. Raw keys stay and win; these add norm-keyed aliases (see _lookup). ponytail
+    for mp in (m["char"], m["trope"]):
+        for k, v in list(mp.items()): mp.setdefault(norm(k), v)
+    for (vk, fd), c in list(m["char_fd"].items()): m["char_fd"].setdefault((norm(vk), norm(fd)), c)
     return m
+
+def _lookup(mp, key):
+    """Fold-map lookup that tolerates casing/punctuation: exact key first, then its norm()."""
+    return mp[key] if key in mp else mp.get(norm(key))
 
 def is_junk(t, m):
     if t.strip().lower() in m["junk_exact"]: return True
@@ -149,7 +158,8 @@ def transform(d: dict, m: dict, beh: dict, known_chars: frozenset | set = frozen
     nC = set()
     for ch in C:
         if beh["fold_characters"]:
-            ch = m["char"].get(ch) or next((m["char_fd"][(ch, fd)] for fd in nF if (ch, fd) in m["char_fd"]), ch)
+            ch = _lookup(m["char"], ch) or next(
+                (m["char_fd"][k] for fd in nF for k in ((ch, fd), (norm(ch), norm(fd))) if k in m["char_fd"]), ch)
         nC.add(ch)
     nC |= seedC                                                # decomposed characters
     # genres: split -> canon -> allowlist(keep) else move to tags
@@ -170,8 +180,9 @@ def transform(d: dict, m: dict, beh: dict, known_chars: frozenset | set = frozen
     homes = {norm(x) for x in nF | nC | nG | R | (set(st) if isinstance(st, list) else {st} if st else set())}
     for t in sorted(set(T) | routed):
         if is_junk(t, m): continue
-        if t in m["trope"]:
-            canon, route = m["trope"][t]; route = trope_route(canon, route, beh)
+        tv = _lookup(m["trope"], t)
+        if tv:
+            canon, route = tv; route = trope_route(canon, route, beh)
             if route == "genre": (nG if ga(norm(canon)) else nT).add(canon)   # genre only if allowlisted, else tag (keeps #genres idempotent)
             elif route == "fandom": nF.add(m["fan"].get(canon, canon))
             elif route == "character": nC.add(canon)
@@ -256,7 +267,7 @@ def audit(cfg, m):
     def ex(items, n=10): return "  " + (", ".join(items[:n]) + (f"  …(+{len(items)-n} more)" if len(items) > n else "")) if items else ""
     print("\n--- examples of what would change (sampled from your values) ---")
     if "characters" in before:
-        fc = [f"{v}→{m['char'][v]}" for v in sorted(before["characters"]) if v in m["char"] and m["char"][v] != v]
+        fc = [f"{v}→{c}" for v in sorted(before["characters"]) if (c := _lookup(m['char'], v)) and c != v]
         if fc: print(f"characters fold ({len(fc)}):{ex(fc)}")
     if "fandoms" in before:
         ff = [f"{v}→{m['fan'][v] or 'DROP'}" for v in sorted(before["fandoms"]) if v in m["fan"] and m["fan"][v] != v]
@@ -283,7 +294,7 @@ def audit(cfg, m):
         if de: print(f"decompose ({len(de)}):{ex(de)}")
     if "tags" in before:
         drops = [v for v in sorted(before["tags"]) if is_junk(v, m)]
-        folds = [f"{v}→{m['trope'][v][0]}" for v in sorted(before["tags"]) if v in m["trope"] and m["trope"][v][0] != v]
+        folds = [f"{v}→{tv[0]}" for v in sorted(before["tags"]) if (tv := _lookup(m['trope'], v)) and tv[0] != v]
         if drops: print(f"tags drop ({len(drops)}):{ex(drops)}")
         if folds: print(f"tags fold/route ({len(folds)}):{ex(folds)}")
 
@@ -366,9 +377,9 @@ MASS_MIN = 3             # a change on this many books is "mass" — aggregated,
 
 def _colmap(m, lab, v):
     """Where would this column's engine fold v? (for pairing a removal with its rename target)"""
-    if lab == "tags": return m["trope"].get(v, (None,))[0]
+    if lab == "tags": return (_lookup(m["trope"], v) or (None,))[0]
     if "fandom" in lab: return m["fan"].get(v)
-    if "character" in lab: return m["char"].get(v)
+    if "character" in lab: return _lookup(m["char"], v)
     if "genre" in lab: return m["gcanon"].get(v)
     return None
 
