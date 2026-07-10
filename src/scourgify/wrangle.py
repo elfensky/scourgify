@@ -117,7 +117,8 @@ def trope_route(canon, route, beh):
     return route
 
 # ---------------- the transform (per book) ----------------
-def transform(d, m, beh, known_chars=frozenset(), tagcanon=None):
+def transform(d: dict, m: dict, beh: dict, known_chars: frozenset | set = frozenset(),
+              tagcanon: dict | None = None) -> tuple[dict, bool, bool]:
     """d: dict col_key -> list[str] for configured columns. Returns (newd, lost_fandom, lost_char).
     known_chars: normalized set of character names in the library (to rescue chars misfiled in #genres).
     tagcanon: norm -> canonical spelling map for generic normalize-merge of tag variants."""
@@ -285,15 +286,24 @@ def audit(cfg, m):
         if folds: print(f"tags fold/route ({len(folds)}):{ex(folds)}")
 
 # ---------------- APPLY (standalone: compute via sqlite, write via calibre-debug helper) ----------------
-DETAIL_BOOKS = 10        # per-book diff lines shown in the apply preview before deferring to `audit`
+DETAIL_BOOKS = 10           # per-book diff lines shown in the apply preview before deferring to `audit`
+TAG_SHRINK_FRACTION = 0.25  # mass-deletion guardrail: abort if tags shrink more than this fraction ...
+TAG_SHRINK_FLOOR = 200      # ... AND lose more than this many assignments (named like SPEND_GATE/BACKUP_KEEP)
 
 def tag_loss_guard(tags_before, tags_after, force):
     """Abort on a suspicious mass-deletion of tags (e.g. an over-broad junk.txt regex).
     ponytail: heuristic ceiling — >25% shrink AND >200 assignments lost; --force overrides."""
     lost = tags_before - tags_after
-    if tags_before and lost > max(200, tags_before // 4) and not force:
+    if tags_before and lost > max(TAG_SHRINK_FLOOR, int(tags_before * TAG_SHRINK_FRACTION)) and not force:
         raise SystemExit(f"ABORT: tags would shrink {tags_before} -> {tags_after} assignments (-{lost}). "
                          "Check junk.txt / overrides for an over-broad rule, or re-run with --force.")
+
+def data_loss_guard(lost_fandom, lost_char):
+    """SAFETY: abort if any book would lose its LAST fandom or character (CLAUDE.md invariant).
+    transform() reports these only for a real value dropping to zero — a blocklist-route to tags
+    is intentional and not counted. Unconditional: unlike tag_loss_guard there is no --force."""
+    if lost_fandom or lost_char:
+        raise SystemExit("ABORT: data loss detected")
 
 def apply_changes(cfg, m, do_write, force=False, cli_hint=True, detail=True, step=False):
     """-> number of distinct books that would change (the wizard uses it to auto-skip a clean library).
@@ -325,7 +335,7 @@ def apply_changes(cfg, m, do_write, force=False, cli_hint=True, detail=True, ste
     if detail and diffs:
         _preview_report(m, diffs)
     print(f"  SAFETY losing last fandom: {lostF} | character: {lostC} | tag assignments: {tagsB} -> {tagsA}")
-    if lostF or lostC: raise SystemExit("ABORT: data loss detected")
+    data_loss_guard(lostF, lostC)
     tag_loss_guard(tagsB, tagsA, force)
     if step and diffs:
         from scourgify import ui
