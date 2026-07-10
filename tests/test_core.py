@@ -164,6 +164,13 @@ def test_annotate_new_verdict_split():
     assert by["Dragon Politics"][4] == "new"                          # no close match -> genuinely new
     assert rows[0][4] == "new"                                        # new sorted ahead of near-duplicates
 
+def test_vocab_merges_ao3_seed_without_dups():
+    # load_vocab = hand-curated core ∪ frequency-gated AO3 seed, deduped case-insensitively (issue #8)
+    assert "Self-Insert" in VOCAB                                   # a curated-core trope survives
+    assert "Established Relationship" in VOCAB                      # a high-frequency AO3 seed term is merged in
+    assert len(VOCAB) == len({t.lower() for t in VOCAB})           # no case-insensitive duplicates after the merge
+    assert len(VOCAB) > 200                                         # the seed meaningfully broadens the tiny core
+
 def test_usable_engines_reflects_env_keys():
     from scourgify.classify import usable_engines, ENGINE_ENV
     saved = {k: os.environ.get(k) for keys in ENGINE_ENV.values() for k in keys}
