@@ -85,6 +85,24 @@ The engine reads, first to last (later wins):
 Data from the [OTW's Selective data dump for fan statisticians](https://archiveofourown.org/admin_posts/18804)
 (2021-02-26), released for public reuse — thank you, Tag Wrangling volunteers.
 
+> ⚠️ **Taxonomy vintage — the AO3 layer is frozen at the 2021-02-26 dump.** It's the only public dump OTW
+> has released, so franchises that blew up after it (e.g. **Baldur's Gate 3**, **Elden Ring**,
+> **Honkai: Star Rail**) aren't in `defaults/ao3/` and won't auto-fold on a fresh install. The
+> override/promote loop covers the gap — the classifier still content-tags these books, and the
+> `#fandoms`/`#characters` values pass through untouched (they just aren't *unified* to a franchise
+> canonical). When OTW publishes a newer dump, `build_ao3_layer.py` regenerates the whole layer.
+>
+> **Add a post-2021 fandom yourself** — drop rows into `overrides/` (they win over everything and survive
+> upgrades; formats under [Customizing](#customizing)):
+> ```csv
+> # overrides/fandoms.csv   (alias,canonical) — unify a franchise's media splits
+> Baldur's Gate 3,Dungeons & Dragons
+> BG3,Dungeons & Dragons
+> # overrides/characters.csv (variant,canonical,fandom) — fold a character's abbreviations (blank = global)
+> Astarion Ancunín,Astarion,Dungeons & Dragons
+> ```
+> Or just let `scourgify promote` adjudicate the novel tags your classify runs surface — same effect, no hand-editing.
+
 ---
 
 ## FanFicFare → Calibre columns (how the linking works)
