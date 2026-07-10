@@ -44,9 +44,26 @@ def test_prune_keeps_only_the_newest():
     assert left == ["ff_20260101T000003.db", "ff_20260101T000004.db", "ff_20260101T000005.db"], left
 
 
+def test_predict_populated_after_set_field():
+    # a set_field REPLACES: untouched books keep their value, touched keep only a non-empty one
+    before = {1, 2, 3}
+    assert common._predict_populated(before, {"2": [], "4": ["x"]}) == {1, 3, 4}   # clear 2, add 4
+    assert common._predict_populated(before, {"1": ["y"], "5": ["z"]}) == {1, 2, 3, 5}  # add-only never shrinks
+    assert common._predict_populated(before, {"1": "", "2": [], "3": None}) == set()    # clear all
+
+
+def test_wipe_verdict_thresholds():
+    assert common._is_wipe(1000, 50)          # 95% wipe of a big column -> catastrophic
+    assert not common._is_wipe(1000, 500)     # 50% loss -> below the 90% line, allowed
+    assert not common._is_wipe(50, 0)         # column under the floor -> never trips (tiny library)
+    assert not common._is_wipe(1000, 1200)    # a write that grows the column -> fine
+
+
 if __name__ == "__main__":
     test_is_calibre_gui_matches_the_gui()
     test_is_calibre_gui_ignores_cli_tools_and_our_own_helpers()
     test_backup_path_never_collides_within_a_second()
     test_prune_keeps_only_the_newest()
+    test_predict_populated_after_set_field()
+    test_wipe_verdict_thresholds()
     print("ok")

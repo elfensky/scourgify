@@ -355,7 +355,9 @@ def apply_changes(cfg, m, do_write, force=False, cli_hint=True, detail=True, ste
                 print(f"  logged {len(rejects)} reject(s) -> {os.path.basename(REJECTS)}"
                       + (f"  ({nauto} → run `scourgify overrides` to stop them recurring)" if nauto else ""))
     if do_write:
-        run_writer([{"op": "set_field", "field": lab, "values": {str(b): v for b, v in ch.items()}} for lab, ch in changes.items()])
+        # pass force through: wrangle's own data_loss/tag_loss guards already ran, so a deliberately
+        # --forced deletion here must not be second-guessed by run_writer's coarse last-line wipe guard.
+        run_writer([{"op": "set_field", "field": lab, "values": {str(b): v for b, v in ch.items()}} for lab, ch in changes.items()], force=force)
     elif cli_hint:
         print("Re-run: scourgify apply --apply   (Calibre closed; writes shell out to calibre-debug)")
     return len({b for ch in changes.values() for b in ch})
