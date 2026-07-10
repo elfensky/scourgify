@@ -16,7 +16,7 @@ using it would mark half the library "changed" after every wrangle apply.
 Every picker returns ids newest-added-first, so --batch/--limit caps eat the new
 books first instead of decade-old sparse ones.
 """
-import collections
+import collections, sqlite3
 
 from scourgify.common import read_custom_column
 
@@ -51,7 +51,8 @@ def changed(con):
     return changed_pure(*_clocks(con))
 
 
-def pick(con, mode="incremental", n=0, since="", min_tags=2):
+def pick(con: sqlite3.Connection, mode: str = "incremental", n: int = 0,
+         since: str = "", min_tags: int = 2) -> list[int]:
     """[book_id ...] newest-added-first for one scope:
       incremental — changed() books only            last   — the n most recently added
       since       — added OR site-updated >= date   sparse — fewer than min_tags tags
@@ -70,4 +71,6 @@ def pick(con, mode="incremental", n=0, since="", min_tags=2):
         return [b for b in newest if tagn[b] < min_tags]
     if mode == "all":
         return newest
+    # internal invariant guard: `mode` comes from argparse choices, so an unknown value is a
+    # programmer error (ValueError), not a user-facing failure — hence not the house SystemExit.
     raise ValueError(f"unknown scope mode: {mode!r}")

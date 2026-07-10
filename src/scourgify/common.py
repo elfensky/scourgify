@@ -7,7 +7,7 @@ used to each carry a private copy of:
   - read-only sqlite access + link-table-aware custom-column reading
   - normalization helpers (norm, ascii_fold) and the minimal TOML config reader
   - the single write funnel: run_writer() -> calibre-debug -e _writer.py
-    (backs up metadata.db to /tmp before every write; refuses to run while Calibre is open)
+    (backs up metadata.db to data/backups/ before every write; refuses to run while Calibre is open)
 """
 import os, re, sys, csv, time, glob, sqlite3, collections, unicodedata
 
@@ -53,21 +53,21 @@ def ro_connect():
 
 
 # ---------------- normalization ----------------
-def norm(s):
+def norm(s) -> str:
     s = str(s).strip().lower(); s = re.sub(r"[\[\]\(\)]", "", s); s = s.replace("&", "and")
     s = re.sub(r"[\s_\-/]+", " ", s); s = re.sub(r"[^\w ]", "", s, flags=re.UNICODE); return s.strip()
 
-def ascii_fold(s):
+def ascii_fold(s: str) -> str:
     s = s.replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"').replace("…", "...").replace("–", "-").replace("—", "-")
     return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
 
 
 # ---------------- custom columns (single- and multi-value; link-table aware) ----------------
-def custom_column_id(con, label):
+def custom_column_id(con: sqlite3.Connection, label: str) -> int | None:
     r = con.execute("SELECT id FROM custom_columns WHERE label=?", (label.lstrip("#"),)).fetchone()
     return r[0] if r else None
 
-def read_custom_column(con, label, multi=False):
+def read_custom_column(con: sqlite3.Connection, label: str, multi: bool = False) -> dict | None:
     """{book: value} (or {book: [values]} with multi=True) for a custom column; None if it doesn't exist.
     Handles both storage shapes: a books_custom_column_N_link table, or an inline `book` column."""
     i = custom_column_id(con, label)
@@ -84,7 +84,7 @@ def read_custom_column(con, label, multi=False):
 
 
 # ---------------- config (minimal TOML reader; no tomllib dependency) ----------------
-def load_config(path=None):
+def load_config(path: str | None = None) -> dict:
     cfg = {"columns": {"fandoms": "#fandoms", "characters": "#characters", "relationships": "#relationships",
                        "genres": "#genres", "status": "#status", "tags": "tags"},
            "behavior": {"fold_characters": True, "ascii_only_tags": True, "au_as": "genre", "crossover_as": "genre",

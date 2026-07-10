@@ -3,12 +3,16 @@
 
     scourgify                    # no arguments — launches this interactive wizard
 
-Linear, no menu: a status header, setup if the library needs it, then the full
-maintenance lifecycle in the right order — wrangle → staleness → classify → review —
-where every stage dry-runs first, shows its report, and asks before writing.
-Writes refuse while Calibre is open and auto-back-up metadata.db (everything
-funnels through common.run_writer). Single steps stay available as CLI
-subcommands: scourgify setup / audit / apply / classify / staleness."""
+A status header (books, column health, new/changed count, pending proposal),
+setup if the library needs it, then a landing menu (landing_menu) that asks what
+to do: the full guided maintenance run in the right order — wrangle → staleness →
+classify → review → promote → backfill — or a single task, with unfinished work
+flagged inline; the menu loops until quit. Every stage dry-runs first, shows its
+report, and asks before writing. Writes refuse while Calibre is open and
+auto-back-up metadata.db (everything funnels through common.run_writer). Single
+steps stay available as CLI subcommands: scourgify setup / audit / apply /
+classify / staleness. This module has no main()/argparse entry of its own — it is
+invoked via wrangle.main() (bare `scourgify`); see cli.py and CLAUDE.md."""
 import os, csv, time, collections
 
 from scourgify import ui                    # first: gives the friendly error if rich is missing
@@ -147,9 +151,11 @@ def stage_classify():
     if not targets:
         ui.say("no candidates with usable text — nothing to send ✓", "green"); return
     while True:                                   # engine choice; 'compare' loops back after the bake-off table
-        opts, usable = [], {}
-        for i, (e, ok, hint) in enumerate(_engines(), 1):
-            usable[e] = ok
+        engs = _engines()                          # [(name, usable, hint)] — computed once, reused below
+        hints = {e: h for e, _, h in engs}
+        usable = {e: ok for e, ok, _ in engs}
+        opts = []
+        for i, (e, ok, hint) in enumerate(engs, 1):
             cost = classify.est_cost(len(targets), e)
             opts.append((str(i), e, f"{hint}  ·  {'free' if not cost else f'~${cost:.2f}'} for {len(targets)} books"))
         n_sample = min(5, len(targets))
@@ -158,10 +164,10 @@ def stage_classify():
         if k != "c":
             a.engine = dict((key, lbl) for key, lbl, _ in opts)[k]
             if not usable.get(a.engine):
-                ui.error(f"{a.engine} isn't usable here — {dict((e, h) for e, _, h in _engines())[a.engine]}")
+                ui.error(f"{a.engine} isn't usable here — {hints[a.engine]}")
                 continue
             break
-        engines = [e for e, ok, _ in _engines() if ok]
+        engines = [e for e, ok, _ in engs if ok]
         ui.say(f"comparing: {n_sample} books × {', '.join(engines)} (sequential — a minute or two)…", "dim")
         res = classify.bakeoff(a, targets, engines, n=n_sample)
         con = ro_connect(); titles = {b: t for b, t in con.execute("SELECT id, title FROM books")}; con.close()
@@ -282,13 +288,14 @@ def stage_promote():
            "(promote / alias / reject)")
     a = promote.normalize(promote.build_parser().parse_args([]))
     a.yes = True                                  # the wizard's confirm below replaces the CLI guards
-    opts, usable = [], {}
-    for i, (e, ok, hint) in enumerate(_engines(), 1):
-        usable[e] = ok; opts.append((str(i), e, hint))
+    engs = _engines()                             # computed once, reused for opts + the error hint
+    hints = {e: h for e, _, h in engs}
+    usable = {e: ok for e, ok, _ in engs}
+    opts = [(str(i), e, hint) for i, (e, ok, hint) in enumerate(engs, 1)]
     k = ui.menu("engine", opts, default="2")      # default claude; skip apple (too weak for this judgement)
     a.engine = dict((key, lbl) for key, lbl, _ in opts)[k]
     if not usable.get(a.engine):
-        ui.error(f"{a.engine} isn't usable here — {dict((e, h) for e, _, h in _engines())[a.engine]}"); return
+        ui.error(f"{a.engine} isn't usable here — {hints[a.engine]}"); return
     if a.engine == "apple":
         ui.say("note: on-device apple is weak at this reasoning — a cloud engine gives far better verdicts.", "yellow")
     if a.engine != "apple" and not ui.confirm(f"send {len(cands)} candidates to the {a.engine} API?"):

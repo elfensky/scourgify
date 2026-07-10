@@ -7,7 +7,9 @@ import os, sys, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 from scourgify import common
 from scourgify.common import norm, ascii_fold, load_config
-from scourgify.wrangle import transform, resolve_trope_chains, build_tagcanon, is_junk
+from scourgify.wrangle import (transform, resolve_trope_chains, build_tagcanon, is_junk,
+                               tag_loss_guard, data_loss_guard,
+                               TAG_SHRINK_FLOOR, TAG_SHRINK_FRACTION)
 from scourgify.classify import parse_resp, sparkline, load_vocab
 VOCAB = load_vocab()
 from scourgify.staleness import derive
@@ -258,6 +260,31 @@ def test_synth_identity_override_is_a_noop_in_transform():
     assert transform({"fandoms": ["Naruto"]}, maps(fan=flatten(fan)), BEH)[0]["fandoms"] == ["Naruto"]
     char = {"Harry P.": "Harry Potter"}; char.update({"Harry P.": "Harry P."})
     assert transform({"characters": ["Harry P."]}, maps(char=char), BEH)[0]["characters"] == ["Harry P."]
+
+
+# ---- SAFETY guardrails (pure; CLAUDE.md invariants) ----
+def test_tag_loss_guard_ceiling():
+    # just under the ceiling: never aborts (need BOTH >floor lost AND >fraction shrink)
+    tag_loss_guard(1000, 1000 - TAG_SHRINK_FLOOR, force=False)          # exactly floor lost -> ok
+    tag_loss_guard(100, 0, force=False)                                 # 100% shrink but < floor lost -> ok
+    # over the ceiling: aborts
+    try:
+        tag_loss_guard(1000, 1000 - (TAG_SHRINK_FLOOR + int(1000 * TAG_SHRINK_FRACTION)), force=False)
+        assert False, "expected SystemExit on mass tag deletion"
+    except SystemExit:
+        pass
+    # --force overrides, and tags_before == 0 is a no-op
+    tag_loss_guard(1000, 0, force=True)
+    tag_loss_guard(0, 0, force=False)
+
+def test_data_loss_guard_aborts_on_last_value_lost():
+    data_loss_guard(0, 0)                                               # nothing lost -> ok
+    for lf, lc in ((1, 0), (0, 1), (2, 3)):
+        try:
+            data_loss_guard(lf, lc)
+            assert False, f"expected SystemExit for lost_fandom={lf} lost_char={lc}"
+        except SystemExit as e:
+            assert "data loss" in str(e)
 
 
 if __name__ == "__main__":

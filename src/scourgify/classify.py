@@ -38,6 +38,7 @@ FAIL = f"{DATA}/classify_failures.csv"
 AO3_VOCAB = f"{DATA}/ao3_vocab.csv"     # per-library canonical AO3 freeforms (name,uses); absent on fresh installs
 SPEND_GATE = 200        # cloud runs above this many books require an explicit yes
 DEDUP_CUTOFF = 0.86     # difflib ratio at/above which a proposed tag counts as a variant of an existing one
+ERR_TRUNC = 140         # chars kept when recording an engine error (same width in bakeoff table and failures CSV)
 
 # $/MTok (input, output) for each engine's default model — public list prices as of 2026-07; edit when they change.
 PRICING = {"apple": (0.0, 0.0), "claude": (1.00, 5.00), "openai": (0.15, 0.60), "gemini": (0.30, 2.50), "mistral": (0.20, 0.60)}
@@ -109,7 +110,7 @@ def prompt_for(desc, maxtags):
             "list and would be worth adding to the vocabulary. No plot specifics, character names, or fandoms; [] if none.\n"
             f"CONTROLLED LIST: {', '.join(load_vocab())}\n\nDESCRIPTION:\n{desc[:1500]}\n\nJSON:")
 
-def parse_resp(text, maxtags=6, cutoff=DEDUP_CUTOFF):
+def parse_resp(text: str, maxtags: int = 6, cutoff: float = DEDUP_CUTOFF) -> tuple[list[str], list[str]]:
     m = re.search(r"\{.*\}", text, re.S)
     if not m: return [], []
     try: obj = json.loads(m.group(0))
@@ -445,7 +446,7 @@ def bakeoff(a, targets, engines, n=5):
             try:
                 vt, nt = parse_resp(eng.ask(prompt_for(d, a.max_tags)), a.max_tags, a.dedup_cutoff); err = ""
             except Exception as ex:
-                vt, nt, err = [], [], f"{type(ex).__name__}: {ex}"[:60]
+                vt, nt, err = [], [], f"{type(ex).__name__}: {ex}"[:ERR_TRUNC]
             out.setdefault(b, {})[e] = (vt, nt, err)
     return out
 
@@ -457,9 +458,9 @@ def ask_retry(eng, prompt, tries=4):
     for k in range(tries):
         try: return eng.ask(prompt), ""
         except RuntimeError as e:
-            return "", str(e)[:140]
+            return "", str(e)[:ERR_TRUNC]
         except Exception as e:
-            err = f"{type(e).__name__}: {e}"[:140]
+            err = f"{type(e).__name__}: {e}"[:ERR_TRUNC]
             if k == tries - 1: return "", err
             time.sleep(2 ** k)
     return "", err
