@@ -29,6 +29,13 @@ ENGINE_KEYS = {"claude": ("ANTHROPIC_API_KEY",), "openai": ("OPENAI_API_KEY",),
 
 
 # ---------------- status header ----------------
+def _proposal_counts(rows: list) -> tuple[int, int]:
+    """(pending, to_stamp) from classify-proposal rows: books that will gain tags vs no-match books
+    awaiting only a stamp (so they aren't re-sent to the LLM forever). Pure — see tests."""
+    pending = sum(1 for r in rows if r.get("added_tags", "").strip())
+    return pending, len(rows) - pending
+
+
 def snapshot():
     try:
         con = ro_connect()
@@ -41,9 +48,7 @@ def snapshot():
         raise SystemExit(f"can't read {db_path()} — is CALIBRE_LIBRARY correct? ({e})")
     pending = to_stamp = 0
     if os.path.exists(classify.PROP):
-        for r in csv.DictReader(open(classify.PROP)):
-            if r.get("added_tags", "").strip(): pending += 1     # books that will gain tags
-            else: to_stamp += 1                                  # no-match books awaiting a stamp (so they aren't re-sent)
+        pending, to_stamp = _proposal_counts(list(csv.DictReader(open(classify.PROP))))
     # cheap file-based signals of unfinished work, surfaced as menu hints
     candidates = 0
     if os.path.exists(classify.RANK):
