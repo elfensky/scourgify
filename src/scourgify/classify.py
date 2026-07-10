@@ -44,12 +44,19 @@ ERR_TRUNC = 140         # chars kept when recording an engine error (same width 
 PRICING = {"apple": (0.0, 0.0), "claude": (1.00, 5.00), "openai": (0.15, 0.60), "gemini": (0.30, 2.50), "mistral": (0.20, 0.60)}
 
 _VOCAB = None
+def _read_vocab_file(path: str) -> list:
+    return [l.strip() for l in open(path) if l.strip() and not l.startswith("#")] if os.path.exists(path) else []
+
 def load_vocab() -> list:
-    """Bundled vocab + optional CWD overrides/classify_vocab.txt (a line appends a term; '-term' removes one).
-    Lazy so a packaging problem gives a real error at use, not at import, and installed users can override."""
+    """Curated core ∪ AO3 high-frequency seed, then optional CWD overrides/classify_vocab.txt (a line appends
+    a term; '-term' removes one — and can trim a seeded term too). Lazy so a packaging problem gives a real
+    error at use, not at import, and installed users can override. See build_classify_seed.py for the seed."""
     global _VOCAB
     if _VOCAB is None:
-        terms = [l.strip() for l in open(f"{HERE}/defaults/classify_vocab.txt") if l.strip() and not l.startswith("#")]
+        terms, have = [], set()                                                   # curated core first, then AO3 seed;
+        for t in (_read_vocab_file(f"{HERE}/defaults/classify_vocab.txt")          # first spelling of a norm wins,
+                  + _read_vocab_file(f"{HERE}/defaults/classify_vocab_ao3.txt")):  # so a hand-edit dup can't sneak in
+            if t.lower() not in have: terms.append(t); have.add(t.lower())
         ov = os.path.join(os.getcwd(), "overrides", "classify_vocab.txt")
         if os.path.exists(ov):
             for l in open(ov):
