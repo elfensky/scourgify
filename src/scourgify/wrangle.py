@@ -137,12 +137,12 @@ def transform(d: dict, m: dict, beh: dict, known_chars: frozenset | set = frozen
             return keep
         F = set(_dec(F)); G0 = _dec(G0); T = _dec(T)
     # fandoms: alias -> canonical (drop if mapped to empty)
-    nF = set()
+    nF = set(); relocatedF = False
     for f in F:
         tgt = m["fan"].get(f, f)
         if not tgt: continue                                  # alias -> empty: drop
         if norm(tgt) in m["fan_block"]:                       # a curated non-fandom (kink/rating/status/meta) -> tag pipeline routes it
-            T.append(tgt); continue
+            T.append(tgt); relocatedF = True; continue        # value preserved in tags -> not a fandom loss
         nF.add(tgt)
     nF |= {m["fan"].get(f, f) for f in seedF if m["fan"].get(f, f)}   # decomposed fandoms (skip alias->empty)
     # characters: fold abbrev/case -> full (global, then fandom-scoped)
@@ -187,9 +187,11 @@ def transform(d: dict, m: dict, beh: dict, known_chars: frozenset | set = frozen
     newd = {"fandoms": sorted(nF), "characters": sorted(nC), "genres": sorted(nG),
             "relationships": sorted(R), "tags": sorted(nT)}
     if st: newd["status"] = st
-    # losing a fandom only counts if the book had a REAL one (a blocklisted non-fandom going to 0 is intentional)
-    had_real_F = any(m["fan"].get(f, f) and norm(m["fan"].get(f, f)) not in m["fan_block"] for f in F)
-    return newd, (had_real_F and not nF), (had_C and not nC)
+    # SAFETY: a fanfic always has a fandom, so a book that had one and ends with an empty
+    # #fandoms has lost it (a bad fandoms.csv alias->"" or an empty decompose payload) — UNLESS
+    # its only "fandom" was a blocklisted non-fandom relocated to tags (value preserved, above).
+    # Characters may legitimately be absent, so only flag a loss for books that had some.
+    return newd, (had_F and not nF and not relocatedF), (had_C and not nC)
 
 # ---------------- AUDIT (read-only sqlite) ----------------
 def col_key_label(cfg):
@@ -298,12 +300,14 @@ def tag_loss_guard(tags_before, tags_after, force):
         raise SystemExit(f"ABORT: tags would shrink {tags_before} -> {tags_after} assignments (-{lost}). "
                          "Check junk.txt / overrides for an over-broad rule, or re-run with --force.")
 
-def data_loss_guard(lost_fandom, lost_char):
+def data_loss_guard(lost_fandom, lost_char, force):
     """SAFETY: abort if any book would lose its LAST fandom or character (CLAUDE.md invariant).
     transform() reports these only for a real value dropping to zero — a blocklist-route to tags
-    is intentional and not counted. Unconditional: unlike tag_loss_guard there is no --force."""
-    if lost_fandom or lost_char:
-        raise SystemExit("ABORT: data loss detected")
+    is preserved and not counted. --force overrides (for a deliberate bulk deletion), like tag_loss_guard."""
+    if (lost_fandom or lost_char) and not force:
+        raise SystemExit(f"ABORT: {lost_fandom} book(s) would lose their last fandom, {lost_char} their last "
+                         "character. Check your fandoms.csv aliases / decompose overrides for a rule that "
+                         "empties a book, or re-run with --force if the deletion is intentional.")
 
 def apply_changes(cfg, m, do_write, force=False, cli_hint=True, detail=True, step=False):
     """-> number of distinct books that would change (the wizard uses it to auto-skip a clean library).
@@ -335,7 +339,7 @@ def apply_changes(cfg, m, do_write, force=False, cli_hint=True, detail=True, ste
     if detail and diffs:
         _preview_report(m, diffs)
     print(f"  SAFETY losing last fandom: {lostF} | character: {lostC} | tag assignments: {tagsB} -> {tagsA}")
-    data_loss_guard(lostF, lostC)
+    data_loss_guard(lostF, lostC, force)
     tag_loss_guard(tagsB, tagsA, force)
     if step and diffs:
         from scourgify import ui

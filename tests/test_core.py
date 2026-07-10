@@ -278,13 +278,33 @@ def test_tag_loss_guard_ceiling():
     tag_loss_guard(0, 0, force=False)
 
 def test_data_loss_guard_aborts_on_last_value_lost():
-    data_loss_guard(0, 0)                                               # nothing lost -> ok
+    data_loss_guard(0, 0, force=False)                                  # nothing lost -> ok
     for lf, lc in ((1, 0), (0, 1), (2, 3)):
         try:
-            data_loss_guard(lf, lc)
+            data_loss_guard(lf, lc, force=False)
             assert False, f"expected SystemExit for lost_fandom={lf} lost_char={lc}"
         except SystemExit as e:
-            assert "data loss" in str(e)
+            assert "lose their last" in str(e)
+        data_loss_guard(lf, lc, force=True)                            # --force overrides the abort
+
+def test_transform_flags_a_book_that_loses_its_last_fandom():
+    # the whole point of the guard: a fanfic always has a fandom, so ending with zero is a loss.
+    _, lf, _ = transform({"fandoms": ["Naruto"]}, maps(fan={"Naruto": ""}), BEH)   # alias -> "" (typo)
+    assert lf is True
+    m = maps(decompose={norm("Fate SI"): {"fandoms": [], "characters": [], "tags": [], "genres": []}})
+    _, lf, _ = transform({"fandoms": ["Fate SI"]}, m, BEH)                          # decompose -> empty payload
+    assert lf is True
+
+def test_transform_does_not_flag_relocation_or_normal_routing():
+    # a blocklisted non-fandom moved to tags is preserved -> NOT a loss
+    _, lf, _ = transform({"fandoms": ["Explicit"]}, maps(fan_block={norm("Explicit")}), BEH)
+    assert lf is False
+    # a plain rename keeps the fandom -> NOT a loss
+    _, lf, _ = transform({"fandoms": ["HP"]}, maps(fan={"HP": "Harry Potter"}), BEH)
+    assert lf is False
+    # a book with no fandom to begin with can't lose one
+    _, lf, _ = transform({"tags": ["WIP"]}, maps(), BEH)
+    assert lf is False
 
 
 if __name__ == "__main__":
