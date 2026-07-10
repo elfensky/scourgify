@@ -14,14 +14,14 @@ ACTIVITY = {"In-Progress", "Hiatus", "Abandoned"}      # re-derived from activit
 # everything else (Completed, Dropped, Rewritten, blank) is left untouched
 
 
-def derive(current, age_years, stale_years, dead_years):
+def derive(current: str, age_years: float | None, stale_years: float, dead_years: float) -> str:
     """The pure rule: what should this book's status be, given its current status and age?"""
     if current not in ACTIVITY: return current         # final/explicit/blank -> unchanged
     if age_years is None: return current               # no date -> can't assess
     return "In-Progress" if age_years < stale_years else "Hiatus" if age_years < dead_years else "Abandoned"
 
 
-def compute(stale_years=2.0, dead_years=5.0):
+def compute(stale_years: float = 2.0, dead_years: float = 5.0) -> tuple[str, list]:
     """-> (status_label, [(book, old, new, age_years), ...]) for books whose status would change."""
     con = ro_connect()
     status_label = load_config()["columns"].get("status") or "#status"
@@ -41,11 +41,11 @@ def compute(stale_years=2.0, dead_years=5.0):
     return status_label, rows
 
 
-def write(status_label, rows):
+def write(status_label: str, rows: list) -> None:
     run_writer([{"op": "set_field", "field": status_label, "values": {str(b): n for b, o, n, _ in rows}}])
 
 
-def main():
+def main() -> None:
     p = argparse.ArgumentParser(description="Re-derive #status from #updated age (activity family only).")
     p.add_argument("--apply", action="store_true", help="write #status (Calibre closed)")
     p.add_argument("--stale-years", type=float, default=2)

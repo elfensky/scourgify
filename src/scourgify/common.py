@@ -23,7 +23,7 @@ REJECTS = os.path.join(DATA, "rejects.csv")          # per-item rejects from `--
 REJECT_COLS = ["ts", "stage", "book", "title", "kind", "column", "before", "after", "class"]
 
 
-def log_rejects(rows):
+def log_rejects(rows: list[dict]) -> int:
     """Append reject dicts (REJECT_COLS keys; ts auto-stamped) to data/rejects.csv, creating
     the header on first write. The "separate list" that `scourgify overrides` reads back."""
     rows = [r for r in rows if r]
@@ -39,16 +39,16 @@ def log_rejects(rows):
 
 
 # ---------------- library resolution (lazy — importing this module never exits) ----------------
-def library():
+def library() -> str:
     lib = os.path.expanduser(os.environ.get("CALIBRE_LIBRARY", ""))
     if not lib:
         raise SystemExit("Set CALIBRE_LIBRARY to your Calibre library folder (the one containing metadata.db).")
     return lib
 
-def db_path():
+def db_path() -> str:
     return os.path.join(library(), "metadata.db")
 
-def ro_connect():
+def ro_connect() -> sqlite3.Connection:
     return sqlite3.connect(f"file:{db_path()}?mode=ro", uri=True)
 
 
@@ -119,7 +119,7 @@ def _is_calibre_gui(line):
         "calibre-debug", "calibredb", "calibre-server", "calibre-parallel",
         "pgrep", "wrangle", "_writer", "classify"))
 
-def calibre_open():
+def calibre_open() -> bool:
     """True if the Calibre GUI appears to be running (it locks metadata.db, so writes must wait).
     Best-effort via pgrep, then ps. If NEITHER exists we cannot tell, so fail CLOSED (report open)
     rather than let a write silently race a live library — the old code returned False (open the
@@ -176,7 +176,7 @@ def _populated_books(con, field):
         return {b for (b,) in con.execute("SELECT DISTINCT book FROM books_tags_link")}
     return set(read_custom_column(con, field) or {})
 
-def run_writer(ops, force=False):
+def run_writer(ops: list[dict], force: bool = False) -> None:
     """Apply a list of write-ops through Calibre by shelling out to `calibre-debug -e _writer.py`.
     Automatically snapshots metadata.db to data/backups/ first — every write path gets a rollback
     point for free (restore with `scourgify rollback`). Refuses (before writing) a change-set that
@@ -222,7 +222,7 @@ def run_writer(ops, force=False):
     if rc != 0: raise SystemExit(f"writer failed (exit {rc}) — library backup at {bak}")
 
 
-def rollback_cmd(argv):
+def rollback_cmd(argv: list[str]) -> None:
     """`scourgify rollback [--list] [FILE]` — restore metadata.db from a data/backups/ snapshot.
     No FILE = the newest. The current db is itself snapshotted first, so a rollback is reversible."""
     import argparse, shutil

@@ -30,7 +30,7 @@ def _key(v):
     return str(v)[:19] if v else ""
 
 
-def changed_pure(added, updated, stamped):
+def changed_pure(added: dict, updated: dict, stamped: dict) -> dict:
     """{book: reason} for new/changed books; args are {book: datetime-ish} dicts. Pure — see tests."""
     out = {}
     for b, ts in added.items():
@@ -41,12 +41,12 @@ def changed_pure(added, updated, stamped):
     return out
 
 
-def _clocks(con):
+def _clocks(con: sqlite3.Connection) -> tuple[dict, dict, dict]:
     added = dict(con.execute("SELECT id, timestamp FROM books"))
     return added, read_custom_column(con, "#updated") or {}, read_custom_column(con, STAMP) or {}
 
 
-def changed(con):
+def changed(con: sqlite3.Connection) -> dict:
     """{book: reason} for books new/changed since their classify stamp."""
     return changed_pure(*_clocks(con))
 
