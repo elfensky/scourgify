@@ -3,12 +3,16 @@
 
     scourgify                    # no arguments — launches this interactive wizard
 
-Linear, no menu: a status header, setup if the library needs it, then the full
-maintenance lifecycle in the right order — wrangle → staleness → classify → review —
-where every stage dry-runs first, shows its report, and asks before writing.
-Writes refuse while Calibre is open and auto-back-up metadata.db (everything
-funnels through common.run_writer). Single steps stay available as CLI
-subcommands: scourgify setup / audit / apply / classify / staleness."""
+A status header (books, column health, new/changed count, pending proposal),
+setup if the library needs it, then a landing menu (landing_menu) that asks what
+to do: the full guided maintenance run in the right order — wrangle → staleness →
+classify → review → promote → backfill — or a single task, with unfinished work
+flagged inline; the menu loops until quit. Every stage dry-runs first, shows its
+report, and asks before writing. Writes refuse while Calibre is open and
+auto-back-up metadata.db (everything funnels through common.run_writer). Single
+steps stay available as CLI subcommands: scourgify setup / audit / apply /
+classify / staleness. This module has no main()/argparse entry of its own — it is
+invoked via wrangle.main() (bare `scourgify`); see cli.py and CLAUDE.md."""
 import os, csv, time, collections
 
 from scourgify import ui                    # first: gives the friendly error if rich is missing
@@ -16,15 +20,21 @@ from scourgify.ui import console
 from rich import box
 from rich.table import Table
 
-from scourgify import common, wrangle, classify, staleness, select, promote
+from scourgify import common, wrangle, classify, staleness, select, promote, overrides
 from scourgify.common import library, db_path, ro_connect, custom_column_id, calibre_open
 
 COLS = ["#fandoms", "#characters", "#relationships", "#genres", "#status", "#updated", "#wrangled"]
-ENGINE_KEYS = {"claude": ("ANTHROPIC_API_KEY",), "openai": ("OPENAI_API_KEY",),
-               "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"), "mistral": ("MISTRAL_API_KEY",)}
+ENGINE_KEYS = classify.ENGINE_ENV              # single source of truth (defined in classify); never disagree
 
 
 # ---------------- status header ----------------
+def _proposal_counts(rows: list) -> tuple[int, int]:
+    """(pending, to_stamp) from classify-proposal rows: books that will gain tags vs no-match books
+    awaiting only a stamp (so they aren't re-sent to the LLM forever). Pure — see tests."""
+    pending = sum(1 for r in rows if r.get("added_tags", "").strip())
+    return pending, len(rows) - pending
+
+
 def snapshot():
     try:
         con = ro_connect()
@@ -37,9 +47,7 @@ def snapshot():
         raise SystemExit(f"can't read {db_path()} — is CALIBRE_LIBRARY correct? ({e})")
     pending = to_stamp = 0
     if os.path.exists(classify.PROP):
-        for r in csv.DictReader(open(classify.PROP)):
-            if r.get("added_tags", "").strip(): pending += 1     # books that will gain tags
-            else: to_stamp += 1                                  # no-match books awaiting a stamp (so they aren't re-sent)
+        pending, to_stamp = _proposal_counts(list(csv.DictReader(open(classify.PROP))))
     # cheap file-based signals of unfinished work, surfaced as menu hints
     candidates = 0
     if os.path.exists(classify.RANK):
@@ -147,9 +155,11 @@ def stage_classify():
     if not targets:
         ui.say("no candidates with usable text — nothing to send ✓", "green"); return
     while True:                                   # engine choice; 'compare' loops back after the bake-off table
-        opts, usable = [], {}
-        for i, (e, ok, hint) in enumerate(_engines(), 1):
-            usable[e] = ok
+        engs = _engines()                          # [(name, usable, hint)] — computed once, reused below
+        hints = {e: h for e, _, h in engs}
+        usable = {e: ok for e, ok, _ in engs}
+        opts = []
+        for i, (e, ok, hint) in enumerate(engs, 1):
             cost = classify.est_cost(len(targets), e)
             opts.append((str(i), e, f"{hint}  ·  {'free' if not cost else f'~${cost:.2f}'} for {len(targets)} books"))
         n_sample = min(5, len(targets))
@@ -158,10 +168,10 @@ def stage_classify():
         if k != "c":
             a.engine = dict((key, lbl) for key, lbl, _ in opts)[k]
             if not usable.get(a.engine):
-                ui.error(f"{a.engine} isn't usable here — {dict((e, h) for e, _, h in _engines())[a.engine]}")
+                ui.error(f"{a.engine} isn't usable here — {hints[a.engine]}")
                 continue
             break
-        engines = [e for e, ok, _ in _engines() if ok]
+        engines = [e for e, ok, _ in engs if ok]
         ui.say(f"comparing: {n_sample} books × {', '.join(engines)} (sequential — a minute or two)…", "dim")
         res = classify.bakeoff(a, targets, engines, n=n_sample)
         con = ro_connect(); titles = {b: t for b, t in con.execute("SELECT id, title FROM books")}; con.close()
@@ -282,13 +292,14 @@ def stage_promote():
            "(promote / alias / reject)")
     a = promote.normalize(promote.build_parser().parse_args([]))
     a.yes = True                                  # the wizard's confirm below replaces the CLI guards
-    opts, usable = [], {}
-    for i, (e, ok, hint) in enumerate(_engines(), 1):
-        usable[e] = ok; opts.append((str(i), e, hint))
+    engs = _engines()                             # computed once, reused for opts + the error hint
+    hints = {e: h for e, _, h in engs}
+    usable = {e: ok for e, ok, _ in engs}
+    opts = [(str(i), e, hint) for i, (e, ok, hint) in enumerate(engs, 1)]
     k = ui.menu("engine", opts, default="2")      # default claude; skip apple (too weak for this judgement)
     a.engine = dict((key, lbl) for key, lbl, _ in opts)[k]
     if not usable.get(a.engine):
-        ui.error(f"{a.engine} isn't usable here — {dict((e, h) for e, _, h in _engines())[a.engine]}"); return
+        ui.error(f"{a.engine} isn't usable here — {hints[a.engine]}"); return
     if a.engine == "apple":
         ui.say("note: on-device apple is weak at this reasoning — a cloud engine gives far better verdicts.", "yellow")
     if a.engine != "apple" and not ui.confirm(f"send {len(cands)} candidates to the {a.engine} API?"):
@@ -323,9 +334,9 @@ def stage_overrides():
         ui.say("no rejected changes logged — nothing to convert ✓", "green")
         ui.say("(reject deterministic changes in `apply --step` to feed this)", "dim")
         return
-    wrangle.build_overrides(do_apply=False)                    # dry-run preview (grouped by target file)
+    overrides.build_overrides(do_apply=False)                  # dry-run preview (grouped by target file)
     if ui.confirm("write these override lines to overrides/?", default=False):
-        wrangle.build_overrides(do_apply=True)
+        overrides.build_overrides(do_apply=True)
         ui.say("done ✓", "green")
     else:
         ui.say("(previewed only — nothing written)", "dim")

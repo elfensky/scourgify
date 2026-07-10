@@ -25,7 +25,7 @@ def _desanitize(s):
     return s.lstrip("=+-@ ").strip()
 
 
-def parse_decision(text):
+def parse_decision(text: str) -> dict | None:
     m = re.search(r"\{.*\}", text or "", re.S)
     if not m: return None
     try: obj = json.loads(m.group(0))
@@ -41,7 +41,7 @@ def parse_decision(text):
             "reason": reason, "confidence": conf}
 
 
-def shortlist(tag, existing=None, n=15):
+def shortlist(tag: str, existing: list | None = None, n: int = 15) -> list:
     existing = existing_terms() if existing is None else existing
     elow = {e.lower(): e for e in existing}
     return [elow[k] for k in difflib.get_close_matches(tag.lower(), list(elow), n=n, cutoff=0.0)]
@@ -59,14 +59,14 @@ def _ctx(cand, near):
             f"EXAMPLE BOOKS THAT USED IT: {ex}\n")
 
 
-def advocate_prompt(cand, near):
+def advocate_prompt(cand: dict, near: list) -> str:
     return ("You curate a controlled fanfiction tag vocabulary. Decide whether this NEW candidate tag "
             "should be PROMOTED (a genuinely new, reusable trope/theme not covered by an existing tag), "
             "ALIASED to one of the existing tags (same meaning, different words), or REJECTED "
             "(plot-specific, a character/fandom name, or noise).\n\n" + _ctx(cand, near) + "\n" + _SCHEMA)
 
 
-def skeptic_prompt(cand, proposed, near):
+def skeptic_prompt(cand: dict, proposed: dict, near: list) -> str:
     return ("You are a SKEPTIC. Another curator proposed the verdict below. Try to REFUTE a promote: "
             "is there an existing master tag that already covers this candidate (=> alias), or is it "
             "plot-specific / a character or fandom name / noise (=> reject)? Default to skeptical when "
@@ -79,7 +79,7 @@ def _ledger_tags(path):
     return {r["tag"] for r in csv.DictReader(open(path))}
 
 
-def candidates(ranked_path=RANK, proposal_path=PROP, ledger_path=LEDGER):
+def candidates(ranked_path: str = RANK, proposal_path: str = PROP, ledger_path: str = LEDGER) -> list:
     if not os.path.exists(ranked_path):
         raise SystemExit(f"no candidates ({os.path.basename(ranked_path)} not found — run a classify pass first).")
     decided = _ledger_tags(ledger_path)
@@ -115,7 +115,7 @@ def _finalize(base, dec, existing):
     return {**base, **dec}
 
 
-def decide(cand, ask, verify_ask=None, existing=None):
+def decide(cand: dict, ask, verify_ask=None, existing: list | None = None) -> dict:
     if existing is None: existing = existing_terms()
     near = shortlist(cand["tag"], existing)
     base = {"tag": cand["tag"], "count": cand.get("count", 0)}
@@ -148,8 +148,8 @@ def _append_row(path, header, row, delim=","):
         w.writerow(row)
 
 
-def apply_decisions(review_path=REVIEW, vocab_path=None, tropes_path=None,
-                    aliases_path=ALIASES, ledger_path=LEDGER):
+def apply_decisions(review_path: str = REVIEW, vocab_path: str | None = None, tropes_path: str | None = None,
+                    aliases_path: str = ALIASES, ledger_path: str = LEDGER) -> dict:
     vocab_path = vocab_path or os.path.join(os.getcwd(), "overrides", "classify_vocab.txt")
     tropes_path = tropes_path or os.path.join(os.getcwd(), "overrides", "tropes.csv")
     if not os.path.exists(review_path):
@@ -183,7 +183,7 @@ def apply_decisions(review_path=REVIEW, vocab_path=None, tropes_path=None,
 # So promoting/aliasing a candidate grows the vocab but leaves the source books un-tagged (and they're
 # stamped #wrangled, so --incremental skips them). Backfill closes that loop deterministically — no LLM —
 # by reading the book↔proposed_new record kept in the (archived) proposals and the ledger's verdicts.
-def resolve_ledger(rows):
+def resolve_ledger(rows: list) -> dict:
     """[{tag,verdict,target}] -> {candidate_lower: tag_to_apply}. promote->itself, alias->target, reject->skip."""
     res = {}
     for r in rows:
@@ -194,7 +194,7 @@ def resolve_ledger(rows):
     return res
 
 
-def backfill_wanted(resolution, proposal_rows):
+def backfill_wanted(resolution: dict, proposal_rows: list) -> dict:
     """resolution + proposal rows [{book_id, proposed_new}] -> {book_id:int : set(tags to apply)}. Pure."""
     want = collections.defaultdict(set)
     for r in proposal_rows:
@@ -213,7 +213,7 @@ def _proposal_files():
     return fs
 
 
-def backfill_plan(ledger_path=LEDGER):
+def backfill_plan(ledger_path: str = LEDGER) -> tuple[dict, dict]:
     """-> (chg {str(book): sorted full tag set}, adds {book:int : set(new tags)}) for books that
     should carry a promoted/aliased tag but don't yet. Reads the ledger + all proposals + live tags."""
     if not os.path.exists(ledger_path):
@@ -231,14 +231,18 @@ def backfill_plan(ledger_path=LEDGER):
     return chg, adds
 
 
-def backfill(yes=False):
+def backfill(yes: bool = False) -> int:
     """CLI entry: preview, confirm, then write the promoted/aliased tags onto their source books."""
     chg, adds = backfill_plan()
     if not chg:
         print("backfill: nothing to do — source books already carry their promoted tags ✓"); return 0
     total = sum(len(v) for v in adds.values())
     print(f"backfill: {len(chg)} book(s) gain {total} promoted/aliased tag-assignment(s), e.g.:")
-    for b in list(adds)[:8]: print(f"  #{b}: + {', '.join(sorted(adds[b]))}")
+    preview = list(adds)[:8]
+    con = ro_connect()
+    titles = dict(con.execute(f"SELECT id, title FROM books WHERE id IN ({','.join('?' * len(preview))})", preview)) if preview else {}
+    con.close()
+    for b in preview: print(f"  #{b} {str(titles.get(b, ''))[:50]}: + {', '.join(sorted(adds[b]))}")
     if len(adds) > 8: print(f"  … +{len(adds) - 8} more books")
     if not yes:
         import sys
@@ -254,7 +258,8 @@ def backfill(yes=False):
 REVIEW_COLS = ["tag", "count", "verdict", "target", "reason", "confidence", "contested"]
 
 
-def run(a, ranked_path=RANK, proposal_path=PROP, review_path=REVIEW, existing=None):
+def run(a: argparse.Namespace, ranked_path: str = RANK, proposal_path: str = PROP,
+        review_path: str = REVIEW, existing: list | None = None) -> None:
     if os.path.exists(review_path) and not getattr(a, "yes", False):
         raise SystemExit(f"a pending review exists at {review_path} — apply it (scourgify promote --apply), "
                          f"delete it, or re-run with --yes to overwrite.")
@@ -282,7 +287,7 @@ def run(a, ranked_path=RANK, proposal_path=PROP, review_path=REVIEW, existing=No
           f"-> {os.path.basename(review_path)} (review, then `scourgify promote --apply`)")
 
 
-def build_parser():
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Adversarially decide promote/alias/reject for classify's proposed-new tags.")
     p.add_argument("--engine", default="claude", choices=sorted(ENGINES))
     p.add_argument("--verify-with", default="", choices=[""] + sorted(ENGINES),
@@ -299,13 +304,13 @@ def build_parser():
     return p
 
 
-def normalize(a):
+def normalize(a: argparse.Namespace) -> argparse.Namespace:
     library()                                       # fail fast with the clear CALIBRE_LIBRARY message
     os.makedirs(DATA, exist_ok=True)
     return a
 
 
-def main():
+def main() -> None:
     a = normalize(build_parser().parse_args())
     if a.apply:
         apply_decisions()

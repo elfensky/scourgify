@@ -27,3 +27,8 @@ classify_state.json
 # build artifacts
 /dist/
 *.egg-info/
+
+# tool state (desloppify scan/plan state + scorecard; octopus scratch)
+.desloppify/
+.claude-octopus/
+scorecard.png

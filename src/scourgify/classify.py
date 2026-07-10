@@ -38,17 +38,25 @@ FAIL = f"{DATA}/classify_failures.csv"
 AO3_VOCAB = f"{DATA}/ao3_vocab.csv"     # per-library canonical AO3 freeforms (name,uses); absent on fresh installs
 SPEND_GATE = 200        # cloud runs above this many books require an explicit yes
 DEDUP_CUTOFF = 0.86     # difflib ratio at/above which a proposed tag counts as a variant of an existing one
+ERR_TRUNC = 140         # chars kept when recording an engine error (same width in bakeoff table and failures CSV)
 
 # $/MTok (input, output) for each engine's default model — public list prices as of 2026-07; edit when they change.
 PRICING = {"apple": (0.0, 0.0), "claude": (1.00, 5.00), "openai": (0.15, 0.60), "gemini": (0.30, 2.50), "mistral": (0.20, 0.60)}
 
 _VOCAB = None
-def load_vocab():
-    """Bundled vocab + optional CWD overrides/classify_vocab.txt (a line appends a term; '-term' removes one).
-    Lazy so a packaging problem gives a real error at use, not at import, and installed users can override."""
+def _read_vocab_file(path: str) -> list:
+    return [l.strip() for l in open(path) if l.strip() and not l.startswith("#")] if os.path.exists(path) else []
+
+def load_vocab() -> list:
+    """Curated core ∪ AO3 high-frequency seed, then optional CWD overrides/classify_vocab.txt (a line appends
+    a term; '-term' removes one — and can trim a seeded term too). Lazy so a packaging problem gives a real
+    error at use, not at import, and installed users can override. See build_classify_seed.py for the seed."""
     global _VOCAB
     if _VOCAB is None:
-        terms = [l.strip() for l in open(f"{HERE}/defaults/classify_vocab.txt") if l.strip() and not l.startswith("#")]
+        terms, have = [], set()                                                   # curated core first, then AO3 seed;
+        for t in (_read_vocab_file(f"{HERE}/defaults/classify_vocab.txt")          # first spelling of a norm wins,
+                  + _read_vocab_file(f"{HERE}/defaults/classify_vocab_ao3.txt")):  # so a hand-edit dup can't sneak in
+            if t.lower() not in have: terms.append(t); have.add(t.lower())
         ov = os.path.join(os.getcwd(), "overrides", "classify_vocab.txt")
         if os.path.exists(ov):
             for l in open(ov):
@@ -60,7 +68,7 @@ def load_vocab():
     return _VOCAB
 
 _ALIASES = None
-def load_aliases():
+def load_aliases() -> dict:
     """candidate -> target snaps from overrides/promote_aliases.csv (written by `scourgify promote --apply`),
     so tags we've decided are synonyms stop getting re-proposed as 'new'. {} if absent."""
     global _ALIASES
@@ -74,7 +82,7 @@ def load_aliases():
     return _ALIASES
 
 _AO3 = None
-def load_ao3_vocab():
+def load_ao3_vocab() -> list:
     """The per-library AO3 canonical freeforms (data/ao3_vocab.csv 'name' column, built by ao3_import.py).
     Absent on a fresh install — degrade to [] silently; it's an extra reference layer, not a requirement."""
     global _AO3
@@ -85,7 +93,7 @@ def load_ao3_vocab():
             _AO3 = []
     return _AO3
 
-def existing_terms():
+def existing_terms() -> list:
     """The reference a proposed-new tag is checked against: curated vocab ∪ ao3_vocab.csv, deduped
     case-insensitively with the curated spelling winning on collision (~1,450 terms — trivial for difflib)."""
     seen, out = set(), []
@@ -94,14 +102,14 @@ def existing_terms():
             seen.add(t.lower()); out.append(t)
     return out
 
-def est_cost(n_books, engine):
+def est_cost(n_books: int, engine: str) -> float:
     """Rough list-price $ estimate for a run: input ≈ prompt chars/4 tokens, output ≈ 80 tokens/book."""
     i, o = PRICING.get(engine, (0.0, 0.0))
     tokens_in = (len(", ".join(load_vocab())) + 1900) / 4      # vocab + 1500-char description + instructions
     return n_books * (tokens_in * i + 80 * o) / 1e6
 
 
-def prompt_for(desc, maxtags):
+def prompt_for(desc: str, maxtags: int) -> str:
     return ("You are tagging a fanfiction story. Return ONLY a JSON object with two arrays:\n"
             f'  "tags": tags from the CONTROLLED LIST below that clearly apply (exact spelling, at most {maxtags}; '
             "be conservative; [] if vague; do NOT echo the whole list).\n"
@@ -109,7 +117,7 @@ def prompt_for(desc, maxtags):
             "list and would be worth adding to the vocabulary. No plot specifics, character names, or fandoms; [] if none.\n"
             f"CONTROLLED LIST: {', '.join(load_vocab())}\n\nDESCRIPTION:\n{desc[:1500]}\n\nJSON:")
 
-def parse_resp(text, maxtags=6, cutoff=DEDUP_CUTOFF):
+def parse_resp(text: str, maxtags: int = 6, cutoff: float = DEDUP_CUTOFF) -> tuple[list[str], list[str]]:
     m = re.search(r"\{.*\}", text, re.S)
     if not m: return [], []
     try: obj = json.loads(m.group(0))
@@ -137,7 +145,7 @@ def parse_resp(text, maxtags=6, cutoff=DEDUP_CUTOFF):
     return vt[:maxtags], nt[:3]
 
 
-def annotate_new(ranked, cutoff=DEDUP_CUTOFF, existing=None):
+def annotate_new(ranked, cutoff: float = DEDUP_CUTOFF, existing: list | None = None) -> list:
     """Smart review rows for the proposed-new tags: for each, its nearest existing tag
     (curated vocab ∪ ao3_vocab.csv) + similarity + verdict. Genuinely-new first (by count), near-dupes last.
     Pure (pass `existing` in tests) — this is the once-per-run matching against the full reference."""
@@ -231,10 +239,24 @@ class Mistral:
         return json.load(urllib.request.urlopen(req, timeout=self.timeout))["choices"][0]["message"]["content"]
 
 ENGINES = {"apple": Apple, "claude": Claude, "openai": OpenAI, "gemini": Gemini, "mistral": Mistral}
+# env var(s) each cloud engine's key is read from (apple is on-device, no key). Single source of truth —
+# wizard.ENGINE_KEYS aliases this so the two can never disagree about which key powers which engine.
+ENGINE_ENV = {"claude": ("ANTHROPIC_API_KEY",), "openai": ("OPENAI_API_KEY",),
+              "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"), "mistral": ("MISTRAL_API_KEY",)}
+
+def usable_engines() -> list:
+    """Engines runnable here right now: apple needs the afm binary or a swift toolchain, cloud engines a key."""
+    import shutil
+    out = []
+    for e in ENGINES:
+        if e == "apple":
+            if os.path.exists(f"{HERE}/afm") or shutil.which("swift"): out.append(e)
+        elif any(os.environ.get(k) for k in ENGINE_ENV[e]): out.append(e)
+    return out
 
 
 # ---- live run display ----
-def sparkline(vals, width=28):
+def sparkline(vals: list, width: int = 28) -> str:
     """Unicode sparkline of a numeric series (last `width` points), scaled to its max."""
     vals = [v for v in vals][-width:]
     if not vals: return ""
@@ -304,7 +326,7 @@ class _Dashboard:
 
 
 # ---- apply: 'added_tags' + stamp #wrangled — standalone, no LLM calls ----
-def apply_proposal():
+def apply_proposal() -> None:
     if not os.path.exists(PROP):
         raise SystemExit(f"no proposal to apply ({os.path.basename(PROP)} not found — run a classify pass first).")
     con = ro_connect()
@@ -337,7 +359,7 @@ def _write_prop(rows):
         for r in rows: w.writerow({k: r.get(k, "") for k in PROP_COLS})
 
 
-def apply_proposal_step():
+def apply_proposal_step() -> None:
     """1-by-1 review of the proposal: each book's proposed tags as a checklist. Accepted tags are
     applied + the book stamped; rejected tags are dropped and logged (class=ai, a hallucination filter,
     NOT a rule bug). Skip/quit leave a book's row pending in the proposal for a later run."""
@@ -373,9 +395,9 @@ def apply_proposal_step():
 
 
 # ---- gather books (read-only) ----
-def strip_html(s): return re.sub(r"<[^>]+>", " ", s or "").strip()
+def strip_html(s: str | None) -> str: return re.sub(r"<[^>]+>", " ", s or "").strip()
 
-def book_text(path, limit=6000):
+def book_text(path: str | None, limit: int = 6000) -> str:
     if not path or not os.path.exists(path): return ""
     if path.lower().endswith(".epub"):                  # fast path: epub is a zip of XHTML
         import zipfile
@@ -397,7 +419,7 @@ def book_text(path, limit=6000):
             return re.sub(r"\s+", " ", open(o, errors="ignore").read()).strip()[:limit] if os.path.exists(o) else ""
     except Exception: return ""
 
-def gather(a):
+def gather(a: argparse.Namespace) -> tuple:
     """-> (targets [(book, text)], titles, needs). Scope comes from the flags, first match wins:
     --incremental / --last N / --since DATE select ONLY matching books (newest-added-first);
     bare classify keeps the sparse mode (fewer than --min-tags tags). `needs(b)` is True for
@@ -434,7 +456,7 @@ def gather(a):
     return kept, titles, needs
 
 
-def bakeoff(a, targets, engines, n=5):
+def bakeoff(a: argparse.Namespace, targets: list, engines: list, n: int = 5) -> dict:
     """The same n sample books through each engine, sequentially — for comparing output quality
     before committing to a full run. -> {book: {engine: (vocab_tags, new_tags, err)}}.
     Display-only: never touches the proposal CSV."""
@@ -445,27 +467,27 @@ def bakeoff(a, targets, engines, n=5):
             try:
                 vt, nt = parse_resp(eng.ask(prompt_for(d, a.max_tags)), a.max_tags, a.dedup_cutoff); err = ""
             except Exception as ex:
-                vt, nt, err = [], [], f"{type(ex).__name__}: {ex}"[:60]
+                vt, nt, err = [], [], f"{type(ex).__name__}: {ex}"[:ERR_TRUNC]
             out.setdefault(b, {})[e] = (vt, nt, err)
     return out
 
 
-def ask_retry(eng, prompt, tries=4):
+def ask_retry(eng, prompt: str, tries: int = 4) -> tuple[str, str]:
     """Call eng.ask(prompt) with backoff. -> (text, "") on success; ("", reason) on failure.
     RuntimeError = deterministic content block (no retry); other errors retry with 2**k backoff."""
     err = ""
     for k in range(tries):
         try: return eng.ask(prompt), ""
         except RuntimeError as e:
-            return "", str(e)[:140]
+            return "", str(e)[:ERR_TRUNC]
         except Exception as e:
-            err = f"{type(e).__name__}: {e}"[:140]
+            err = f"{type(e).__name__}: {e}"[:ERR_TRUNC]
             if k == tries - 1: return "", err
             time.sleep(2 ** k)
     return "", err
 
 
-def classify_run(a):
+def classify_run(a: argparse.Namespace) -> None:
     targets, titles, needs = gather(a)
     print(f"engine={a.engine}  candidate books: {len(targets)}")
 
@@ -553,7 +575,7 @@ def classify_run(a):
     print("\nApply vocab tags with: scourgify classify --apply   (Calibre closed)")
 
 
-def build_parser():
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Content-based tagging from a controlled vocabulary (LLM engines; dry-run until --apply).")
     p.add_argument("--engine", default="apple", choices=sorted(ENGINES), help="apple = on-device, free (default)")
     p.add_argument("--apply", action="store_true", help="apply 'added_tags' from the proposal + stamp #wrangled (Calibre closed)")
@@ -572,19 +594,42 @@ def build_parser():
     p.add_argument("--model", default="", help="override the per-engine default model")
     p.add_argument("--timeout", type=int, default=60, metavar="S", help="per-request HTTP timeout")
     p.add_argument("--text-fallback", action="store_true", help="sample the book's own prose when the description is thin")
+    p.add_argument("--bakeoff", action="store_true", help="compare a few sample books across every usable engine, then exit (no proposal written)")
     p.add_argument("--yes", "-y", action="store_true", help="skip the large-cloud-run confirmation")
     return p
 
-def normalize(a):
+def normalize(a: argparse.Namespace) -> argparse.Namespace:
     """Post-parse invariants shared by the CLI and the wizard."""
     if a.engine == "apple": a.workers = 1        # apple = one subprocess pipe, not thread-safe
     library()                                    # fail fast with a clear message
     os.makedirs(DATA, exist_ok=True)
     return a
 
-def main():
+def bakeoff_cli(a: argparse.Namespace) -> None:
+    """`scourgify classify --bakeoff`: the same sample-books-across-engines comparison the wizard offers,
+    display-only (never writes the proposal). Plain text — works with or without rich."""
+    a.text_fallback = True                         # thin descriptions sample the book text, like the wizard's compare
+    targets, titles, _ = gather(a)
+    if not targets:
+        print("no candidate books with usable text — nothing to compare."); return
+    engs = usable_engines()
+    if not engs:
+        print("no usable engines — set an API key (ANTHROPIC/OPENAI/GEMINI/MISTRAL) or install the afm/swift toolchain."); return
+    n = min(5, len(targets))
+    print(f"bake-off: {n} sample book(s) × {', '.join(engs)} (sequential — a minute or two)…\n")
+    res = bakeoff(a, targets, engs, n=n)
+    for b, per in res.items():
+        print(f"#{b}  {str(titles.get(b, ''))[:60]}")
+        for e in engs:
+            vt, nt, err = per.get(e, ([], [], "—"))
+            body = err if err else (", ".join(vt) or "(none)") + (f"   +new: {', '.join(nt)}" if nt else "")
+            print(f"    {e:8} {body}")
+        print()
+
+def main() -> None:
     a = normalize(build_parser().parse_args())
-    if a.apply: apply_proposal_step() if a.step else apply_proposal()
+    if a.bakeoff: bakeoff_cli(a)
+    elif a.apply: apply_proposal_step() if a.step else apply_proposal()
     else: classify_run(a)
 
 

@@ -7,7 +7,9 @@ import os, sys, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 from scourgify import common
 from scourgify.common import norm, ascii_fold, load_config
-from scourgify.wrangle import transform, resolve_trope_chains, build_tagcanon, is_junk
+from scourgify.wrangle import (transform, resolve_trope_chains, build_tagcanon, is_junk,
+                               tag_loss_guard, data_loss_guard,
+                               TAG_SHRINK_FLOOR, TAG_SHRINK_FRACTION)
 from scourgify.classify import parse_resp, sparkline, load_vocab
 VOCAB = load_vocab()
 from scourgify.staleness import derive
@@ -50,6 +52,24 @@ def test_transform_character_fold():
     m = maps(char={"Harry P.": "Harry Potter"})
     nd, _, lc = transform({"characters": ["Harry P."]}, m, BEH)
     assert nd["characters"] == ["Harry Potter"] and not lc
+
+def test_transform_character_fold_is_case_insensitive():
+    # load_maps adds norm-keyed aliases; a book value that differs only in casing/punctuation still folds
+    m = maps(char={"harry p": "Harry Potter"})                 # norm-keyed (as the alias load_maps adds)
+    nd, _, lc = transform({"characters": ["HARRY P."]}, m, BEH)
+    assert nd["characters"] == ["Harry Potter"] and not lc
+
+def test_transform_trope_fold_is_case_insensitive():
+    m = maps(trope={"fix it": ("Fix-It", "tag")})              # norm-keyed
+    nd, _, _ = transform({"tags": ["Fix It!"]}, m, BEH)
+    assert "Fix-It" in nd["tags"]
+
+def test_load_maps_adds_norm_aliases_for_char_and_trope():
+    from scourgify.wrangle import load_maps
+    m = load_maps(load_config(path="/nonexistent/config.toml"))
+    for name in ("char", "trope"):
+        raw = next(k for k in list(m[name]) if k != norm(k))   # a key not already in normal form
+        assert norm(raw) in m[name]                            # ... has a norm-keyed alias
 
 def test_transform_genre_split_and_allowlist():
     m = maps(gsplit={"Action/Adventure": ["Action", "Adventure"]}, gallow={"action", "adventure"})
@@ -144,6 +164,28 @@ def test_annotate_new_verdict_split():
     assert by["Dragon Politics"][4] == "new"                          # no close match -> genuinely new
     assert rows[0][4] == "new"                                        # new sorted ahead of near-duplicates
 
+def test_vocab_merges_ao3_seed_without_dups():
+    # load_vocab = hand-curated core ∪ frequency-gated AO3 seed, deduped case-insensitively (issue #8)
+    assert "Self-Insert" in VOCAB                                   # a curated-core trope survives
+    assert "Established Relationship" in VOCAB                      # a high-frequency AO3 seed term is merged in
+    assert len(VOCAB) == len({t.lower() for t in VOCAB})           # no case-insensitive duplicates after the merge
+    assert len(VOCAB) > 200                                         # the seed meaningfully broadens the tiny core
+
+def test_usable_engines_reflects_env_keys():
+    from scourgify.classify import usable_engines, ENGINE_ENV
+    saved = {k: os.environ.get(k) for keys in ENGINE_ENV.values() for k in keys}
+    try:
+        for keys in ENGINE_ENV.values():
+            for k in keys: os.environ.pop(k, None)
+        assert "claude" not in usable_engines()                        # no key -> engine not offered
+        os.environ["ANTHROPIC_API_KEY"] = "sk-test"
+        assert "claude" in usable_engines()                            # key present -> offered
+    finally:
+        for keys in ENGINE_ENV.values():
+            for k in keys: os.environ.pop(k, None)
+        for k, v in saved.items():
+            if v is not None: os.environ[k] = v
+
 def test_sparkline():
     assert sparkline([]) == ""
     assert sparkline([0, 0]) == "▁▁"                                   # flat zero series doesn't divide by zero
@@ -192,7 +234,7 @@ def test_est_cost():
 
 # ---- 1-by-1 step review: reconstruct + rejects → overrides ----
 def test_reconstruct_reverts_only_rejected():
-    from scourgify.wrangle import reconstruct
+    from scourgify.overrides import reconstruct
     nd = {"#fandoms": ["Naruto (anime)"]}; orig = {"#fandoms": ["Naruto"]}
     rename = ("rename", "#fandoms", "Naruto", "Naruto (anime)")
     assert reconstruct(nd, orig, []) == {"#fandoms": ["Naruto (anime)"]}   # accept all -> full change stands
@@ -205,7 +247,7 @@ def test_reconstruct_reverts_only_rejected():
                        [("move", "#genres → tags", "Fluffy", "")]) == {}
 
 def test_reconstruct_keeps_accepted_alongside_rejected():
-    from scourgify.wrangle import reconstruct
+    from scourgify.overrides import reconstruct
     nd = {"#fandoms": ["Naruto (anime)"], "tags": []}
     orig = {"#fandoms": ["Naruto"], "tags": ["WIP"]}
     # reject the fandom rename, keep the tag drop
@@ -213,7 +255,7 @@ def test_reconstruct_keeps_accepted_alongside_rejected():
     assert net == {"tags": []}                                            # fandom reverted (==orig, unwritten); drop kept
 
 def test_synth_reject_auto_kinds():
-    from scourgify.wrangle import synth_reject
+    from scourgify.overrides import synth_reject
     assert synth_reject("fandoms", "rename", "Naruto", "Naruto (anime)") == ("auto", [("fandoms.csv", "Naruto,Naruto")], "")
     assert synth_reject("characters", "rename", "Harry P.", "Harry Potter") == ("auto", [("characters.csv", "Harry P.,Harry P.,")], "")
     cls, actions, _ = synth_reject("genres", "rename", "Angsty", "Angst")
@@ -222,7 +264,7 @@ def test_synth_reject_auto_kinds():
     assert synth_reject("genres", "move", "Fluffy", "", dest="tags") == ("auto", [("genres_allow.txt", "Fluffy")], "")
 
 def test_synth_reject_manual_kinds():
-    from scourgify.wrangle import synth_reject
+    from scourgify.overrides import synth_reject
     assert synth_reject("tags", "drop", "WIP", "")[0] == "manual"             # junk/redundancy drop
     assert synth_reject("tags", "add", "", "Time Travel")[0] == "manual"      # injected value
     assert synth_reject("characters", "move", "Akeno", "", dest="tags")[0] == "manual"   # cross-column rescue
@@ -258,6 +300,51 @@ def test_synth_identity_override_is_a_noop_in_transform():
     assert transform({"fandoms": ["Naruto"]}, maps(fan=flatten(fan)), BEH)[0]["fandoms"] == ["Naruto"]
     char = {"Harry P.": "Harry Potter"}; char.update({"Harry P.": "Harry P."})
     assert transform({"characters": ["Harry P."]}, maps(char=char), BEH)[0]["characters"] == ["Harry P."]
+
+
+# ---- SAFETY guardrails (pure; CLAUDE.md invariants) ----
+def test_tag_loss_guard_ceiling():
+    # just under the ceiling: never aborts (need BOTH >floor lost AND >fraction shrink)
+    tag_loss_guard(1000, 1000 - TAG_SHRINK_FLOOR, force=False)          # exactly floor lost -> ok
+    tag_loss_guard(100, 0, force=False)                                 # 100% shrink but < floor lost -> ok
+    # over the ceiling: aborts
+    try:
+        tag_loss_guard(1000, 1000 - (TAG_SHRINK_FLOOR + int(1000 * TAG_SHRINK_FRACTION)), force=False)
+        assert False, "expected SystemExit on mass tag deletion"
+    except SystemExit:
+        pass
+    # --force overrides, and tags_before == 0 is a no-op
+    tag_loss_guard(1000, 0, force=True)
+    tag_loss_guard(0, 0, force=False)
+
+def test_data_loss_guard_aborts_on_last_value_lost():
+    data_loss_guard(0, 0, force=False)                                  # nothing lost -> ok
+    for lf, lc in ((1, 0), (0, 1), (2, 3)):
+        try:
+            data_loss_guard(lf, lc, force=False)
+            assert False, f"expected SystemExit for lost_fandom={lf} lost_char={lc}"
+        except SystemExit as e:
+            assert "lose their last" in str(e)
+        data_loss_guard(lf, lc, force=True)                            # --force overrides the abort
+
+def test_transform_flags_a_book_that_loses_its_last_fandom():
+    # the whole point of the guard: a fanfic always has a fandom, so ending with zero is a loss.
+    _, lf, _ = transform({"fandoms": ["Naruto"]}, maps(fan={"Naruto": ""}), BEH)   # alias -> "" (typo)
+    assert lf is True
+    m = maps(decompose={norm("Fate SI"): {"fandoms": [], "characters": [], "tags": [], "genres": []}})
+    _, lf, _ = transform({"fandoms": ["Fate SI"]}, m, BEH)                          # decompose -> empty payload
+    assert lf is True
+
+def test_transform_does_not_flag_relocation_or_normal_routing():
+    # a blocklisted non-fandom moved to tags is preserved -> NOT a loss
+    _, lf, _ = transform({"fandoms": ["Explicit"]}, maps(fan_block={norm("Explicit")}), BEH)
+    assert lf is False
+    # a plain rename keeps the fandom -> NOT a loss
+    _, lf, _ = transform({"fandoms": ["HP"]}, maps(fan={"HP": "Harry Potter"}), BEH)
+    assert lf is False
+    # a book with no fandom to begin with can't lose one
+    _, lf, _ = transform({"tags": ["WIP"]}, maps(), BEH)
+    assert lf is False
 
 
 if __name__ == "__main__":
