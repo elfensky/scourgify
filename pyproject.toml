@@ -58,3 +58,18 @@ name = "testpypi"
 url = "https://test.pypi.org/simple/"
 publish-url = "https://test.pypi.org/legacy/"
 explicit = true
+
+# Bandit security scan (run: `bandit -c pyproject.toml -r src/scourgify`). The skipped
+# checks were each reviewed and are safe for this tool's threat model — a single-user,
+# local CLI with NO network/web input surface (the only inputs are the user's own Calibre
+# metadata.db and their own override files; there is no attacker-controlled input):
+#   B404/B603/B607 — subprocess: fixed argv lists to trusted tools (calibre-debug,
+#                    ebook-convert, swift, the local afm binary); never shell=True.
+#   B310           — urllib: hardcoded https:// LLM-API endpoint literals; the scheme is
+#                    constant, so file:/custom-scheme abuse is impossible.
+#   B608           — SQL: queries interpolate only `?,?,?` placeholders (values bound as
+#                    params) or a schema-derived integer column id — never user text.
+#   B112           — the try/except/continue in calibre_open() is a best-effort pgrep/ps
+#                    probe that intentionally falls through and fails CLOSED (see the code).
+[tool.bandit]
+skips = ["B404", "B603", "B607", "B310", "B608", "B112"]
