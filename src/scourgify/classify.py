@@ -44,7 +44,7 @@ ERR_TRUNC = 140         # chars kept when recording an engine error (same width 
 PRICING = {"apple": (0.0, 0.0), "claude": (1.00, 5.00), "openai": (0.15, 0.60), "gemini": (0.30, 2.50), "mistral": (0.20, 0.60)}
 
 _VOCAB = None
-def load_vocab():
+def load_vocab() -> list:
     """Bundled vocab + optional CWD overrides/classify_vocab.txt (a line appends a term; '-term' removes one).
     Lazy so a packaging problem gives a real error at use, not at import, and installed users can override."""
     global _VOCAB
@@ -61,7 +61,7 @@ def load_vocab():
     return _VOCAB
 
 _ALIASES = None
-def load_aliases():
+def load_aliases() -> dict:
     """candidate -> target snaps from overrides/promote_aliases.csv (written by `scourgify promote --apply`),
     so tags we've decided are synonyms stop getting re-proposed as 'new'. {} if absent."""
     global _ALIASES
@@ -75,7 +75,7 @@ def load_aliases():
     return _ALIASES
 
 _AO3 = None
-def load_ao3_vocab():
+def load_ao3_vocab() -> list:
     """The per-library AO3 canonical freeforms (data/ao3_vocab.csv 'name' column, built by ao3_import.py).
     Absent on a fresh install — degrade to [] silently; it's an extra reference layer, not a requirement."""
     global _AO3
@@ -86,7 +86,7 @@ def load_ao3_vocab():
             _AO3 = []
     return _AO3
 
-def existing_terms():
+def existing_terms() -> list:
     """The reference a proposed-new tag is checked against: curated vocab ∪ ao3_vocab.csv, deduped
     case-insensitively with the curated spelling winning on collision (~1,450 terms — trivial for difflib)."""
     seen, out = set(), []
@@ -95,14 +95,14 @@ def existing_terms():
             seen.add(t.lower()); out.append(t)
     return out
 
-def est_cost(n_books, engine):
+def est_cost(n_books: int, engine: str) -> float:
     """Rough list-price $ estimate for a run: input ≈ prompt chars/4 tokens, output ≈ 80 tokens/book."""
     i, o = PRICING.get(engine, (0.0, 0.0))
     tokens_in = (len(", ".join(load_vocab())) + 1900) / 4      # vocab + 1500-char description + instructions
     return n_books * (tokens_in * i + 80 * o) / 1e6
 
 
-def prompt_for(desc, maxtags):
+def prompt_for(desc: str, maxtags: int) -> str:
     return ("You are tagging a fanfiction story. Return ONLY a JSON object with two arrays:\n"
             f'  "tags": tags from the CONTROLLED LIST below that clearly apply (exact spelling, at most {maxtags}; '
             "be conservative; [] if vague; do NOT echo the whole list).\n"
@@ -138,7 +138,7 @@ def parse_resp(text: str, maxtags: int = 6, cutoff: float = DEDUP_CUTOFF) -> tup
     return vt[:maxtags], nt[:3]
 
 
-def annotate_new(ranked, cutoff=DEDUP_CUTOFF, existing=None):
+def annotate_new(ranked, cutoff: float = DEDUP_CUTOFF, existing: list | None = None) -> list:
     """Smart review rows for the proposed-new tags: for each, its nearest existing tag
     (curated vocab ∪ ao3_vocab.csv) + similarity + verdict. Genuinely-new first (by count), near-dupes last.
     Pure (pass `existing` in tests) — this is the once-per-run matching against the full reference."""
@@ -235,7 +235,7 @@ ENGINES = {"apple": Apple, "claude": Claude, "openai": OpenAI, "gemini": Gemini,
 
 
 # ---- live run display ----
-def sparkline(vals, width=28):
+def sparkline(vals: list, width: int = 28) -> str:
     """Unicode sparkline of a numeric series (last `width` points), scaled to its max."""
     vals = [v for v in vals][-width:]
     if not vals: return ""
@@ -305,7 +305,7 @@ class _Dashboard:
 
 
 # ---- apply: 'added_tags' + stamp #wrangled — standalone, no LLM calls ----
-def apply_proposal():
+def apply_proposal() -> None:
     if not os.path.exists(PROP):
         raise SystemExit(f"no proposal to apply ({os.path.basename(PROP)} not found — run a classify pass first).")
     con = ro_connect()
@@ -338,7 +338,7 @@ def _write_prop(rows):
         for r in rows: w.writerow({k: r.get(k, "") for k in PROP_COLS})
 
 
-def apply_proposal_step():
+def apply_proposal_step() -> None:
     """1-by-1 review of the proposal: each book's proposed tags as a checklist. Accepted tags are
     applied + the book stamped; rejected tags are dropped and logged (class=ai, a hallucination filter,
     NOT a rule bug). Skip/quit leave a book's row pending in the proposal for a later run."""
@@ -374,9 +374,9 @@ def apply_proposal_step():
 
 
 # ---- gather books (read-only) ----
-def strip_html(s): return re.sub(r"<[^>]+>", " ", s or "").strip()
+def strip_html(s: str | None) -> str: return re.sub(r"<[^>]+>", " ", s or "").strip()
 
-def book_text(path, limit=6000):
+def book_text(path: str | None, limit: int = 6000) -> str:
     if not path or not os.path.exists(path): return ""
     if path.lower().endswith(".epub"):                  # fast path: epub is a zip of XHTML
         import zipfile
@@ -398,7 +398,7 @@ def book_text(path, limit=6000):
             return re.sub(r"\s+", " ", open(o, errors="ignore").read()).strip()[:limit] if os.path.exists(o) else ""
     except Exception: return ""
 
-def gather(a):
+def gather(a: argparse.Namespace) -> tuple:
     """-> (targets [(book, text)], titles, needs). Scope comes from the flags, first match wins:
     --incremental / --last N / --since DATE select ONLY matching books (newest-added-first);
     bare classify keeps the sparse mode (fewer than --min-tags tags). `needs(b)` is True for
@@ -435,7 +435,7 @@ def gather(a):
     return kept, titles, needs
 
 
-def bakeoff(a, targets, engines, n=5):
+def bakeoff(a: argparse.Namespace, targets: list, engines: list, n: int = 5) -> dict:
     """The same n sample books through each engine, sequentially — for comparing output quality
     before committing to a full run. -> {book: {engine: (vocab_tags, new_tags, err)}}.
     Display-only: never touches the proposal CSV."""
@@ -451,7 +451,7 @@ def bakeoff(a, targets, engines, n=5):
     return out
 
 
-def ask_retry(eng, prompt, tries=4):
+def ask_retry(eng, prompt: str, tries: int = 4) -> tuple[str, str]:
     """Call eng.ask(prompt) with backoff. -> (text, "") on success; ("", reason) on failure.
     RuntimeError = deterministic content block (no retry); other errors retry with 2**k backoff."""
     err = ""
@@ -466,7 +466,7 @@ def ask_retry(eng, prompt, tries=4):
     return "", err
 
 
-def classify_run(a):
+def classify_run(a: argparse.Namespace) -> None:
     targets, titles, needs = gather(a)
     print(f"engine={a.engine}  candidate books: {len(targets)}")
 
@@ -554,7 +554,7 @@ def classify_run(a):
     print("\nApply vocab tags with: scourgify classify --apply   (Calibre closed)")
 
 
-def build_parser():
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Content-based tagging from a controlled vocabulary (LLM engines; dry-run until --apply).")
     p.add_argument("--engine", default="apple", choices=sorted(ENGINES), help="apple = on-device, free (default)")
     p.add_argument("--apply", action="store_true", help="apply 'added_tags' from the proposal + stamp #wrangled (Calibre closed)")
@@ -576,14 +576,14 @@ def build_parser():
     p.add_argument("--yes", "-y", action="store_true", help="skip the large-cloud-run confirmation")
     return p
 
-def normalize(a):
+def normalize(a: argparse.Namespace) -> argparse.Namespace:
     """Post-parse invariants shared by the CLI and the wizard."""
     if a.engine == "apple": a.workers = 1        # apple = one subprocess pipe, not thread-safe
     library()                                    # fail fast with a clear message
     os.makedirs(DATA, exist_ok=True)
     return a
 
-def main():
+def main() -> None:
     a = normalize(build_parser().parse_args())
     if a.apply: apply_proposal_step() if a.step else apply_proposal()
     else: classify_run(a)

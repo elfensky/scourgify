@@ -11,7 +11,7 @@ from scourgify.wrangle import read_csv, read_lines, transform
 
 
 # ---------------- 1-by-1 review (`--step`): reconstruct + rejects → overrides ----------------
-def _edit_label(kind, where, before, after):
+def _edit_label(kind: str, where: str, before: str, after: str) -> str:
     """A checklist display line for one unique edit (label-space `where`)."""
     body = {"rename": f"{before} → {after}", "move": f"{before}  → {where.split('→')[-1].strip()}",
             "drop": f"− {before} (dropped)", "add": f"+ {after}"}[kind]
@@ -19,7 +19,7 @@ def _edit_label(kind, where, before, after):
     return f"{col:<14} {body}"
 
 
-def reconstruct(nd_lab, orig_lab, rejected):
+def reconstruct(nd_lab: dict, orig_lab: dict, rejected: list) -> dict:
     """Revert only the rejected edits from the full transform result.
     nd_lab/orig_lab: {label: iterable of values} (new state / original). rejected: iterable of
     (kind, where, before, after) in label space (where='label', or 'src → dst' for a move).
@@ -46,7 +46,7 @@ _OV_HEADERS = {"fandoms.csv": "alias,canonical", "characters.csv": "variant,cano
                "genres_canon.csv": "variant,canonical", "tropes.csv": "variant,canonical,route"}
 
 
-def synth_reject(key, kind, before, after, dest=None):
+def synth_reject(key: str, kind: str, before: str, after: str, dest: str | None = None) -> tuple:
     """A wrangle reject -> how to suppress it. Returns (cls, actions, reason):
       cls='auto'   -> actions=[(override_file, line), ...] identity overrides to append.
       cls='manual' -> actions=[], reason=why it can't be an additive override (hand-edit).
@@ -68,7 +68,7 @@ def synth_reject(key, kind, before, after, dest=None):
     return "manual", [], reason
 
 
-def _reject_row(lab2key, b, title, kind, where, before, after):
+def _reject_row(lab2key: dict, b: int, title: str, kind: str, where: str, before: str, after: str) -> dict:
     """One rejects.csv row for a wrangle reject (class computed by the shared synth_reject)."""
     if "→" in where:
         src, dst = [x.strip() for x in where.split("→")]
@@ -81,7 +81,8 @@ def _reject_row(lab2key, b, title, kind, where, before, after):
             "column": col, "before": before, "after": after, "class": cls}
 
 
-def _step_walk(m, beh, cols, perbook, changes, unique, known_chars, tagcanon):
+def _step_walk(m: dict, beh: dict, cols: dict, perbook: dict, changes: dict,
+               unique: dict, known_chars, tagcanon: dict) -> list:
     """Interactive 1-by-1 review of the per-book UNIQUE edits. Mass folds are already baked into
     `changes` and never shown. Mutates `changes` in place (revert-rejected-from-full-result) and
     returns the rejects to log. rich-only — the caller guards with ui.interactive()."""
@@ -118,7 +119,7 @@ def _step_walk(m, beh, cols, perbook, changes, unique, known_chars, tagcanon):
 
 
 # ---------------- overrides: logged wrangle rejects -> override rules ----------------
-def _append_override(path, lines):
+def _append_override(path: str, lines: list) -> list:
     """Append lines to an override CSV (with header if new) / .txt list, skipping ones already present.
     -> the lines actually added."""
     fn = os.path.basename(path)
@@ -136,7 +137,7 @@ def _append_override(path, lines):
     return added
 
 
-def build_overrides(do_apply=False, master=False):
+def build_overrides(do_apply: bool = False, master: bool = False) -> None:
     """Read data/rejects.csv, turn the auto-suppressible wrangle rejects into identity-override lines
     (grouped by target file), and list the manual ones for hand-editing. Dry-run unless do_apply."""
     from scourgify.common import REJECTS
@@ -184,7 +185,7 @@ def build_overrides(do_apply=False, master=False):
               + (" to the master defaults" if master else "") + ".)")
 
 
-def _archive_consumed_rejects():
+def _archive_consumed_rejects() -> None:
     """Move the auto (now-suppressed) wrangle rejects out of rejects.csv into a timestamped archive;
     keep manual wrangle rows and all classify rows (still actionable / informational)."""
     from scourgify.common import REJECTS, REJECT_COLS
@@ -199,7 +200,7 @@ def _archive_consumed_rejects():
         w = csv.DictWriter(f, fieldnames=REJECT_COLS, extrasaction="ignore"); w.writeheader(); w.writerows(keep)
 
 
-def overrides_cmd(argv):
+def overrides_cmd(argv: list) -> None:
     import argparse
     p = argparse.ArgumentParser(prog="scourgify overrides",
         description="Turn logged wrangle rejects (from `apply --step`) into override rules so the same "

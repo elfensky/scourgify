@@ -17,12 +17,12 @@ except ImportError:
     RICH = False
 
 # ---------------- defaults + overrides ----------------
-def read_csv(path):
+def read_csv(path: str) -> list:
     return list(csv.DictReader(open(path))) if os.path.exists(path) else []
-def read_lines(path):
+def read_lines(path: str) -> list:
     return [l.rstrip("\n") for l in open(path)] if os.path.exists(path) else []
 
-def read_tropes(path):
+def read_tropes(path: str) -> list:
     """tropes.csv: delimiter-sniffed (','|';'), positional variant,canonical,route; unknown route (freeform note) -> 'tag'."""
     if not os.path.exists(path): return []
     with open(path) as f: first = f.readline()
@@ -38,7 +38,7 @@ def read_tropes(path):
             out.append((var, canon, route))
     return out
 
-def resolve_trope_chains(raw):
+def resolve_trope_chains(raw: dict) -> dict:
     """Follow variant->canonical to a terminal; break cycles by min spelling. Fixes chains (A->B->C) and cycles (A<->B)."""
     res = {}
     for start in raw:
@@ -51,7 +51,7 @@ def resolve_trope_chains(raw):
         res[start] = (term, raw[start][1])
     return res
 
-def load_maps(cfg):
+def load_maps(cfg: dict) -> dict:
     odir = os.path.join(os.getcwd(), cfg["overrides"].get("dir", "overrides"))
     ao3 = os.path.join(DEF, "ao3")               # generated AO3 layer (build_ao3_layer.py) — loaded FIRST, everything overrides it
     def ao3_pairs(fn):                           # master,name,rel pair rows -> {name: master}; {} if the layer is absent
@@ -100,15 +100,16 @@ def load_maps(cfg):
     for (vk, fd), c in list(m["char_fd"].items()): m["char_fd"].setdefault((norm(vk), norm(fd)), c)
     return m
 
-def _lookup(mp, key):
-    """Fold-map lookup that tolerates casing/punctuation: exact key first, then its norm()."""
+def _lookup(mp: dict, key: str):
+    """Fold-map lookup that tolerates casing/punctuation: exact key first, then its norm().
+    Returns the map value (str for char/fandom, (canon, route) tuple for trope) or None."""
     return mp[key] if key in mp else mp.get(norm(key))
 
-def is_junk(t, m):
+def is_junk(t: str, m: dict) -> bool:
     if t.strip().lower() in m["junk_exact"]: return True
     return any(rx.search(t) for rx in m["junk_rx"])
 
-def build_tagcanon(spellings, m):
+def build_tagcanon(spellings, m: dict) -> dict:
     """norm -> canonical spelling: most-common spelling per normalized form; bundled tropes canonical wins."""
     spell = collections.Counter(spellings)
     bynorm = collections.defaultdict(list)
@@ -119,7 +120,7 @@ def build_tagcanon(spellings, m):
     return tc
 
 # route for a trope, honoring config (au/crossover/etc. genre-vs-tag toggle)
-def trope_route(canon, route, beh):
+def trope_route(canon: str, route: str, beh: dict) -> str:
     key = {"alternate universe": "au_as", "crossover": "crossover_as",
            "reincarnation": "reincarnation_as", "time travel": "time_travel_as"}.get(norm(canon))
     if key: return beh.get(key, route)
@@ -205,10 +206,10 @@ def transform(d: dict, m: dict, beh: dict, known_chars: frozenset | set = frozen
     return newd, (had_F and not nF and not relocatedF), (had_C and not nC)
 
 # ---------------- AUDIT (read-only sqlite) ----------------
-def col_key_label(cfg):
+def col_key_label(cfg: dict) -> dict:
     return {k: v for k, v in cfg["columns"].items() if v}     # col_key -> calibre label
 
-def read_library(cfg):
+def read_library(cfg: dict) -> tuple:
     """Read all configured columns per book via read-only sqlite. -> (cols, perbook, present, nb, allb).
     Always the whole library, deliberately: transform() needs global context (tagcanon majority
     spelling, known_chars), runs in seconds, and apply only writes books that actually changed —
@@ -228,7 +229,7 @@ def read_library(cfg):
     allb = set(perbook) | {r[0] for r in c.execute("SELECT id FROM books")}
     return cols, perbook, present, nb, allb
 
-def audit(cfg, m):
+def audit(cfg: dict, m: dict) -> None:
     beh = cfg["behavior"]
     cols, perbook, present, nb, allb = read_library(cfg)
     before = {k: set() for k in cols}; after = {k: set() for k in cols}
@@ -303,7 +304,7 @@ DETAIL_BOOKS = 10           # per-book diff lines shown in the apply preview bef
 TAG_SHRINK_FRACTION = 0.25  # mass-deletion guardrail: abort if tags shrink more than this fraction ...
 TAG_SHRINK_FLOOR = 200      # ... AND lose more than this many assignments (named like SPEND_GATE/BACKUP_KEEP)
 
-def tag_loss_guard(tags_before, tags_after, force):
+def tag_loss_guard(tags_before: int, tags_after: int, force: bool) -> None:
     """Abort on a suspicious mass-deletion of tags (e.g. an over-broad junk.txt regex).
     ponytail: heuristic ceiling — >25% shrink AND >200 assignments lost; --force overrides."""
     lost = tags_before - tags_after
@@ -311,7 +312,7 @@ def tag_loss_guard(tags_before, tags_after, force):
         raise SystemExit(f"ABORT: tags would shrink {tags_before} -> {tags_after} assignments (-{lost}). "
                          "Check junk.txt / overrides for an over-broad rule, or re-run with --force.")
 
-def data_loss_guard(lost_fandom, lost_char, force):
+def data_loss_guard(lost_fandom: int, lost_char: int, force: bool) -> None:
     """SAFETY: abort if any book would lose its LAST fandom or character (CLAUDE.md invariant).
     transform() reports these only for a real value dropping to zero — a blocklist-route to tags
     is preserved and not counted. --force overrides (for a deliberate bulk deletion), like tag_loss_guard."""
@@ -320,7 +321,8 @@ def data_loss_guard(lost_fandom, lost_char, force):
                          "character. Check your fandoms.csv aliases / decompose overrides for a rule that "
                          "empties a book, or re-run with --force if the deletion is intentional.")
 
-def apply_changes(cfg, m, do_write, force=False, cli_hint=True, detail=True, step=False):
+def apply_changes(cfg: dict, m: dict, do_write: bool, force: bool = False,
+                  cli_hint: bool = True, detail: bool = True, step: bool = False) -> int:
     """-> number of distinct books that would change (the wizard uses it to auto-skip a clean library).
     detail=True prints per-book -removed/+added values for the first DETAIL_BOOKS changed books.
     step=True walks the per-book UNIQUE edits through ui.checklist() (rich+interactive only) and
@@ -376,7 +378,7 @@ def apply_changes(cfg, m, do_write, force=False, cli_hint=True, detail=True, ste
 
 MASS_MIN = 3             # a change on this many books is "mass" — aggregated, not listed per book
 
-def _colmap(m, lab, v):
+def _colmap(m: dict, lab: str, v: str) -> str | None:
     """Where would this column's engine fold v? (for pairing a removal with its rename target)"""
     if lab == "tags": return (_lookup(m["trope"], v) or (None,))[0]
     if "fandom" in lab: return m["fan"].get(v)
@@ -385,7 +387,7 @@ def _colmap(m, lab, v):
     return None
 
 
-def _classify_edits(m, diffs):
+def _classify_edits(m: dict, diffs: dict) -> tuple:
     """diffs -> (mass Counter{(kind, where, before, after): n_books}, unique {book: [(kind, where, before, after)]}).
     kind: 'rename' (fold within a column — incl. merging into an already-present canonical),
     'move' (crossed columns), 'drop' (gone), 'add' (appeared)."""
@@ -414,7 +416,7 @@ def _classify_edits(m, diffs):
     return mass, {b: es for b, es in unique.items() if es}
 
 
-def _preview_report(m, diffs, top=15, books=DETAIL_BOOKS):
+def _preview_report(m: dict, diffs: dict, top: int = 15, books: int = DETAIL_BOOKS) -> None:
     """The human-readable change report: aggregated mass folds + per-book unique changes.
     rich tables/tree when available; aligned plain text otherwise."""
     mass, unique = _classify_edits(m, diffs)
@@ -463,7 +465,7 @@ def _preview_report(m, diffs, top=15, books=DETAIL_BOOKS):
                     print(f"      {w:22} {vals}")
 
 
-def write_config(colmap, beh=None):
+def write_config(colmap: dict, beh: dict | None = None) -> None:
     b = beh or {}                                     # preserve existing toggles on re-run; defaults on first run
     bo = lambda k, d: "true" if b.get(k, d) else "false"
     sv = lambda k, d: b.get(k, d)
@@ -486,14 +488,14 @@ def write_config(colmap, beh=None):
     open(os.path.join(os.getcwd(), "config.toml"), "w").write("\n".join(L))
 
 OK, WARN, BAD = "✓", "⚠", "✗"     # status glyphs (plain; no color dependency)
-def _interactive():
+def _interactive() -> bool:
     # interactive iff stdin AND stderr are TTYs and nothing forces otherwise (pattern from lintle's term.py):
     # prevents an invisible-prompt hang when output is piped/redirected or under CI / --yes.
     if os.environ.get("CI") or os.environ.get("NONINTERACTIVE") or "--yes" in sys.argv or "-y" in sys.argv:
         return False
     try: return sys.stdin.isatty() and sys.stderr.isatty()
     except Exception: return False
-def _ask(prompt, default=True):
+def _ask(prompt: str, default: bool = True) -> bool:
     """y/n prompt; off a TTY (pipe / CI / --yes) take the default instead of blocking. 3 retries; EOF -> default."""
     if not _interactive(): return default
     for _ in range(3):
@@ -505,7 +507,7 @@ def _ask(prompt, default=True):
         print("  please answer y or n.")
     return default
 
-def setup(cfg):
+def setup(cfg: dict) -> None:
     import subprocess, shutil, json as _json
     print("=" * 64); print("  scourgify — setup & health check"); print("=" * 64)
     if not _interactive(): print("(non-interactive — taking recommended defaults; run in a terminal to choose per item)")
@@ -588,7 +590,7 @@ def setup(cfg):
     print("  scourgify classify --incremental # content-tag new/updated books (cheap)")
 
 # ---------------- main ----------------
-def main():
+def main() -> None:
     import argparse
     p = argparse.ArgumentParser(prog="scourgify",
                                 description="Normalize a FanFicFare-imported Calibre library (writes auto-shell to calibre-debug). "
