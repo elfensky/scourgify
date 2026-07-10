@@ -74,7 +74,10 @@ dir (use it only for shipped read-only files); anything user-writable keys off `
   **automatically snapshots metadata.db to `data/backups/ff_<ts>.db` first** (pruned to the last 20; `scourgify
   rollback [--list]` restores one, and the current db is snapshotted before a restore so rollback is reversible), and
   **refuses to run while Calibre is open** (`calibre_open()` detects via pgrep→ps and fails *closed* if neither
-  exists — it locks the DB). The user never types `calibre-debug`. Master rollback = the full "Export all Calibre data" backup.
+  exists — it locks the DB). It also **refuses, before writing, a change-set that would catastrophically empty a
+  populated column** (`_is_wipe`/`_predict_populated`: >90% of a ≥100-book column) — a coarse last-line net that
+  covers *every* writer (classify/promote/staleness/setup), not just wrangle's semantic guards; `--force` overrides.
+  The user never types `calibre-debug`. Master rollback = the full "Export all Calibre data" backup.
 - **`_writer.py`** is the only file that imports Calibre — a generic ops executor (`create_column` / `set_field` /
   `stamp_now` / `set_pref`).
 - **`common.py`** is the shared core: lazy `CALIBRE_LIBRARY` resolution (importing any module never exits),

@@ -151,14 +151,55 @@ def _prune_backups():
         try: os.remove(p)
         except OSError: pass
 
-def run_writer(ops):
+# Defense-in-depth write guard: refuse a change-set that would catastrophically empty a populated
+# column. wrangle's semantic guards (data_loss/tag_loss) fire far earlier; this is the last-line net
+# covering EVERY run_writer caller (classify/promote/staleness/setup), so "every write is guarded" is
+# structural, not per-caller discipline. Deliberately coarse (90% wipe of a >=100-book column) — no
+# legitimate write approaches it; --force overrides.
+WRITE_WIPE_FLOOR = 100    # only guard columns that currently hold a value for >= this many books
+WRITE_WIPE_FRAC = 0.90    # ... and abort if a write would clear more than this fraction of them
+
+def _predict_populated(before_books, values):
+    """Which books still hold a value after a set_field REPLACE: untouched books keep theirs;
+    a touched book keeps a value only if its new one is non-empty. Pure — see tests."""
+    touched = {int(b) for b in values}
+    return (set(before_books) - touched) | {int(b) for b, v in values.items() if v}
+
+def _is_wipe(n_before, n_after):
+    """-> True if shrinking a column from n_before to n_after populated books is a catastrophic
+    wipe worth aborting (a big column losing most of its values). Pure — see tests."""
+    return n_before >= WRITE_WIPE_FLOOR and n_after < n_before * (1 - WRITE_WIPE_FRAC)
+
+def _populated_books(con, field):
+    """Set of book ids currently holding a non-empty value for `field` (builtin tags or a custom column)."""
+    if field == "tags":
+        return {b for (b,) in con.execute("SELECT DISTINCT book FROM books_tags_link")}
+    return set(read_custom_column(con, field) or {})
+
+def run_writer(ops, force=False):
     """Apply a list of write-ops through Calibre by shelling out to `calibre-debug -e _writer.py`.
     Automatically snapshots metadata.db to data/backups/ first — every write path gets a rollback
-    point for free (restore with `scourgify rollback`)."""
+    point for free (restore with `scourgify rollback`). Refuses (before writing) a change-set that
+    would catastrophically empty a populated column; --force overrides."""
     import json, time, tempfile, subprocess, shutil
     ops = [o for o in ops if o.get("op") != "set_field" or o.get("values")]
     if not ops: print("  (nothing to write)"); return
     if calibre_open(): raise SystemExit("Calibre is running — close it first (it locks metadata.db), then re-run.")
+    if not force:                                   # last-line wipe guard, before any backup/write
+        setf = collections.defaultdict(dict)
+        for o in ops:
+            if o.get("op") == "set_field": setf[o["field"]].update(o["values"])
+        if setf:
+            con = ro_connect()
+            try:
+                for field, values in setf.items():
+                    before = _populated_books(con, field)
+                    after = _predict_populated(before, values)
+                    if _is_wipe(len(before), len(after)):
+                        raise SystemExit(f"ABORT: writing would empty '{field}' from {len(before)} populated books "
+                                         f"down to {len(after)} — a runaway change-set? Nothing was written. "
+                                         "Re-run with --force if this is intentional.")
+            finally: con.close()
     cb = shutil.which("calibre-debug") or "/Applications/calibre.app/Contents/MacOS/calibre-debug"
     if not (shutil.which("calibre-debug") or os.path.exists(cb)): raise SystemExit("calibre-debug not found (install Calibre's CLI tools).")
     bak = _backup_path()
