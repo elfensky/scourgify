@@ -232,6 +232,20 @@ class Mistral:
         return json.load(urllib.request.urlopen(req, timeout=self.timeout))["choices"][0]["message"]["content"]
 
 ENGINES = {"apple": Apple, "claude": Claude, "openai": OpenAI, "gemini": Gemini, "mistral": Mistral}
+# env var(s) each cloud engine's key is read from (apple is on-device, no key). Single source of truth —
+# wizard.ENGINE_KEYS aliases this so the two can never disagree about which key powers which engine.
+ENGINE_ENV = {"claude": ("ANTHROPIC_API_KEY",), "openai": ("OPENAI_API_KEY",),
+              "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"), "mistral": ("MISTRAL_API_KEY",)}
+
+def usable_engines() -> list:
+    """Engines runnable here right now: apple needs the afm binary or a swift toolchain, cloud engines a key."""
+    import shutil
+    out = []
+    for e in ENGINES:
+        if e == "apple":
+            if os.path.exists(f"{HERE}/afm") or shutil.which("swift"): out.append(e)
+        elif any(os.environ.get(k) for k in ENGINE_ENV[e]): out.append(e)
+    return out
 
 
 # ---- live run display ----
@@ -573,6 +587,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model", default="", help="override the per-engine default model")
     p.add_argument("--timeout", type=int, default=60, metavar="S", help="per-request HTTP timeout")
     p.add_argument("--text-fallback", action="store_true", help="sample the book's own prose when the description is thin")
+    p.add_argument("--bakeoff", action="store_true", help="compare a few sample books across every usable engine, then exit (no proposal written)")
     p.add_argument("--yes", "-y", action="store_true", help="skip the large-cloud-run confirmation")
     return p
 
@@ -583,9 +598,31 @@ def normalize(a: argparse.Namespace) -> argparse.Namespace:
     os.makedirs(DATA, exist_ok=True)
     return a
 
+def bakeoff_cli(a: argparse.Namespace) -> None:
+    """`scourgify classify --bakeoff`: the same sample-books-across-engines comparison the wizard offers,
+    display-only (never writes the proposal). Plain text — works with or without rich."""
+    a.text_fallback = True                         # thin descriptions sample the book text, like the wizard's compare
+    targets, titles, _ = gather(a)
+    if not targets:
+        print("no candidate books with usable text — nothing to compare."); return
+    engs = usable_engines()
+    if not engs:
+        print("no usable engines — set an API key (ANTHROPIC/OPENAI/GEMINI/MISTRAL) or install the afm/swift toolchain."); return
+    n = min(5, len(targets))
+    print(f"bake-off: {n} sample book(s) × {', '.join(engs)} (sequential — a minute or two)…\n")
+    res = bakeoff(a, targets, engs, n=n)
+    for b, per in res.items():
+        print(f"#{b}  {str(titles.get(b, ''))[:60]}")
+        for e in engs:
+            vt, nt, err = per.get(e, ([], [], "—"))
+            body = err if err else (", ".join(vt) or "(none)") + (f"   +new: {', '.join(nt)}" if nt else "")
+            print(f"    {e:8} {body}")
+        print()
+
 def main() -> None:
     a = normalize(build_parser().parse_args())
-    if a.apply: apply_proposal_step() if a.step else apply_proposal()
+    if a.bakeoff: bakeoff_cli(a)
+    elif a.apply: apply_proposal_step() if a.step else apply_proposal()
     else: classify_run(a)
 
 

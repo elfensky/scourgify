@@ -24,8 +24,7 @@ from scourgify import common, wrangle, classify, staleness, select, promote, ove
 from scourgify.common import library, db_path, ro_connect, custom_column_id, calibre_open
 
 COLS = ["#fandoms", "#characters", "#relationships", "#genres", "#status", "#updated", "#wrangled"]
-ENGINE_KEYS = {"claude": ("ANTHROPIC_API_KEY",), "openai": ("OPENAI_API_KEY",),
-               "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"), "mistral": ("MISTRAL_API_KEY",)}
+ENGINE_KEYS = classify.ENGINE_ENV              # single source of truth (defined in classify); never disagree
 
 
 # ---------------- status header ----------------

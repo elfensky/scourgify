@@ -164,6 +164,21 @@ def test_annotate_new_verdict_split():
     assert by["Dragon Politics"][4] == "new"                          # no close match -> genuinely new
     assert rows[0][4] == "new"                                        # new sorted ahead of near-duplicates
 
+def test_usable_engines_reflects_env_keys():
+    from scourgify.classify import usable_engines, ENGINE_ENV
+    saved = {k: os.environ.get(k) for keys in ENGINE_ENV.values() for k in keys}
+    try:
+        for keys in ENGINE_ENV.values():
+            for k in keys: os.environ.pop(k, None)
+        assert "claude" not in usable_engines()                        # no key -> engine not offered
+        os.environ["ANTHROPIC_API_KEY"] = "sk-test"
+        assert "claude" in usable_engines()                            # key present -> offered
+    finally:
+        for keys in ENGINE_ENV.values():
+            for k in keys: os.environ.pop(k, None)
+        for k, v in saved.items():
+            if v is not None: os.environ[k] = v
+
 def test_sparkline():
     assert sparkline([]) == ""
     assert sparkline([0, 0]) == "▁▁"                                   # flat zero series doesn't divide by zero
