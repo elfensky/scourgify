@@ -238,7 +238,11 @@ def backfill(yes: bool = False) -> int:
         print("backfill: nothing to do — source books already carry their promoted tags ✓"); return 0
     total = sum(len(v) for v in adds.values())
     print(f"backfill: {len(chg)} book(s) gain {total} promoted/aliased tag-assignment(s), e.g.:")
-    for b in list(adds)[:8]: print(f"  #{b}: + {', '.join(sorted(adds[b]))}")
+    preview = list(adds)[:8]
+    con = ro_connect()
+    titles = dict(con.execute(f"SELECT id, title FROM books WHERE id IN ({','.join('?' * len(preview))})", preview)) if preview else {}
+    con.close()
+    for b in preview: print(f"  #{b} {str(titles.get(b, ''))[:50]}: + {', '.join(sorted(adds[b]))}")
     if len(adds) > 8: print(f"  … +{len(adds) - 8} more books")
     if not yes:
         import sys

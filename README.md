@@ -225,8 +225,11 @@ scourgify classify --apply --step                   # review each book's tags 1-
   Apple Intelligence). Ships as source; a `swift` toolchain runs it as-is, or from a checkout build the
   faster binary once: `swiftc -O src/scourgify/afm.swift -o src/scourgify/afm`. Lower quality — prone to over-tagging,
   so the prompt caps at `--max-tags 6` and dumps (>2× cap) are rejected.
-- `--engine claude|openai|gemini` — cloud APIs (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY`);
-  defaults `claude-haiku-4-5` / `gpt-4o-mini` / `gemini-2.5-flash`, override with `--model`. Sharper; cheap.
+- `--engine claude|openai|gemini|mistral` — cloud APIs (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` /
+  `GEMINI_API_KEY` / `MISTRAL_API_KEY`); defaults `claude-haiku-4-5` / `gpt-4o-mini` / `gemini-2.5-flash` /
+  `mistral-small-latest`, override with `--model`. Sharper; cheap.
+- `--bakeoff` — run a few sample books through every usable engine and print the comparison, then exit
+  (writes nothing). The quick "which engine tags my library best?" check before committing to a full run.
 - **Scope — which books a run touches** (`select.py` owns this; newest-added-first, so `--batch`/`--limit`
   caps hit the new books first): `--incremental` = only new/changed books; `--last N` = the N most recently
   added; `--since DATE` = added or site-updated on/after DATE; no scope flag = books with `< --min-tags`
