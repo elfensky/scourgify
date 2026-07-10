@@ -44,3 +44,4 @@ jobs:
           uv run tests/test_backup.py
           uv run tests/test_promote.py
           uv run tests/test_layers.py
+          uv run tests/test_cli.py
