@@ -212,7 +212,7 @@ def test_est_cost():
 
 # ---- 1-by-1 step review: reconstruct + rejects → overrides ----
 def test_reconstruct_reverts_only_rejected():
-    from scourgify.wrangle import reconstruct
+    from scourgify.overrides import reconstruct
     nd = {"#fandoms": ["Naruto (anime)"]}; orig = {"#fandoms": ["Naruto"]}
     rename = ("rename", "#fandoms", "Naruto", "Naruto (anime)")
     assert reconstruct(nd, orig, []) == {"#fandoms": ["Naruto (anime)"]}   # accept all -> full change stands
@@ -225,7 +225,7 @@ def test_reconstruct_reverts_only_rejected():
                        [("move", "#genres → tags", "Fluffy", "")]) == {}
 
 def test_reconstruct_keeps_accepted_alongside_rejected():
-    from scourgify.wrangle import reconstruct
+    from scourgify.overrides import reconstruct
     nd = {"#fandoms": ["Naruto (anime)"], "tags": []}
     orig = {"#fandoms": ["Naruto"], "tags": ["WIP"]}
     # reject the fandom rename, keep the tag drop
@@ -233,7 +233,7 @@ def test_reconstruct_keeps_accepted_alongside_rejected():
     assert net == {"tags": []}                                            # fandom reverted (==orig, unwritten); drop kept
 
 def test_synth_reject_auto_kinds():
-    from scourgify.wrangle import synth_reject
+    from scourgify.overrides import synth_reject
     assert synth_reject("fandoms", "rename", "Naruto", "Naruto (anime)") == ("auto", [("fandoms.csv", "Naruto,Naruto")], "")
     assert synth_reject("characters", "rename", "Harry P.", "Harry Potter") == ("auto", [("characters.csv", "Harry P.,Harry P.,")], "")
     cls, actions, _ = synth_reject("genres", "rename", "Angsty", "Angst")
@@ -242,7 +242,7 @@ def test_synth_reject_auto_kinds():
     assert synth_reject("genres", "move", "Fluffy", "", dest="tags") == ("auto", [("genres_allow.txt", "Fluffy")], "")
 
 def test_synth_reject_manual_kinds():
-    from scourgify.wrangle import synth_reject
+    from scourgify.overrides import synth_reject
     assert synth_reject("tags", "drop", "WIP", "")[0] == "manual"             # junk/redundancy drop
     assert synth_reject("tags", "add", "", "Time Travel")[0] == "manual"      # injected value
     assert synth_reject("characters", "move", "Akeno", "", dest="tags")[0] == "manual"   # cross-column rescue

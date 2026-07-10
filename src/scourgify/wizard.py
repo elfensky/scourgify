@@ -20,7 +20,7 @@ from scourgify.ui import console
 from rich import box
 from rich.table import Table
 
-from scourgify import common, wrangle, classify, staleness, select, promote
+from scourgify import common, wrangle, classify, staleness, select, promote, overrides
 from scourgify.common import library, db_path, ro_connect, custom_column_id, calibre_open
 
 COLS = ["#fandoms", "#characters", "#relationships", "#genres", "#status", "#updated", "#wrangled"]
@@ -330,9 +330,9 @@ def stage_overrides():
         ui.say("no rejected changes logged — nothing to convert ✓", "green")
         ui.say("(reject deterministic changes in `apply --step` to feed this)", "dim")
         return
-    wrangle.build_overrides(do_apply=False)                    # dry-run preview (grouped by target file)
+    overrides.build_overrides(do_apply=False)                  # dry-run preview (grouped by target file)
     if ui.confirm("write these override lines to overrides/?", default=False):
-        wrangle.build_overrides(do_apply=True)
+        overrides.build_overrides(do_apply=True)
         ui.say("done ✓", "green")
     else:
         ui.say("(previewed only — nothing written)", "dim")

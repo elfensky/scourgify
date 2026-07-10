@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from scourgify import cli, __version__
 import scourgify.classify as classify, scourgify.staleness as staleness
 import scourgify.promote as promote, scourgify.wrangle as wrangle, scourgify.common as common
+import scourgify.overrides as overrides
 
 
 def _run(argv, stubs=("classify", "staleness", "promote", "wrangle")):
@@ -16,14 +17,14 @@ def _run(argv, stubs=("classify", "staleness", "promote", "wrangle")):
     called = {}
     mods = {"classify": classify, "staleness": staleness, "promote": promote, "wrangle": wrangle}
     saved = {n: m.main for n, m in mods.items()}
-    saved_overrides, saved_rollback = wrangle.overrides_cmd, common.rollback_cmd
+    saved_overrides, saved_rollback = overrides.overrides_cmd, common.rollback_cmd
     def rec(name):
         def f(*a, **k): called["name"] = name; called["argv"] = list(sys.argv)
         return f
     try:
         for n in stubs:
             mods[n].main = rec(n)
-        wrangle.overrides_cmd = lambda a: called.update(name="overrides", argv=a)
+        overrides.overrides_cmd = lambda a: called.update(name="overrides", argv=a)
         common.rollback_cmd = lambda a: called.update(name="rollback", argv=a)
         sys.argv = ["scourgify", *argv]
         out = io.StringIO()
@@ -31,7 +32,7 @@ def _run(argv, stubs=("classify", "staleness", "promote", "wrangle")):
             cli.main()
     finally:
         for n, fn in saved.items(): mods[n].main = fn
-        wrangle.overrides_cmd, common.rollback_cmd = saved_overrides, saved_rollback
+        overrides.overrides_cmd, common.rollback_cmd = saved_overrides, saved_rollback
     return called.get("name"), called.get("argv"), out.getvalue()
 
 
