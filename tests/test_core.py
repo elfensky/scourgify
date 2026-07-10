@@ -53,6 +53,24 @@ def test_transform_character_fold():
     nd, _, lc = transform({"characters": ["Harry P."]}, m, BEH)
     assert nd["characters"] == ["Harry Potter"] and not lc
 
+def test_transform_character_fold_is_case_insensitive():
+    # load_maps adds norm-keyed aliases; a book value that differs only in casing/punctuation still folds
+    m = maps(char={"harry p": "Harry Potter"})                 # norm-keyed (as the alias load_maps adds)
+    nd, _, lc = transform({"characters": ["HARRY P."]}, m, BEH)
+    assert nd["characters"] == ["Harry Potter"] and not lc
+
+def test_transform_trope_fold_is_case_insensitive():
+    m = maps(trope={"fix it": ("Fix-It", "tag")})              # norm-keyed
+    nd, _, _ = transform({"tags": ["Fix It!"]}, m, BEH)
+    assert "Fix-It" in nd["tags"]
+
+def test_load_maps_adds_norm_aliases_for_char_and_trope():
+    from scourgify.wrangle import load_maps
+    m = load_maps(load_config(path="/nonexistent/config.toml"))
+    for name in ("char", "trope"):
+        raw = next(k for k in list(m[name]) if k != norm(k))   # a key not already in normal form
+        assert norm(raw) in m[name]                            # ... has a norm-keyed alias
+
 def test_transform_genre_split_and_allowlist():
     m = maps(gsplit={"Action/Adventure": ["Action", "Adventure"]}, gallow={"action", "adventure"})
     nd, _, _ = transform({"genres": ["Action/Adventure", "Fluffy"]}, m, BEH)
