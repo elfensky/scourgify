@@ -86,8 +86,10 @@ pure core — `transform`, trope-chain resolution, `parse_resp`, the TOML reader
 `uv run tests/test_selection.py` pins the selection semantics against a throwaway sqlite `metadata.db` built
 by `tests/fixture_db.py` (covers both custom-column storage shapes). CI runs both. `scourgify audit` remains the
 against-your-library check: full new state, before/after counts, and SAFETY lines asserting **no book loses its
-last fandom or character** plus a **tag mass-deletion guardrail** (`apply` aborts if tags would shrink >25% and
->200 assignments — the signature of an over-broad junk rule; `--force` overrides).
+last fandom or character** (`apply` aborts if any book would end with an empty `#fandoms`/`#characters` it started
+with — a bad `fandoms.csv` alias→"" or an empty `decompose` payload; a blocklisted non-fandom relocated to tags is
+preserved and not counted) plus a **tag mass-deletion guardrail** (`apply` aborts if tags would shrink >25% and
+>200 assignments — the signature of an over-broad junk rule). `--force` overrides both.
 
 ## Maintenance loop (after new FanFicFare downloads)
 
