@@ -169,9 +169,15 @@ def run_writer(ops):
     print(f"  backup: {bak}   (restore: scourgify rollback)")
     f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False); json.dump(ops, f); f.close()
     print("  → writing via calibre-debug …")
-    rc = subprocess.run([cb, "-e", os.path.join(HERE, "_writer.py"), "--", f.name],
-                        env={**os.environ, "CALIBRE_LIBRARY": library()}).returncode
-    os.unlink(f.name)
+    try:
+        # generous ceiling: a real batch write finishes in seconds/minutes — this only
+        # catches a wedged calibre-debug so a scripted/CI run can't hang forever.
+        rc = subprocess.run([cb, "-e", os.path.join(HERE, "_writer.py"), "--", f.name],
+                            env={**os.environ, "CALIBRE_LIBRARY": library()}, timeout=3600).returncode
+    except subprocess.TimeoutExpired:
+        raise SystemExit(f"writer timed out after 1h (calibre-debug wedged?) — library backup at {bak}")
+    finally:
+        os.unlink(f.name)
     if rc != 0: raise SystemExit(f"writer failed (exit {rc}) — library backup at {bak}")
 
 
