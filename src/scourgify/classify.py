@@ -425,11 +425,12 @@ def gather(a: argparse.Namespace) -> tuple:
     bare classify keeps the sparse mode (fewer than --min-tags tags). `needs(b)` is True for
     explicitly scoped books — the resume logic uses it to re-process them even if already proposed."""
     con = ro_connect(); c = con.cursor()
-    if a.incremental: ids, scope = select.pick(con, "incremental"), "new/changed since last classify"
+    if a.all:         ids, scope = select.pick(con, "all"), "whole library"
+    elif a.incremental: ids, scope = select.pick(con, "incremental"), "new/changed since last classify"
     elif a.last:      ids, scope = select.pick(con, "last", n=a.last), f"last {a.last} added"
     elif a.since:     ids, scope = select.pick(con, "since", since=a.since), f"added/updated since {a.since}"
     else:             ids, scope = select.pick(con, "sparse", min_tags=a.min_tags), f"fewer than {a.min_tags} tags"
-    explicit = set(ids) if (a.incremental or a.last or a.since) else set()
+    explicit = set(ids) if (a.all or a.incremental or a.last or a.since) else set()
     def needs(b): return b in explicit
     desc = {b: t for b, t in c.execute("SELECT book, text FROM comments")}
     bookfile = {}
@@ -581,6 +582,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--apply", action="store_true", help="apply 'added_tags' from the proposal + stamp #wrangled (Calibre closed)")
     p.add_argument("--step", action="store_true", help="with --apply: review each book's tags 1-by-1 (interactive; untick to reject)")
     p.add_argument("--incremental", action="store_true", help="only new/changed books (never classified, #updated newer than their #wrangled marker, or re-fetched)")
+    p.add_argument("--all", action="store_true", help="the WHOLE library — every book, regardless of tag count (a full cloud pass costs real money)")
     p.add_argument("--last", type=int, default=0, metavar="N", help="(re)process the N most recently added books")
     p.add_argument("--since", default="", metavar="DATE", help="(re)process books added or site-updated on/after this ISO date")
     p.add_argument("--fresh", action="store_true", help="ignore the existing proposal and restart (a full cloud pass costs real money)")

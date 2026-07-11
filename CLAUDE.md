@@ -35,9 +35,10 @@ new-tag candidates, `--step` rejects, backfillable promotions). The menu loops (
 task) until quit. The guided run is the stages in order — **wrangle → staleness → classify → review →
 promote → backfill** — each dry-running first, showing its report, and asking before writing (a clean
 stage auto-skips). There is no separate audit step — the wrangle stage's dry run IS the audit;
-`scourgify audit` stays for the full per-value detail. The classify stage auto-targets
-new/changed books only, shows per-engine cost estimates (`classify.est_cost`, list prices in
-`classify.PRICING`), offers an engine **bake-off** (`classify.bakeoff`: the same ~5 sample books
+`scourgify audit` stays for the full per-value detail. The classify stage opens with a **scope
+menu** — new/changed (the cheap default) or **whole library** (a full pass; still offered when
+nothing's changed) — shows per-engine cost estimates for the chosen scope (`classify.est_cost`,
+list prices in `classify.PRICING`), offers an engine **bake-off** (`classify.bakeoff`: the same ~5 sample books
 through every usable engine, display-only), and enables `--text-fallback` so thin descriptions get
 sampled rather than dropped. The review stage offers apply / keep / discard (discard archives to
 `*_discarded_*.csv`). The wrangle and review stages also offer a **1-by-1 review** (`ui.checklist`,
@@ -149,8 +150,9 @@ without freeform noise). Engines `--engine apple|claude|openai|gemini|mistral` (
 `ANTHROPIC_/OPENAI_/GEMINI_/MISTRAL_API_KEY`; `--bakeoff` compares them on sample books); `apple` = on-device, free, single-threaded. Concurrency
 via `ThreadPoolExecutor` (`--workers`), retry/backoff, incremental save + resume. `--text-fallback` samples
 the book's own prose (EPUB via zipfile, other formats via `ebook-convert`) when the description (Calibre's
-built-in `comments` table) is too thin. Scope flags (`--incremental` / `--last N` / `--since DATE`) go through
-`select.pick` and select ONLY their books; the sparse-book default (`< --min-tags`) applies only with no scope
+built-in `comments` table) is too thin. Scope flags (`--all` / `--incremental` / `--last N` / `--since DATE`) go through
+`select.pick` and select ONLY their books (`--all` = the whole library, every book regardless of tag count — the
+wizard's whole-library option sets it); the sparse-book default (`< --min-tags`) applies only with no scope
 flag. `--apply` auto-creates the **`#wrangled`** datetime marker and stamps **every processed book** (a no-tag
 book left unstamped would be re-sent to the LLM forever) — state lives in the library, no external file.
 Proposals/outputs live in `data/` (gitignored); `--apply` archives the proposal to
