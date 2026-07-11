@@ -31,12 +31,13 @@ def test_layer_precedence_ao3_defaults_overrides():
         open(f"{dflt}/genres_allow.txt", "w").write("Action\nFantasy\n")
         _write(f"{over}/fandoms.csv", ["alias", "canonical"], [["Alias A", "User Master"]])
 
-        old_def, old_cwd = wrangle.DEF, os.getcwd()
-        wrangle.DEF = dflt; os.chdir(td)
+        old_def, old_home = wrangle.DEF, os.environ.get("SCOURGIFY_HOME")
+        wrangle.DEF = dflt; os.environ["SCOURGIFY_HOME"] = td   # overrides/ resolves under user_dir()
         try:
             m = wrangle.load_maps({"columns": {}, "behavior": {}, "overrides": {"dir": "overrides"}})
         finally:
-            wrangle.DEF = old_def; os.chdir(old_cwd)
+            wrangle.DEF = old_def
+            os.environ.pop("SCOURGIFY_HOME", None) if old_home is None else os.environ.__setitem__("SCOURGIFY_HOME", old_home)
 
         assert m["fan"]["Alias A"] == "User Master"          # override beats ao3
         assert m["fan"]["Alias B"] == "Curated Master"       # curated default beats ao3
@@ -51,12 +52,13 @@ def test_loader_tolerates_missing_ao3_layer():
         dflt = os.path.join(td, "defaults")
         os.makedirs(dflt)
         open(f"{dflt}/genres_allow.txt", "w").write("Action\n")
-        old_def, old_cwd = wrangle.DEF, os.getcwd()
-        wrangle.DEF = dflt; os.chdir(td)
+        old_def, old_home = wrangle.DEF, os.environ.get("SCOURGIFY_HOME")
+        wrangle.DEF = dflt; os.environ["SCOURGIFY_HOME"] = td
         try:
             m = wrangle.load_maps({"columns": {}, "behavior": {}, "overrides": {"dir": "overrides"}})
         finally:
-            wrangle.DEF = old_def; os.chdir(old_cwd)
+            wrangle.DEF = old_def
+            os.environ.pop("SCOURGIFY_HOME", None) if old_home is None else os.environ.__setitem__("SCOURGIFY_HOME", old_home)
         assert m["fan"] == {} and m["trope"] == {}           # no layer, no crash
 
 
