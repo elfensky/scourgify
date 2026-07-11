@@ -13,11 +13,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import difflib
 
 from scourgify.classify import RANK, PROP, ENGINES, existing_terms, ask_retry
-from scourgify.common import DATA, library, norm, ro_connect, run_writer
+from scourgify.common import DATA, user_dir, library, norm, ro_connect, run_writer
 
 LEDGER = f"{DATA}/promote_ledger.csv"
 REVIEW = f"{DATA}/promote_review.csv"
-ALIASES = os.path.join(os.getcwd(), "overrides", "promote_aliases.csv")
+ALIASES = os.path.join(user_dir(), "overrides", "promote_aliases.csv")
 VERDICTS = ("promote", "alias", "reject")
 
 
@@ -150,8 +150,8 @@ def _append_row(path, header, row, delim=","):
 
 def apply_decisions(review_path: str = REVIEW, vocab_path: str | None = None, tropes_path: str | None = None,
                     aliases_path: str = ALIASES, ledger_path: str = LEDGER) -> dict:
-    vocab_path = vocab_path or os.path.join(os.getcwd(), "overrides", "classify_vocab.txt")
-    tropes_path = tropes_path or os.path.join(os.getcwd(), "overrides", "tropes.csv")
+    vocab_path = vocab_path or os.path.join(user_dir(), "overrides", "classify_vocab.txt")
+    tropes_path = tropes_path or os.path.join(user_dir(), "overrides", "tropes.csv")
     if not os.path.exists(review_path):
         raise SystemExit(f"no review to apply ({os.path.basename(review_path)} not found — run promote first).")
     n = {"promote": 0, "alias": 0, "reject": 0}

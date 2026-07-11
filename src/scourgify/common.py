@@ -13,14 +13,31 @@ import os, re, sys, csv, time, glob, sqlite3, collections, unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))   # the installed package dir (read-only)
 DEFAULTS = os.path.join(HERE, "defaults")            # bundled generic maps — ship inside the package
-# Per-run + per-user files live in the working directory, not site-packages: `data/`
-# (proposals/intermediates), config.toml, and overrides/ are all resolved against CWD.
-# When run from the repo via `uv run`, CWD == repo root, so dev layout is unchanged.
-DATA = os.path.join(os.getcwd(), "data")             # personal review maps, proposals, intermediates (gitignored)
+
+
+def user_dir() -> str:
+    """The one root for every user-owned file (config.toml, overrides/, data/).
+    $SCOURGIFY_HOME wins (tests, experiments); else XDG:
+    ($XDG_CONFIG_HOME or ~/.config)/scourgify. mac + Linux only — no Windows."""
+    return os.environ.get("SCOURGIFY_HOME") or os.path.join(
+        os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "scourgify")
+
+
+# Per-run + per-user files live under user_dir(), not site-packages nor the invoking CWD:
+# config.toml, overrides/, and data/ (proposals/intermediates + backups) all resolve there,
+# so an installed copy has a stable home instead of writing relative to wherever it's launched.
+DATA = os.path.join(user_dir(), "data")              # personal review maps, proposals, intermediates (gitignored)
 BACKUPS = os.path.join(DATA, "backups")              # metadata.db snapshots taken before every write (was /tmp)
 BACKUP_KEEP = 20                                      # keep this many newest snapshots; older ones are pruned
+BACKUP_WARN = 500 * 1024 * 1024                       # wizard nudges to trim past this many bytes of snapshots
 REJECTS = os.path.join(DATA, "rejects.csv")          # per-item rejects from `--step` review (see wrangle.overrides)
 REJECT_COLS = ["ts", "stage", "book", "title", "kind", "column", "before", "after", "class"]
+
+
+def backups_size() -> tuple[int, int]:
+    """(count, total_bytes) of the metadata.db snapshots in BACKUPS; (0, 0) if none."""
+    files = glob.glob(os.path.join(BACKUPS, "*.db"))
+    return len(files), sum(os.path.getsize(f) for f in files)
 
 
 def log_rejects(rows: list[dict]) -> int:
@@ -91,7 +108,7 @@ def load_config(path: str | None = None) -> dict:
                         "reincarnation_as": "genre", "time_travel_as": "genre", "fold_ratings": False,
                         "keep_categories": True, "tropes_as": "tag"},
            "overrides": {"dir": "overrides"}}
-    p = path or os.path.join(os.getcwd(), "config.toml")   # user config: CWD, not the package
+    p = path or os.path.join(user_dir(), "config.toml")    # user config: user_dir(), not the package
     if os.path.exists(p):
         sec = None
         for raw in open(p):

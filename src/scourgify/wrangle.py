@@ -8,7 +8,7 @@ writes shell out to calibre-debug automatically):
   scourgify apply --apply    # write changes  (Calibre must be CLOSED)
 """
 import os, sys, re, csv, time, collections
-from scourgify.common import DEFAULTS as DEF, norm, ascii_fold, load_config, library, ro_connect, read_custom_column, run_writer
+from scourgify.common import DEFAULTS as DEF, user_dir, norm, ascii_fold, load_config, library, ro_connect, read_custom_column, run_writer
 try:                                   # rich is optional (present in system python3 for `audit`; absent under calibre-debug)
     from rich.console import Console
     from rich.table import Table
@@ -52,7 +52,7 @@ def resolve_trope_chains(raw: dict) -> dict:
     return res
 
 def load_maps(cfg: dict) -> dict:
-    odir = os.path.join(os.getcwd(), cfg["overrides"].get("dir", "overrides"))
+    odir = os.path.join(user_dir(), cfg["overrides"].get("dir", "overrides"))
     ao3 = os.path.join(DEF, "ao3")               # generated AO3 layer (build_ao3_layer.py) — loaded FIRST, everything overrides it
     def ao3_pairs(fn):                           # master,name,rel pair rows -> {name: master}; {} if the layer is absent
         return {r["name"]: r["master"] for r in read_csv(os.path.join(ao3, fn))}
@@ -485,7 +485,8 @@ def write_config(colmap: dict, beh: dict | None = None) -> None:
           "", "[overrides]",
           "# folder of user files (same formats as defaults/) that extend & win over the defaults",
           'dir = "overrides"', ""]
-    open(os.path.join(os.getcwd(), "config.toml"), "w").write("\n".join(L))
+    os.makedirs(user_dir(), exist_ok=True)
+    open(os.path.join(user_dir(), "config.toml"), "w").write("\n".join(L))
 
 OK, WARN, BAD = "✓", "⚠", "✗"     # status glyphs (plain; no color dependency)
 def _interactive() -> bool:
@@ -577,7 +578,7 @@ def setup(cfg: dict) -> None:
         lab = colmap.get(k, ""); print(f"        {k:13} → {lab or '(unset — pass not run for this column)'}")
 
     # [5] overrides
-    odir = os.path.join(os.getcwd(), cfg["overrides"].get("dir", "overrides"))
+    odir = os.path.join(user_dir(), cfg["overrides"].get("dir", "overrides"))
     print("\n[5] Overrides");  print(f"  {OK} {odir}" if os.path.isdir(odir) else f"  {WARN} no overrides/ dir (optional — add your own maps here; they win over defaults/)")
 
     if ops:
