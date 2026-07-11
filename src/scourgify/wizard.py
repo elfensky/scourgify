@@ -146,17 +146,27 @@ def _engines():
 
 
 def stage_classify():
-    con = ro_connect(); ch = select.changed(con); con.close()
-    if not ch:
-        ui.say("no new or changed books since the last classify — nothing to tag ✓", "green")
-        ui.say("(a specific redo any time: scourgify classify --last 30, or --since 2026-06-01)", "dim")
-        return
-    why = collections.Counter(ch.values())
-    ui.say(f"[cyan]{len(ch)}[/] books to tag: " + ", ".join(f"{n} {r}" for r, n in why.most_common()))
+    con = ro_connect(); ch = select.changed(con)
+    total = con.execute("SELECT count(*) FROM books").fetchone()[0]; con.close()
+    opts = []
+    if ch:                                        # the cheap default: only what's new since the last run
+        why = collections.Counter(ch.values())
+        opts.append(("n", f"new/changed — {len(ch)} books",
+                     "books added or updated since the last classify: "
+                     + ", ".join(f"{n} {r}" for r, n in why.most_common())))
+    else:
+        ui.say("no new or changed books since the last classify.", "dim")
+    opts.append(("a", f"whole library — {total:,} books · full pass",
+                 "re-tag EVERY book regardless of tag count — a paid engine over this many books costs real money"))
+    opts.append(("s", "skip", "tag nothing this run (a targeted redo any time: scourgify classify --last 30 / --since DATE)"))
+    scope = ui.menu("classify scope", opts, default="n" if ch else "a")
+    if scope == "s":
+        ui.say("(skipped — nothing tagged)", "dim"); return
     a = classify.build_parser().parse_args([])    # normalize() runs ONCE below, AFTER the engine is chosen —
                                                   # normalizing now (engine still defaults to apple) would clamp workers to 1
-    a.incremental = a.yes = True                  # the wizard's own confirm below replaces the CLI spend gate
+    a.yes = True                                  # the wizard's own confirm below replaces the CLI spend gate
     a.text_fallback = True                        # thin descriptions sample the book text instead of being dropped
+    a.all = scope == "a"; a.incremental = scope == "n"   # exactly one scope; whole-library reuses select.pick("all")
     targets, _, _ = classify.gather(a)
     if not targets:
         ui.say("no candidates with usable text — nothing to send ✓", "green"); return

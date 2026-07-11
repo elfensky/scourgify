@@ -249,7 +249,9 @@ scourgify classify --apply --step                   # review each book's tags 1-
 - `--bakeoff` — run a few sample books through every usable engine and print the comparison, then exit
   (writes nothing). The quick "which engine tags my library best?" check before committing to a full run.
 - **Scope — which books a run touches** (`select.py` owns this; newest-added-first, so `--batch`/`--limit`
-  caps hit the new books first): `--incremental` = only new/changed books; `--last N` = the N most recently
+  caps hit the new books first): `--all` = the whole library, every book regardless of tag count (a full
+  paid pass — the wizard's classify stage offers this as an explicit "whole library" scope choice);
+  `--incremental` = only new/changed books; `--last N` = the N most recently
   added; `--since DATE` = added or site-updated on/after DATE; no scope flag = books with `< --min-tags`
   (default 2) tags. Books whose description is too thin (<40 chars) are reported, not silently dropped —
   `--text-fallback` samples the book's own prose for them. Always dry-run until `--apply`.

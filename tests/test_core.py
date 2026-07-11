@@ -233,6 +233,12 @@ def test_est_cost():
     assert 0 < est_cost(100, "gemini") < est_cost(100, "claude")       # scales with list price
     assert est_cost(200, "gemini") == 2 * est_cost(100, "gemini")      # linear in books
 
+def test_whole_library_scope_is_opt_in():
+    from scourgify import classify
+    # the €50 guard: a bare classify is NEVER whole-library — --all must be explicit
+    assert classify.build_parser().parse_args([]).all is False
+    assert classify.build_parser().parse_args(["--all"]).all is True
+
 
 # ---- 1-by-1 step review: reconstruct + rejects → overrides ----
 def test_reconstruct_reverts_only_rejected():
