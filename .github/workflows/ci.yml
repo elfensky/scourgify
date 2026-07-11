@@ -46,3 +46,4 @@ jobs:
           uv run tests/test_layers.py
           uv run tests/test_cli.py
           uv run tests/test_wizard.py
+          uv run tests/test_paths.py

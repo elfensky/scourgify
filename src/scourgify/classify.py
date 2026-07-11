@@ -20,7 +20,7 @@ Engines (--engine):  apple = on-device Apple Foundation Models via ./afm (free; 
 import argparse, os, re, csv, json, subprocess, collections, time, difflib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from scourgify import select
-from scourgify.common import HERE, DATA, ro_connect, custom_column_id, run_writer, library
+from scourgify.common import HERE, DATA, user_dir, ro_connect, custom_column_id, run_writer, library
 try:                                              # rich is optional: live dashboard/tables in system python3
     from rich.console import Console, Group
     from rich.live import Live
@@ -57,7 +57,7 @@ def load_vocab() -> list:
         for t in (_read_vocab_file(f"{HERE}/defaults/classify_vocab.txt")          # first spelling of a norm wins,
                   + _read_vocab_file(f"{HERE}/defaults/classify_vocab_ao3.txt")):  # so a hand-edit dup can't sneak in
             if t.lower() not in have: terms.append(t); have.add(t.lower())
-        ov = os.path.join(os.getcwd(), "overrides", "classify_vocab.txt")
+        ov = os.path.join(user_dir(), "overrides", "classify_vocab.txt")
         if os.path.exists(ov):
             for l in open(ov):
                 l = l.strip()
@@ -73,7 +73,7 @@ def load_aliases() -> dict:
     so tags we've decided are synonyms stop getting re-proposed as 'new'. {} if absent."""
     global _ALIASES
     if _ALIASES is None:
-        p = os.path.join(os.getcwd(), "overrides", "promote_aliases.csv")
+        p = os.path.join(user_dir(), "overrides", "promote_aliases.csv")
         _ALIASES = {}
         if os.path.exists(p):
             for r in csv.DictReader(open(p)):

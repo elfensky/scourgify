@@ -133,13 +133,15 @@ def test_parse_resp_applied_alias_snap(tmp=None):
     d = tempfile.mkdtemp(); os.makedirs(os.path.join(d, "overrides"))
     with open(os.path.join(d, "overrides", "promote_aliases.csv"), "w", newline="") as f:
         w = csv.writer(f); w.writerow(["candidate", "target"]); w.writerow(["Post-Apocalyptic", "Angst"])
-    old = os.getcwd(); os.chdir(d); classify._ALIASES = None; classify._VOCAB = None
+    old = os.environ.get("SCOURGIFY_HOME"); os.environ["SCOURGIFY_HOME"] = d   # overrides resolve under user_dir()
+    classify._ALIASES = None; classify._VOCAB = None
     try:
         vt, nt = classify.parse_resp('{"tags": [], "new": ["Post-Apocalyptic"]}')
         assert "Angst" in vt          # snapped to the aliased vocab term, applied
         assert "Post-Apocalyptic" not in nt
     finally:
-        os.chdir(old); classify._ALIASES = None; classify._VOCAB = None
+        os.environ.pop("SCOURGIFY_HOME", None) if old is None else os.environ.__setitem__("SCOURGIFY_HOME", old)
+        classify._ALIASES = None; classify._VOCAB = None
 
 
 def test_promote_run_writes_review(tmp=None):

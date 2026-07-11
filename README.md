@@ -322,8 +322,10 @@ bare → wizard, `setup`/`audit`/`apply`/`overrides` → wrangle, `classify`, `s
 - **`_writer.py`** — the only file that imports Calibre; a generic ops executor invoked under
   `calibre-debug` by `run_writer()`, never by hand
 - **`defaults/`** — bundled generic maps, shipped inside the package (read-only at runtime)
-- Per-user files resolve against the **working directory**: `config.toml`, `overrides/` (your maps,
-  gitignored), and `data/` (proposals/intermediates, gitignored)
+- Per-user files live in one central home — **`~/.config/scourgify/`** (`$XDG_CONFIG_HOME/scourgify` if
+  set; override with `$SCOURGIFY_HOME`; mac + Linux): `config.toml`, `overrides/` (your maps), and `data/`
+  (proposals/intermediates + `data/backups/`). An installed copy always reads/writes here, not the
+  directory you happen to launch it from.
 - **`build_defaults.py`** (repo root) — maintainer tool: regenerates `defaults/` from the review maps in `data/`
 - **`tests/`** — `uv run tests/test_core.py`, no library needed
 - **`attic/`** — the original single-purpose pipeline, kept as provenance (see `attic/README.md`);

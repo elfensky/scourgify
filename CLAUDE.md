@@ -60,10 +60,13 @@ NOT used). All pickers return newest-added-first.
 **Packaging.** The code is a proper installable package under `src/scourgify/` (hatchling; on PyPI as
 `scourgify`). The single `scourgify` console command (`cli.py`) dispatches argv to the tools: bare → wizard,
 `setup`/`audit`/`apply` → wrangle, `classify`, `staleness`, `rollback` → common. Bundled `defaults/` (and `_writer.py`, `afm.swift`)
-ship **inside** the package (read-only at runtime); per-user `config.toml`, `overrides/`, and `data/` resolve
-against the **current working directory** — so `uv run` from the repo (CWD = repo root) behaves exactly as
-before, while an installed copy writes proposals under wherever it's invoked. `common.HERE` is the package
-dir (use it only for shipped read-only files); anything user-writable keys off `os.getcwd()`.
+ship **inside** the package (read-only at runtime); per-user `config.toml`, `overrides/`, and `data/`
+(including `data/backups/`) resolve against **`common.user_dir()`** — `$SCOURGIFY_HOME` if set, else
+`$XDG_CONFIG_HOME/scourgify`, else `~/.config/scourgify` (mac + Linux; no Windows) — so an installed copy
+has one stable home instead of writing under whatever CWD it's launched from, and `uv run` from the repo
+reads that same central location. `common.HERE` is the package dir (use it only for shipped read-only
+files); anything user-writable keys off `common.user_dir()` (the single owner — never re-derive it or
+reach for `os.getcwd()`). `$SCOURGIFY_HOME` also lets tests point the whole tree at a temp dir.
 
 **Everything runs under normal CPython** — the installed `scourgify` command, `uv run scourgify`, or plain
 `python3` with rich installed. The core operating rule is about *reads vs writes*, not which interpreter:

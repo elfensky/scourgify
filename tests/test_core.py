@@ -217,13 +217,15 @@ def test_vocab_overrides_merge():
         os.makedirs(os.path.join(td, "overrides"))
         with open(os.path.join(td, "overrides", "classify_vocab.txt"), "w") as f:
             f.write("# my terms\nSentient Toaster Romance\n-Time Travel\n")
-        old = os.getcwd(); os.chdir(td); classify._VOCAB = None       # vocab is cached per CWD
+        old = os.environ.get("SCOURGIFY_HOME")
+        os.environ["SCOURGIFY_HOME"] = td; classify._VOCAB = None      # overrides resolve under user_dir()
         try:
             v = classify.load_vocab()
             assert "Sentient Toaster Romance" in v                     # appended
             assert "Time Travel" not in v                              # '-term' removed a bundled term
         finally:
-            os.chdir(old); classify._VOCAB = None
+            os.environ.pop("SCOURGIFY_HOME", None) if old is None else os.environ.__setitem__("SCOURGIFY_HOME", old)
+            classify._VOCAB = None
 
 def test_est_cost():
     from scourgify.classify import est_cost

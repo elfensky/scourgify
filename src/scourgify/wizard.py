@@ -65,8 +65,8 @@ def snapshot():
     return {"books": books, "missing": missing, "changed": changed,
             "pending": pending, "to_stamp": to_stamp, "calibre": calibre_open(),
             "candidates": candidates, "verdicts_pending": verdicts_pending,
-            "rejects": rejects, "backfill": backfill_n,
-            "setup_needed": bool(missing) or not os.path.exists(os.path.join(os.getcwd(), "config.toml"))}
+            "rejects": rejects, "backfill": backfill_n, "backups": common.backups_size(),
+            "setup_needed": bool(missing) or not os.path.exists(os.path.join(common.user_dir(), "config.toml"))}
 
 
 def header(info):
@@ -80,6 +80,12 @@ def header(info):
                   if info["changed"] else "[green]library up to date ✓[/]")
     g.add_row("proposal", f"[cyan]{info['pending']} books queued to apply[/]  → the review step"
               if info["pending"] else "[dim]none pending[/]")
+    n, b = info["backups"]
+    if n:
+        sz = f"{b / 1e9:.1f} GB" if b >= 1e9 else f"{b / 1e6:.0f} MB"
+        loc = f"[dim]{os.path.join(common.user_dir(), 'data', 'backups')}[/]"
+        g.add_row("backups", f"[yellow]{n} snapshots · {sz}[/] → getting large; delete old ones to reclaim space  {loc}"
+                  if b > common.BACKUP_WARN else f"{n} snapshots · {sz}  {loc}")
     if info["calibre"]:
         g.add_row("calibre", "[bold red]RUNNING[/] — reads work; the write steps will refuse until you close it")
     ui.panel(g, title="[bold]scourgify[/]")
