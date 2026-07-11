@@ -9,7 +9,8 @@ data/
 # Calibre DB snapshots / backups
 *.db
 
-# Generated per-user config is fine to ship as a default, but ignore local overrides
+# Per-user config + maps now live in ~/.config/scourgify (see common.user_dir()), never the repo
+/config.toml
 overrides/
 
 # Python / OS cruft

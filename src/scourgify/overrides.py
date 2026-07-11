@@ -6,7 +6,7 @@ ones are logged to data/rejects.csv. `scourgify overrides` then turns the determ
 rejects into identity-override lines so the same wrong change never recurs. Pure move — no logic
 changes; imports the core engine helpers (read_csv/read_lines/transform) from wrangle."""
 import os, csv, time, collections
-from scourgify.common import DEFAULTS as DEF, norm, ro_connect
+from scourgify.common import DEFAULTS as DEF, user_dir, norm, ro_connect
 from scourgify.wrangle import read_csv, read_lines, transform
 
 
@@ -158,7 +158,7 @@ def build_overrides(do_apply: bool = False, master: bool = False) -> None:
             for fn, line in actions: auto[fn].append(line)
         else:
             manual.append((r["kind"], col, r["before"], r["after"], reason))
-    tgt = DEF if master else os.path.join(os.getcwd(), "overrides")
+    tgt = DEF if master else os.path.join(user_dir(), "overrides")
     where = "defaults/ (MASTER — checkout only; installed defaults are read-only)" if master else "overrides/"
     print(f"{'APPLY' if do_apply else 'DRY-RUN'} — {sum(len(v) for v in auto.values())} auto-suppressible line(s) → {where}")
     total_added = 0
