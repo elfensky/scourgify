@@ -398,11 +398,22 @@ def plan(cfg: dict, m: dict) -> Plan:
 
 MASS_MIN = 3             # a change on this many books is "mass" — aggregated, not listed per book
 
-def _colmap(m: dict, lab: str, v: str) -> str | None:
-    """Where would this column's engine fold v? (for pairing a removal with its rename target)"""
-    if lab == "tags": return (_lookup(m["trope"], v) or (None,))[0]
+def _char_fd(m: dict, v: str, cands: dict) -> str | None:
+    """Fandom-scoped character fold. The diff doesn't carry the book's fandoms, so match on the variant
+    alone and prefer a target the book actually gained (ambiguous only if two fandoms fold v differently)."""
+    hits = [c for (vk, _), c in m["char_fd"].items() if vk == v or vk == norm(v)]
+    return next((c for c in hits if norm(c) in cands), hits[0] if hits else None)
+
+
+def _colmap(m: dict, lab: str, v: str, cands: dict | None = None) -> str | None:
+    """Where would this column's engine fold v? (for pairing a removal with its rename target)
+    Mirrors transform's order — junk is dropped BEFORE the trope lookup, characters fall back to
+    the fandom-scoped map — so the checklist labels an edit the same way the engine performed it."""
+    if lab == "tags":
+        if is_junk(v, m): return None
+        return (_lookup(m["trope"], v) or (None,))[0]
     if "fandom" in lab: return m["fan"].get(v)
-    if "character" in lab: return _lookup(m["char"], v)
+    if "character" in lab: return _lookup(m["char"], v) or _char_fd(m, v, cands or {})
     if "genre" in lab: return m["gcanon"].get(v)
     return None
 
@@ -420,7 +431,7 @@ def _classify_edits(m: dict, diffs: dict) -> tuple:
             for v, dest in rm:
                 if dest:
                     edits.append(("move", f"{lab} → {dest}", v, "")); continue
-                w = _colmap(m, lab, v) or bynorm.get(norm(v))   # engine fold, else a same-norm respelling
+                w = _colmap(m, lab, v, bynorm) or bynorm.get(norm(v))   # engine fold, else a same-norm respelling
                 if w:
                     edits.append(("rename", lab, v, w)); added.discard(w)
                 else:

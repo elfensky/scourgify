@@ -347,6 +347,23 @@ def test_transform_does_not_flag_relocation_or_normal_routing():
     assert lf is False
 
 
+def test_classify_edits_labels_match_the_engine():
+    """The 1-by-1 checklist must describe an edit the way transform actually performed it.
+    A fandom-scoped character fold is ONE rename: shown as drop+add, unticking only the drop
+    re-adds the old name and the book ends up carrying both. And a junk value that also has a
+    trope row is a drop, because transform checks is_junk before the trope lookup."""
+    from scourgify.wrangle import _classify_edits
+    m = maps(char_fd={("Akeno", "DxD"): "Akeno Himejima"},
+             trope={"WIP": ("Work In Progress", "tag")}, junk_exact={"wip"})
+    _, uniq = _classify_edits(m, {1: {"characters": ([("Akeno", "")], ["Akeno Himejima"]),
+                                      "tags": ([("WIP", "")], [])}})
+    edits = uniq[1]
+    assert ("rename", "characters", "Akeno", "Akeno Himejima") in edits
+    assert ("add", "characters", "", "Akeno Himejima") not in edits      # one row, not two
+    assert ("drop", "tags", "WIP", "") in edits
+    assert ("rename", "tags", "WIP", "Work In Progress") not in edits
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
