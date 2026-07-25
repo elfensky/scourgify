@@ -13,25 +13,25 @@ auto-back-up metadata.db (everything funnels through common.run_writer). Single
 steps stay available as CLI subcommands: scourgify setup / audit / apply /
 classify / staleness. This module has no main()/argparse entry of its own — it is
 invoked via wrangle.main() (bare `scourgify`); see cli.py and CLAUDE.md."""
-import os, csv, time, collections
+import os, time, collections
 
 from scourgify import ui                    # first: gives the friendly error if rich is missing
 from scourgify.ui import console
 from rich import box
 from rich.table import Table
 
-from scourgify import common, wrangle, classify, staleness, select, promote, overrides
+from scourgify import artifacts, common, engines, wrangle, classify, staleness, select, promote, overrides
 from scourgify.common import library, db_path, ro_connect, custom_column_id, calibre_open
 
 COLS = ["#fandoms", "#characters", "#relationships", "#genres", "#status", "#updated", "#wrangled"]
-ENGINE_KEYS = classify.ENGINE_ENV              # single source of truth (defined in classify); never disagree
+ENGINE_KEYS = engines.ENGINE_ENV               # single source of truth (defined in engines); never disagree
 
 
 # ---------------- status header ----------------
 def _proposal_counts(rows: list) -> tuple[int, int]:
-    """(pending, to_stamp) from classify-proposal rows: books that will gain tags vs no-match books
-    awaiting only a stamp (so they aren't re-sent to the LLM forever). Pure — see tests."""
-    pending = sum(1 for r in rows if r.get("added_tags", "").strip())
+    """(pending, to_stamp) from artifacts.read_proposal rows (added_tags is a list): books that will
+    gain tags vs no-match books awaiting only a stamp (so they aren't re-sent forever). Pure — see tests."""
+    pending = sum(1 for r in rows if r.get("added_tags"))
     return pending, len(rows) - pending
 
 
@@ -45,19 +45,15 @@ def snapshot():
         con.close()
     except Exception as e:
         raise SystemExit(f"can't read {db_path()} — is CALIBRE_LIBRARY correct? ({e})")
-    pending = to_stamp = 0
-    if os.path.exists(classify.PROP):
-        pending, to_stamp = _proposal_counts(list(csv.DictReader(open(classify.PROP))))
+    pending, to_stamp = _proposal_counts(artifacts.read_proposal())
     # cheap file-based signals of unfinished work, surfaced as menu hints
     candidates = 0
     if os.path.exists(classify.RANK):
         try: candidates = len(promote.candidates())          # new-tag candidates not yet adjudicated
         except SystemExit: candidates = 0
     verdicts_pending = os.path.exists(promote.REVIEW)         # adjudicated promote verdicts awaiting apply
-    rejects = 0
-    if os.path.exists(common.REJECTS):
-        rejects = sum(1 for r in csv.DictReader(open(common.REJECTS))
-                      if r.get("stage") == "wrangle" and r.get("class") == "auto")
+    rejects = sum(1 for r in artifacts.read_rows(common.REJECTS)
+                  if r.get("stage") == "wrangle" and r.get("class") == "auto")
     backfill_n = 0                                            # actual books that would gain a tag — clears once backfilled,
     if os.path.exists(promote.LEDGER):                       # unlike a "ledger has promotions" flag, which never clears
         try: backfill_n = len(promote.backfill_plan()[0])
@@ -131,18 +127,12 @@ def stage_staleness():
 
 
 def _engines():
-    """[(name, usable, hint)] — apple needs the afm binary or a swift toolchain; cloud engines need a key."""
-    import shutil
-    out = []
-    for e in ("apple", "claude", "openai", "gemini", "mistral"):
-        if e == "apple":
-            ok = os.path.exists(os.path.join(common.HERE, "afm")) or bool(shutil.which("swift"))
-            hint = "free, on-device" if ok else "needs the afm binary or a swift toolchain"
-        else:
-            ok = any(os.environ.get(k) for k in ENGINE_KEYS[e])
-            hint = "key set ✓" if ok else "no API key in env"
-        out.append((e, ok, hint))
-    return out
+    """[(name, usable, hint)] for the engine menus — derived from engines.ENGINES + usable_engines(),
+    so a newly registered engine shows up here automatically instead of silently missing."""
+    ok = set(engines.usable_engines())
+    hints = {"apple": ("free, on-device", "needs the afm binary or a swift toolchain")}
+    return [(e, e in ok, hints.get(e, ("key set ✓", "no API key in env"))[e not in ok])
+            for e in engines.ENGINES]
 
 
 def stage_classify():
@@ -162,11 +152,9 @@ def stage_classify():
     scope = ui.menu("classify scope", opts, default="n" if ch else "a")
     if scope == "s":
         ui.say("(skipped — nothing tagged)", "dim"); return
-    a = classify.build_parser().parse_args([])    # normalize() runs ONCE below, AFTER the engine is chosen —
-                                                  # normalizing now (engine still defaults to apple) would clamp workers to 1
-    a.yes = True                                  # the wizard's own confirm below replaces the CLI spend gate
-    a.text_fallback = True                        # thin descriptions sample the book text instead of being dropped
-    a.all = scope == "a"; a.incremental = scope == "n"   # exactly one scope; whole-library reuses select.pick("all")
+    # thin descriptions sample the book text instead of being dropped; exactly one scope flag
+    # (whole-library reuses select.pick("all")). classify_run normalizes for itself.
+    a = classify.default_opts(text_fallback=True, incremental=scope == "n", **{"all": scope == "a"})
     targets, _, _ = classify.gather(a)
     if not targets:
         ui.say("no candidates with usable text — nothing to send ✓", "green"); return
@@ -202,10 +190,11 @@ def stage_classify():
                            + (f"\n[dim]+ {'; '.join(nt)}[/]" if nt else ""))
             t.add_row(*row)
         console.print(t)
-    if a.engine != "apple" and not ui.confirm(
-            f"send {len(targets)} books to the {a.engine} API (~${classify.est_cost(len(targets), a.engine):.2f})?"):
-        ui.say("(skipped — nothing sent)", "dim"); return
-    a = classify.normalize(a)                     # apple → workers=1
+    if a.engine != "apple":
+        if not ui.confirm(
+                f"send {len(targets)} books to the {a.engine} API (~${classify.est_cost(len(targets), a.engine):.2f})?"):
+            ui.say("(skipped — nothing sent)", "dim"); return
+        a.yes = True                              # this confirm ANSWERS classify's spend gate — never ask twice
     classify.classify_run(a)
 
 
@@ -213,8 +202,8 @@ def stage_review():
     if not os.path.exists(classify.PROP):
         ui.say("no pending proposal — nothing to review ✓", "green"); return
     vintage = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(classify.PROP)))
-    rows = list(csv.DictReader(open(classify.PROP)))
-    tagged = [r for r in rows if r.get("added_tags", "").strip()]
+    rows = artifacts.read_proposal()
+    tagged = [r for r in rows if r["added_tags"]]
     if not rows:
         ui.say("proposal is empty — nothing to apply ✓", "green"); return
     if not tagged:                                    # every book was classified but matched no new vocab tags
@@ -227,10 +216,10 @@ def stage_review():
         if choice == "a":
             classify.apply_proposal(); ui.say("done ✓", "green")
         else:
-            arch = classify.PROP.replace(".csv", f"_discarded_{time.strftime('%Y%m%d-%H%M%S')}.csv")
-            os.rename(classify.PROP, arch); ui.say(f"set aside -> {os.path.basename(arch)}", "dim")
+            arch = artifacts.archive(classify.PROP, "discarded")
+            ui.say(f"set aside -> {os.path.basename(arch)}", "dim")
         return
-    cnt = collections.Counter(t for r in tagged for t in r["added_tags"].split("; ") if t.strip())
+    cnt = collections.Counter(t for r in tagged for t in r["added_tags"])
     t = Table(box=box.SIMPLE, title=f"proposal from {vintage} — {len(tagged)} of {len(rows)} books get tags")
     t.add_column("vocab tag"); t.add_column("books", justify="right")
     for tag, c in cnt.most_common(15): t.add_row(tag, str(c))
@@ -238,7 +227,7 @@ def stage_review():
     if os.path.exists(classify.RANK):
         r = Table(box=box.SIMPLE, title="top new-tag candidates (promote into overrides/classify_vocab.txt)")
         r.add_column("count", justify="right", style="cyan"); r.add_column("proposed tag")
-        for row in list(csv.DictReader(open(classify.RANK)))[:15]: r.add_row(row["count"], row["proposed_tag"])
+        for row in artifacts.read_ranked()[:15]: r.add_row(str(row["count"]), row["proposed_tag"])
         console.print(r)
     if os.path.exists(classify.FAIL):
         n = sum(1 for _ in csv.DictReader(open(classify.FAIL)))
@@ -257,8 +246,7 @@ def stage_review():
         classify.apply_proposal_step()
         ui.say("done ✓", "green")
     elif choice == "d":
-        arch = classify.PROP.replace(".csv", f"_discarded_{time.strftime('%Y%m%d-%H%M%S')}.csv")
-        os.rename(classify.PROP, arch)
+        arch = artifacts.archive(classify.PROP, "discarded")
         ui.say(f"set aside -> {os.path.basename(arch)}", "dim")
     else:
         ui.say("(kept pending)", "dim")
@@ -266,7 +254,7 @@ def stage_review():
 
 def _promote_review_menu():
     """Show the adjudicated verdicts and apply / keep / discard them (shared: fresh run + pending review)."""
-    rows = list(csv.DictReader(open(promote.REVIEW)))
+    rows = artifacts.read_rows(promote.REVIEW)
     by = collections.defaultdict(list)
     for r in rows: by[r["verdict"]].append(r)
     for v, col in (("promote", "green"), ("alias", "cyan"), ("reject", "dim")):
@@ -289,8 +277,8 @@ def _promote_review_menu():
     if choice == "a":
         promote.apply_decisions(); ui.say("done ✓  (run the backfill step to tag the source books)", "green")
     elif choice == "d":
-        arch = promote.REVIEW.replace(".csv", f"_discarded_{time.strftime('%Y%m%d-%H%M%S')}.csv")
-        os.rename(promote.REVIEW, arch); ui.say(f"set aside -> {os.path.basename(arch)}", "dim")
+        arch = artifacts.archive(promote.REVIEW, "discarded")
+        ui.say(f"set aside -> {os.path.basename(arch)}", "dim")
     else:
         ui.say("(kept pending)", "dim")
 
@@ -306,13 +294,13 @@ def stage_promote():
         ui.say("no undecided tag candidates to adjudicate ✓", "green"); return
     ui.say(f"[cyan]{len(cands)}[/] new-tag candidates to weigh against the master tag list "
            "(promote / alias / reject)")
-    a = promote.normalize(promote.build_parser().parse_args([]))
-    a.yes = True                                  # the wizard's confirm below replaces the CLI guards
+    a = promote.default_opts(yes=True)            # yes: the pending-review case was already handled above
     engs = _engines()                             # computed once, reused for opts + the error hint
     hints = {e: h for e, _, h in engs}
     usable = {e: ok for e, ok, _ in engs}
     opts = [(str(i), e, hint) for i, (e, ok, hint) in enumerate(engs, 1)]
-    k = ui.menu("engine", opts, default="2")      # default claude; skip apple (too weak for this judgement)
+    default = next((key for key, lbl, _ in opts if lbl == "claude"), opts[0][0])
+    k = ui.menu("engine", opts, default=default)  # default claude; skip apple (too weak for this judgement)
     a.engine = dict((key, lbl) for key, lbl, _ in opts)[k]
     if not usable.get(a.engine):
         ui.error(f"{a.engine} isn't usable here — {hints[a.engine]}"); return
@@ -325,24 +313,12 @@ def stage_promote():
 
 
 def stage_backfill():
-    chg, adds = promote.backfill_plan()
-    if not chg:
-        ui.say("no promoted tags to backfill — source books are already up to date ✓", "green")
-        ui.say("(backfill applies vocab-promoted tags to the books that first suggested them)", "dim")
-        return
-    total = sum(len(v) for v in adds.values())
-    con = ro_connect(); titles = {b: t for b, t in con.execute("SELECT id, title FROM books")}; con.close()
-    t = Table(box=box.SIMPLE, title=f"backfill — {len(chg)} books gain {total} promoted/aliased tags")
-    t.add_column("book"); t.add_column("adds")
-    for b in list(adds)[:12]:
-        t.add_row(f"#{b} {str(titles.get(b, ''))[:36]}", ", ".join(sorted(adds[b])))
-    if len(adds) > 12: t.add_row("[dim]…[/]", f"[dim]+{len(adds) - 12} more books[/]")
-    console.print(t)
-    if ui.confirm(f"apply promoted tags to {len(chg)} source books? (Calibre closed; auto-backup)", default=True):
-        common.run_writer([{"op": "set_field", "field": "tags", "values": chg}])
+    """Delegates to promote.backfill — the ONE implementation of the preview→confirm→write loop
+    (the shared common.confirm works in the wizard's TTY like anywhere else)."""
+    if promote.backfill():
         ui.say("done ✓", "green")
     else:
-        ui.say("(skipped — nothing written)", "dim")
+        ui.say("(backfill applies vocab-promoted tags to the books that first suggested them)", "dim")
 
 
 def stage_overrides():

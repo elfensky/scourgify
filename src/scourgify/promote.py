@@ -8,15 +8,17 @@ proposed_new list should be promoted to the vocab, aliased to an existing tag, o
 
 Reasons each candidate against a difflib shortlist of the master tag list (curated vocab ∪ ao3_vocab)
 plus the example books that proposed it. Audit-first: verdicts are a reviewed artifact you apply."""
-import argparse, csv, glob, json, os, re, time, collections
+import argparse, csv, glob, json, os, re, collections
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import difflib
 
-from scourgify.classify import RANK, PROP, ENGINES, existing_terms, ask_retry
-from scourgify.common import DATA, user_dir, library, norm, ro_connect, run_writer
+from scourgify.artifacts import (RANK, PROP, LEDGER, REVIEW, REVIEW_COLS,
+                                 read_rows, split_tags, write_review, archive)
+from scourgify.classify import existing_terms
+from scourgify.engines import ENGINES, ask_retry
+from scourgify.common import (DATA, user_dir, library, norm, ro_connect, run_writer,
+                              current_tags, op_set_field, interactive, confirm)
 
-LEDGER = f"{DATA}/promote_ledger.csv"
-REVIEW = f"{DATA}/promote_review.csv"
 ALIASES = os.path.join(user_dir(), "overrides", "promote_aliases.csv")
 VERDICTS = ("promote", "alias", "reject")
 
@@ -75,8 +77,7 @@ def skeptic_prompt(cand: dict, proposed: dict, near: list) -> str:
 
 
 def _ledger_tags(path):
-    if not os.path.exists(path): return set()
-    return {r["tag"] for r in csv.DictReader(open(path))}
+    return {r["tag"] for r in read_rows(path)}
 
 
 def candidates(ranked_path: str = RANK, proposal_path: str = PROP, ledger_path: str = LEDGER) -> list:
@@ -84,13 +85,11 @@ def candidates(ranked_path: str = RANK, proposal_path: str = PROP, ledger_path: 
         raise SystemExit(f"no candidates ({os.path.basename(ranked_path)} not found — run a classify pass first).")
     decided = _ledger_tags(ledger_path)
     examples = {}                                              # tag -> [titles]
-    if os.path.exists(proposal_path):
-        for r in csv.DictReader(open(proposal_path)):
-            for t in (r.get("proposed_new", "") or "").split("; "):
-                t = t.strip()
-                if t: examples.setdefault(t, []).append(r.get("title", ""))
+    for r in read_rows(proposal_path):
+        for t in split_tags(r.get("proposed_new")):
+            examples.setdefault(t, []).append(r.get("title", ""))
     out = []
-    for r in csv.DictReader(open(ranked_path)):
+    for r in read_rows(ranked_path):
         tag = r["proposed_tag"].strip()
         if not tag or tag in decided: continue
         out.append({"tag": tag, "count": int(r.get("count", 0) or 0),
@@ -171,8 +170,7 @@ def apply_decisions(review_path: str = REVIEW, vocab_path: str | None = None, tr
             _append_row(aliases_path, ["candidate", "target"], [tag, target])
         n[v] = n.get(v, 0) + 1
         _append_row(ledger_path, ["tag", "verdict", "target"], [tag, v, target])
-    arch = review_path.replace(".csv", f"_applied_{time.strftime('%Y%m%d-%H%M%S')}.csv")
-    os.rename(review_path, arch)
+    arch = archive(review_path, "applied")
     print(f"applied: {n['promote']} promoted, {n['alias']} aliased, {n['reject']} rejected; "
           f"review archived -> {os.path.basename(arch)}")
     return n
@@ -200,8 +198,8 @@ def backfill_wanted(resolution: dict, proposal_rows: list) -> dict:
     for r in proposal_rows:
         try: b = int(r["book_id"])
         except (KeyError, ValueError, TypeError): continue
-        for c in (r.get("proposed_new") or "").split("; "):
-            t = resolution.get(c.strip().lower())
+        for c in split_tags(r.get("proposed_new")):
+            t = resolution.get(c.lower())
             if t: want[b].add(t)
     return dict(want)
 
@@ -214,20 +212,17 @@ def _proposal_files():
 
 
 def backfill_plan(ledger_path: str = LEDGER) -> tuple[dict, dict]:
-    """-> (chg {str(book): sorted full tag set}, adds {book:int : set(new tags)}) for books that
+    """-> (chg {book: sorted full tag set}, adds {book: set(new tags)}) for books that
     should carry a promoted/aliased tag but don't yet. Reads the ledger + all proposals + live tags."""
-    if not os.path.exists(ledger_path):
-        return {}, {}
-    res = resolve_ledger(list(csv.DictReader(open(ledger_path))))
-    rows = [r for pf in _proposal_files() for r in csv.DictReader(open(pf))]
+    res = resolve_ledger(read_rows(ledger_path))
+    rows = [r for pf in _proposal_files() for r in read_rows(pf)]
     want = backfill_wanted(res, rows)
     if not want: return {}, {}
-    con = ro_connect(); cur = collections.defaultdict(set)
-    for b, t in con.execute("SELECT l.book, t.name FROM books_tags_link l JOIN tags t ON t.id=l.tag"): cur[b].add(t)
+    cur = current_tags(ro_connect())
     chg, adds = {}, {}
     for b, w in want.items():
         new = w - cur.get(b, set())
-        if new: chg[str(b)] = sorted(cur.get(b, set()) | w); adds[b] = new
+        if new: chg[b] = sorted(cur.get(b, set()) | w); adds[b] = new
     return chg, adds
 
 
@@ -245,17 +240,13 @@ def backfill(yes: bool = False) -> int:
     for b in preview: print(f"  #{b} {str(titles.get(b, ''))[:50]}: + {', '.join(sorted(adds[b]))}")
     if len(adds) > 8: print(f"  … +{len(adds) - 8} more books")
     if not yes:
-        import sys
-        if not sys.stdin.isatty():
+        if not interactive():
             print("  non-interactive: re-run with --yes to write."); return 0
-        if input("apply this backfill? (Calibre closed) [y/N] ").strip().lower() not in ("y", "yes"):
+        if not confirm("apply this backfill? (Calibre closed)"):
             print("aborted (nothing written)."); return 0
-    run_writer([{"op": "set_field", "field": "tags", "values": chg}])
+    run_writer([op_set_field("tags", chg)])
     print(f"backfilled promoted tags onto {len(chg)} book(s).")
     return len(chg)
-
-
-REVIEW_COLS = ["tag", "count", "verdict", "target", "reason", "confidence", "contested"]
 
 
 def run(a: argparse.Namespace, ranked_path: str = RANK, proposal_path: str = PROP,
@@ -279,9 +270,7 @@ def run(a: argparse.Namespace, ranked_path: str = RANK, proposal_path: str = PRO
         for fut in as_completed(futs): rows.append(fut.result())
     rows.sort(key=lambda r: (r["verdict"] != "promote", -r["count"]))   # promotes first, by count
     os.makedirs(DATA, exist_ok=True)
-    with open(review_path, "w", newline="") as f:
-        w = csv.writer(f); w.writerow(REVIEW_COLS)
-        for r in rows: w.writerow([r.get(k, "") for k in REVIEW_COLS])
+    write_review(rows, review_path)
     tally = {v: sum(1 for r in rows if r["verdict"] == v) for v in VERDICTS}
     print(f"  {tally['promote']} promote, {tally['alias']} alias, {tally['reject']} reject "
           f"-> {os.path.basename(review_path)} (review, then `scourgify promote --apply`)")
@@ -308,6 +297,14 @@ def normalize(a: argparse.Namespace) -> argparse.Namespace:
     library()                                       # fail fast with the clear CALIBRE_LIBRARY message
     os.makedirs(DATA, exist_ok=True)
     return a
+
+
+def default_opts(**overrides) -> argparse.Namespace:
+    """The non-CLI entry to a run's options: parser defaults + keyword overrides, normalized.
+    The argparse parser stays the single schema; the wizard is the second adapter that fills it."""
+    a = build_parser().parse_args([])
+    for k, v in overrides.items(): setattr(a, k, v)
+    return normalize(a)
 
 
 def main() -> None:

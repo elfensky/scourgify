@@ -8,7 +8,9 @@ writes shell out to calibre-debug automatically):
   scourgify apply --apply    # write changes  (Calibre must be CLOSED)
 """
 import os, sys, re, csv, time, collections
-from scourgify.common import DEFAULTS as DEF, user_dir, norm, ascii_fold, load_config, library, ro_connect, read_custom_column, run_writer
+from scourgify.common import (DEFAULTS as DEF, user_dir, norm, ascii_fold, load_config, library,
+                              ro_connect, read_custom_column, run_writer, interactive, confirm,
+                              op_set_field, op_create_column, op_set_pref)
 try:                                   # rich is optional (present in system python3 for `audit`; absent under calibre-debug)
     from rich.console import Console
     from rich.table import Table
@@ -371,7 +373,7 @@ def apply_changes(cfg: dict, m: dict, do_write: bool, force: bool = False,
     if do_write:
         # pass force through: wrangle's own data_loss/tag_loss guards already ran, so a deliberately
         # --forced deletion here must not be second-guessed by run_writer's coarse last-line wipe guard.
-        run_writer([{"op": "set_field", "field": lab, "values": {str(b): v for b, v in ch.items()}} for lab, ch in changes.items()], force=force)
+        run_writer([op_set_field(lab, ch) for lab, ch in changes.items()], force=force)
     elif cli_hint:
         print("Re-run: scourgify apply --apply   (Calibre closed; writes shell out to calibre-debug)")
     return len({b for ch in changes.values() for b in ch})
@@ -490,23 +492,11 @@ def write_config(colmap: dict, beh: dict | None = None) -> None:
 
 OK, WARN, BAD = "✓", "⚠", "✗"     # status glyphs (plain; no color dependency)
 def _interactive() -> bool:
-    # interactive iff stdin AND stderr are TTYs and nothing forces otherwise (pattern from lintle's term.py):
-    # prevents an invisible-prompt hang when output is piped/redirected or under CI / --yes.
-    if os.environ.get("CI") or os.environ.get("NONINTERACTIVE") or "--yes" in sys.argv or "-y" in sys.argv:
-        return False
-    try: return sys.stdin.isatty() and sys.stderr.isatty()
-    except Exception: return False
+    """setup's interactivity: the shared common.interactive() policy, plus honoring `--yes`."""
+    return interactive() and "--yes" not in sys.argv and "-y" not in sys.argv
 def _ask(prompt: str, default: bool = True) -> bool:
-    """y/n prompt; off a TTY (pipe / CI / --yes) take the default instead of blocking. 3 retries; EOF -> default."""
-    if not _interactive(): return default
-    for _ in range(3):
-        try: a = input(f"{prompt} [{'Y/n' if default else 'y/N'}] ").strip().lower()
-        except EOFError: return default
-        if a == "": return default
-        if a in ("y", "yes"): return True
-        if a in ("n", "no"): return False
-        print("  please answer y or n.")
-    return default
+    """y/n prompt; off a TTY (pipe / CI / --yes) take the recommended default instead of blocking."""
+    return confirm(prompt, default) if _interactive() else default
 
 def setup(cfg: dict) -> None:
     import subprocess, shutil, json as _json
@@ -547,7 +537,7 @@ def setup(cfg: dict) -> None:
             s["personal.ini"] = "\n".join(l for l in s.get("personal.ini", "").splitlines() if l.strip().lower() != "include_in_series:category")
             if fff.get("#fandoms") == "series": s.setdefault("custom_cols", {})["#fandoms"] = "category"
             s.setdefault("custom_cols_newonly", {})["#genres"] = True
-            ops.append({"op": "set_pref", "key": "namespaced:FanFicFarePlugin:settings", "value": s}); print(f"  {OK} queued FanFicFare config fix")
+            ops.append(op_set_pref("namespaced:FanFicFarePlugin:settings", s)); print(f"  {OK} queued FanFicFare config fix")
 
     # [3] columns: the engine's 5 + the datetime markers staleness/classify need
     print("\n[3] Columns")
@@ -560,7 +550,7 @@ def setup(cfg: dict) -> None:
         if label in have: print(f"  {OK} {label}"); continue
         why = "  (staleness + classify --incremental need this)" if label in ("#updated", "#wrangled") else ""
         if _ask(f"  {BAD} {label} missing — create '{name}' ({dt}{', multiple' if mult else ''}){why}?"):
-            ops.append({"op": "create_column", "label": label.lstrip("#"), "name": name, "datatype": dt, "is_multiple": mult}); have.add(label); print(f"      queued {label}")
+            ops.append(op_create_column(label.lstrip("#"), name, dt, mult)); have.add(label); print(f"      queued {label}")
         else: print(f"      skipped {label}")
 
     # [4] config.toml column map (FFF field -> our key, else adopt existing labels)
@@ -604,7 +594,7 @@ def main() -> None:
     p.add_argument("--yes", "-y", action="store_true", help="non-interactive: take the recommended default for every prompt")
     a = p.parse_args()
     if a.command is None:
-        if sys.stdin.isatty() and sys.stdout.isatty():
+        if interactive():
             from scourgify import wizard   # lazy: keeps rich fully optional for the plain subcommands
             wizard.run()
         else:

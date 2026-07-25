@@ -12,10 +12,11 @@ from scourgify import wizard          # hard-imports rich (a declared dependency
 def test_proposal_counts_splits_pending_from_stamp_only():
     # a book with added_tags will gain tags (pending); a no-match row awaits only a stamp (to_stamp),
     # so it is NOT counted as pending — the invariant that keeps no-match books from being re-sent forever.
-    rows = [{"added_tags": "Fluff; Angst"}, {"added_tags": ""}, {"added_tags": "  "}, {"added_tags": "Fix-It"}]
+    # rows come from artifacts.read_proposal, so added_tags is a list.
+    rows = [{"added_tags": ["Fluff", "Angst"]}, {"added_tags": []}, {"added_tags": []}, {"added_tags": ["Fix-It"]}]
     assert wizard._proposal_counts(rows) == (2, 2)
     assert wizard._proposal_counts([]) == (0, 0)
-    assert wizard._proposal_counts([{"added_tags": "x"}]) == (1, 0)
+    assert wizard._proposal_counts([{"added_tags": ["x"]}]) == (1, 0)
 
 
 def test_task_hint_review_prefers_pending_over_stamp():

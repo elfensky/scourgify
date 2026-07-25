@@ -69,6 +69,32 @@ def ro_connect() -> sqlite3.Connection:
     return sqlite3.connect(f"file:{db_path()}?mode=ro", uri=True)
 
 
+# ---------------- interaction policy (the ONE answer to "is a human at the terminal") ----------------
+def interactive() -> bool:
+    """stdin AND stdout are real TTYs, and no CI/NONINTERACTIVE override. Every tool asks this
+    function — ui.interactive re-exports it — so the tools can't disagree about interactivity."""
+    if os.environ.get("CI") or os.environ.get("NONINTERACTIVE"):
+        return False
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def confirm(msg: str, default: bool = False) -> bool:
+    """The one plain y/n prompt (ui.confirm is its rich twin for wizard surfaces).
+    Off a TTY / on EOF: the default. 3 retries on garbage input."""
+    if not interactive(): return default
+    for _ in range(3):
+        try: a = input(f"{msg} [{'Y/n' if default else 'y/N'}] ").strip().lower()
+        except EOFError: return default
+        if a == "": return default
+        if a in ("y", "yes"): return True
+        if a in ("n", "no"): return False
+        print("  please answer y or n.")
+    return default
+
+
 # ---------------- normalization ----------------
 def norm(s) -> str:
     s = str(s).strip().lower(); s = re.sub(r"[\[\]\(\)]", "", s); s = s.replace("&", "and")
@@ -100,6 +126,15 @@ def read_custom_column(con: sqlite3.Connection, label: str, multi: bool = False)
     return dict(out)
 
 
+def current_tags(con: sqlite3.Connection) -> dict:
+    """{book: set(tag names)} from the builtin tags link table — the read half of an
+    add-tags union (classify apply, promote backfill)."""
+    out = collections.defaultdict(set)
+    for b, t in con.execute("SELECT l.book, t.name FROM books_tags_link l JOIN tags t ON t.id=l.tag"):
+        out[b].add(t)
+    return dict(out)
+
+
 # ---------------- config (minimal TOML reader; no tomllib dependency) ----------------
 def load_config(path: str | None = None) -> dict:
     cfg = {"columns": {"fandoms": "#fandoms", "characters": "#characters", "relationships": "#relationships",
@@ -127,6 +162,24 @@ def load_config(path: str | None = None) -> dict:
 
 
 # ---------------- the write funnel ----------------
+# Op constructors: the ops-JSON shape (_writer.py's docstring) is built ONLY here, next to the
+# run_writer guard that parses it back — producers call these instead of hand-writing dicts,
+# so book-id stringification and key names are decided once.
+def op_set_field(field: str, values: dict) -> dict:
+    """values: {book_id: new value} (ids of any type — stringified here for JSON)."""
+    return {"op": "set_field", "field": field, "values": {str(b): v for b, v in values.items()}}
+
+def op_create_column(label: str, name: str, datatype: str, is_multiple: bool = False) -> dict:
+    return {"op": "create_column", "label": label, "name": name, "datatype": datatype, "is_multiple": is_multiple}
+
+def op_stamp_now(field: str, books: list | None = None) -> dict:
+    """books=None stamps the whole library."""
+    return {"op": "stamp_now", "field": field, "books": books}
+
+def op_set_pref(key: str, value) -> dict:
+    return {"op": "set_pref", "key": key, "value": value}
+
+
 def _is_calibre_gui(line):
     """A process line that means the Calibre GUI is holding the library — excludes the CLI tools
     (calibredb / calibre-debug / calibre-server / …) and our own helper scripts, whose paths may
@@ -267,8 +320,8 @@ def rollback_cmd(argv: list[str]) -> None:
         raise SystemExit(f"{target} is not a readable Calibre DB ({e}) — refusing to restore.")
     print(f"about to restore {os.path.basename(target)} ({n} books) OVER {db_path()}")
     if not a.yes:
-        if not sys.stdin.isatty(): raise SystemExit("non-interactive: re-run with --yes to restore.")
-        if input("proceed? [y/N] ").strip().lower() not in ("y", "yes"):
+        if not interactive(): raise SystemExit("non-interactive: re-run with --yes to restore.")
+        if not confirm("proceed?"):
             print("aborted (nothing changed)."); return
     cur = _backup_path(); shutil.copy2(db_path(), cur); _prune_backups()   # this rollback is itself reversible
     shutil.copy2(target, db_path())
