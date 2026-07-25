@@ -35,9 +35,12 @@ concept.
     engine); written and read via `artifacts.py` like every other artifact.
   - **Archiving** — a consumed artifact is renamed `*_applied_*` / `*_discarded_*` so stale rows
     can never re-apply.
-- **Override files** — the `overrides/` formats (headers, `,`-vs-`;` delimiter sniffing,
-  append-if-absent) are owned by `overrides.py` (`ov_path` / `append_lines` / `append_rows`);
-  promote's folds and the rejects→overrides flow both write through it.
+- **Override files** — the user's overrides dir (config `[overrides] dir`, resolved ONCE by
+  `overrides.overrides_dir`) and its formats (headers, `,`-vs-`;` delimiter sniffing,
+  append-if-absent, the vocab `-term` removal) are owned by `overrides.py`
+  (`ov_path` / `append_lines` / `append_rows` / `merge_vocab` / `read_aliases`); promote's folds
+  and the rejects→overrides flow write through it, and wrangle/classify/setup read through it —
+  a relocated dir can never split writers from readers.
 - **Promote** — adversarial adjudication (advocate → skeptic → human referee) of ranked
   candidates into promote / alias / reject.
 - **Backfill** — deterministically applying promoted/aliased tags onto the books that first

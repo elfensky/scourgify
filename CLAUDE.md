@@ -153,9 +153,11 @@ The LLM engine adapters + retry + availability live in **`engines.py`** (one sea
 HTTP transport tests monkeypatch; `ENGINES`/`ENGINE_ENV`/`PRICING`/`usable_engines(env=…)`/`ask_retry`
 are the single source the tools and the wizard derive from). The cross-tool CSV formats (proposal /
 ranked / review / ledger / failures, the `"; "` delimiter, timestamped archiving) live in
-**`artifacts.py`** — never hand-read/write those files elsewhere. The `overrides/` file formats
-(headers, delimiter sniffing, append-if-absent) live in **`overrides.py`** (`ov_path`/`append_lines`/
-`append_rows`) — promote's vocab/trope/alias folds and the rejects→overrides flow share them. Book-text
+**`artifacts.py`** — never hand-read/write those files elsewhere. The user's overrides dir (config
+`[overrides] dir`) and its file formats (headers, delimiter sniffing, append-if-absent, the vocab
+`-term` removal) live in **`overrides.py`** (`overrides_dir`/`ov_path`/`append_lines`/`append_rows`/
+`merge_vocab`/`read_aliases`) — promote's folds and the rejects→overrides flow write through it,
+wrangle/classify/setup read through it; never re-derive the dir or hand-read those files. Book-text
 sampling for `--text-fallback` lives in **`booktext.py`** (`paths(con)` + `extract(path)`: EPUB-as-zip
 with a zip-bomb guard, else `ebook-convert` with a timeout — testable against a fixture EPUB). Two outputs
 per book: `added_tags` (chosen from the controlled vocab — hand-curated `defaults/classify_vocab.txt` ∪ the

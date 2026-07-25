@@ -1,24 +1,33 @@
 #!/usr/bin/env python3
-"""The ONE owner of the user's overrides/ files — their paths, headers, delimiters, and the
-append-if-absent rule — plus the `--step` reject → overrides subsystem (issue #11).
+"""The ONE owner of the user's overrides/ files — their location (cfg[overrides].dir), headers,
+delimiters, the append-if-absent rule, and the format-semantic readers — plus the `--step`
+reject → overrides subsystem (issue #11).
 
 Writers go through append_lines/append_rows (promote's vocab/trope/alias folds, the
-rejects→overrides flow below), so the formats are decided here once; readers elsewhere
-(wrangle.load_maps, classify.load_vocab/load_aliases) resolve paths via ov_path. Appends honor
-an existing file's delimiter (read_tropes sniffs ','|';'), so mixed-writer files can't corrupt.
+rejects→overrides flow below) and the format readers live next to them (merge_vocab's '-term'
+removal, read_aliases' delimiter sniff), so a format decided here can't be mis-read elsewhere.
+Appends honor an existing file's delimiter (sniffed like wrangle.read_tropes), so mixed-writer
+files can't corrupt.
 
 `apply --step` walks each book's unique edits and lets you untick individual changes; the rejected
 ones are logged to data/rejects.csv. `scourgify overrides` then turns the deterministic (wrangle)
 rejects into identity-override lines so the same wrong change never recurs."""
 import os, csv, time, collections
 from scourgify.artifacts import read_rows as read_csv
-from scourgify.common import DEFAULTS as DEF, user_dir, norm, read_lines, ro_connect
-from scourgify.wrangle import transform
+from scourgify.common import DEFAULTS as DEF, load_config, user_dir, norm, read_lines, ro_connect
+
+
+def overrides_dir(cfg: dict | None = None) -> str:
+    """The user's overrides dir — cfg[overrides].dir under user_dir(). The ONE resolution:
+    wrangle.load_maps, setup's health check, and every reader/writer here go through it,
+    so a relocated dir can never split writers from readers."""
+    cfg = cfg or load_config()
+    return os.path.join(user_dir(), cfg.get("overrides", {}).get("dir", "overrides"))
 
 
 def ov_path(name: str) -> str:
-    """A file inside the user's overrides/ dir (under user_dir())."""
-    return os.path.join(user_dir(), "overrides", name)
+    """A file inside the user's overrides dir (config-resolved)."""
+    return os.path.join(overrides_dir(), name)
 
 
 def _delim_of(path: str, default: str = ",") -> str:
@@ -35,6 +44,33 @@ def append_lines(path: str, lines: list) -> list:
     """Append plain lines to a list file (vocab / allowlists), skipping ones already present.
     -> the lines actually added."""
     return _append_override(path, lines)
+
+
+def merge_vocab(terms: list, path: str | None = None) -> list:
+    """Apply the overrides vocab file to a base term list: a plain line appends (case-insensitive
+    dedup), '-term' removes (later lines win — a promote append at the end beats an old removal),
+    comments/blanks ignored. The reader half of append_lines' format, owned next to it."""
+    path = path or ov_path("classify_vocab.txt")
+    terms = list(terms)
+    if os.path.exists(path):
+        for l in open(path):
+            l = l.strip()
+            if not l or l.startswith("#"): continue
+            if l.startswith("-"): terms = [t for t in terms if t.lower() != l[1:].strip().lower()]
+            elif l.lower() not in {t.lower() for t in terms}: terms.append(l)
+    return terms
+
+
+def read_aliases(path: str | None = None) -> dict:
+    """candidate(lower) -> target from promote_aliases.csv, sniffing the delimiter the same way
+    append_rows preserves it — a ';' file round-trips instead of parsing as one column. {} if absent."""
+    path = path or ov_path("promote_aliases.csv")
+    out = {}
+    if os.path.exists(path):
+        for r in csv.DictReader(open(path), delimiter=_delim_of(path)):
+            if r.get("candidate") and r.get("target"):
+                out[r["candidate"].strip().lower()] = r["target"].strip()
+    return out
 
 
 def append_rows(path: str, header: list, rows: list) -> int:
@@ -133,6 +169,7 @@ def _step_walk(m: dict, beh: dict, cols: dict, perbook: dict, changes: dict,
     returns the rejects to log. rich-only — the caller guards with ui.interactive()."""
     from scourgify import ui
     from scourgify.common import titles as book_titles
+    from scourgify.wrangle import transform            # lazy: wrangle imports this module at top
     lab2key = {v: k for k, v in cols.items()}
     ids = sorted(unique, reverse=True)                         # newest ids first
     titles = book_titles(ro_connect(), ids) if ids else {}     # large sets fetch all (IN() cap lives in common)
@@ -203,7 +240,7 @@ def build_overrides(do_apply: bool = False, master: bool = False) -> None:
             for fn, line in actions: auto[fn].append(line)
         else:
             manual.append((r["kind"], col, r["before"], r["after"], reason))
-    tgt = DEF if master else os.path.join(user_dir(), "overrides")
+    tgt = DEF if master else overrides_dir()
     where = "defaults/ (MASTER — checkout only; installed defaults are read-only)" if master else "overrides/"
     print(f"{'APPLY' if do_apply else 'DRY-RUN'} — {sum(len(v) for v in auto.values())} auto-suppressible line(s) → {where}")
     total_added = 0
