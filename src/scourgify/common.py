@@ -26,17 +26,31 @@ def user_dir() -> str:
 # Per-run + per-user files live under user_dir(), not site-packages nor the invoking CWD:
 # config.toml, overrides/, and data/ (proposals/intermediates + backups) all resolve there,
 # so an installed copy has a stable home instead of writing relative to wherever it's launched.
-DATA = os.path.join(user_dir(), "data")              # personal review maps, proposals, intermediates (gitignored)
-BACKUPS = os.path.join(DATA, "backups")              # metadata.db snapshots taken before every write (was /tmp)
+# Paths are FUNCTIONS, never import-time constants — $SCOURGIFY_HOME set after import (tests)
+# must still redirect the whole tree.
 BACKUP_KEEP = 20                                      # keep this many newest snapshots; older ones are pruned
 BACKUP_WARN = 500 * 1024 * 1024                       # wizard nudges to trim past this many bytes of snapshots
-REJECTS = os.path.join(DATA, "rejects.csv")          # per-item rejects from `--step` review (see wrangle.overrides)
 REJECT_COLS = ["ts", "stage", "book", "title", "kind", "column", "before", "after", "class"]
 
 
+def data_dir() -> str:
+    """data/ under user_dir() — personal review maps, proposals, intermediates (gitignored)."""
+    return os.path.join(user_dir(), "data")
+
+
+def backups_dir() -> str:
+    """metadata.db snapshots taken before every write."""
+    return os.path.join(data_dir(), "backups")
+
+
+def rejects_path() -> str:
+    """Per-item rejects from `--step` review (see overrides.py)."""
+    return os.path.join(data_dir(), "rejects.csv")
+
+
 def backups_size() -> tuple[int, int]:
-    """(count, total_bytes) of the metadata.db snapshots in BACKUPS; (0, 0) if none."""
-    files = glob.glob(os.path.join(BACKUPS, "*.db"))
+    """(count, total_bytes) of the metadata.db snapshots in backups_dir(); (0, 0) if none."""
+    files = glob.glob(os.path.join(backups_dir(), "*.db"))
     return len(files), sum(os.path.getsize(f) for f in files)
 
 
@@ -45,10 +59,10 @@ def log_rejects(rows: list[dict]) -> int:
     the header on first write. The "separate list" that `scourgify overrides` reads back."""
     rows = [r for r in rows if r]
     if not rows: return 0
-    os.makedirs(DATA, exist_ok=True)
+    os.makedirs(data_dir(), exist_ok=True)
     ts = time.strftime("%Y-%m-%dT%H:%M:%S")
-    new = not os.path.exists(REJECTS)
-    with open(REJECTS, "a", newline="") as f:
+    new = not os.path.exists(rejects_path())
+    with open(rejects_path(), "a", newline="") as f:
         w = csv.DictWriter(f, fieldnames=REJECT_COLS, extrasaction="ignore")
         if new: w.writeheader()
         for r in rows: w.writerow({"ts": ts, **r})
@@ -227,11 +241,11 @@ def calibre_open() -> bool:
     return True   # ponytail: no pgrep/ps → undetectable → assume open; never fail open on the safety guard
 
 def _backup_path(dirpath: str | None = None):
-    """A fresh, collision-proof snapshot path (default BACKUPS): ff_<timestamp>[_N].db. The old
+    """A fresh, collision-proof snapshot path (default backups_dir()): ff_<timestamp>[_N].db. The old
     /tmp path used whole-second granularity, so two writes in the same second (a guided wizard run
     fires several) silently overwrote one snapshot — the _N suffix guarantees each write keeps its
     own. `dirpath` is a parameter so tests point at a temp dir instead of mutating the global."""
-    dirpath = dirpath or BACKUPS
+    dirpath = dirpath or backups_dir()
     os.makedirs(dirpath, exist_ok=True)
     base = time.strftime("ff_%Y%m%dT%H%M%S")
     p = os.path.join(dirpath, base + ".db"); n = 2
@@ -242,7 +256,7 @@ def _backup_path(dirpath: str | None = None):
 def _prune_backups(dirpath: str | None = None, keep: int | None = None):
     """Keep only the `keep` (default BACKUP_KEEP) newest snapshots (the timestamp name sorts
     chronologically)."""
-    dirpath, keep = dirpath or BACKUPS, keep or BACKUP_KEEP
+    dirpath, keep = dirpath or backups_dir(), keep or BACKUP_KEEP
     for p in sorted(glob.glob(os.path.join(dirpath, "ff_*.db")))[:-keep]:
         try: os.remove(p)
         except OSError: pass
@@ -328,14 +342,14 @@ def rollback_cmd(argv: list[str]) -> None:
     ap.add_argument("--list", action="store_true", help="list available backups and exit")
     ap.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     a = ap.parse_args(argv)
-    baks = sorted(glob.glob(os.path.join(BACKUPS, "ff_*.db")), reverse=True)   # newest first
+    baks = sorted(glob.glob(os.path.join(backups_dir(), "ff_*.db")), reverse=True)   # newest first
     if not baks:
-        raise SystemExit(f"no backups in {BACKUPS} — nothing to roll back to.")
+        raise SystemExit(f"no backups in {backups_dir()} — nothing to roll back to.")
     if a.list:
-        print(f"backups in {BACKUPS} (newest first):")
+        print(f"backups in {backups_dir()} (newest first):")
         for b in baks: print(f"  {os.path.basename(b)}   ({os.path.getsize(b) // 1024} KiB)")
         return
-    target = baks[0] if not a.file else (a.file if os.path.exists(a.file) else os.path.join(BACKUPS, a.file))
+    target = baks[0] if not a.file else (a.file if os.path.exists(a.file) else os.path.join(backups_dir(), a.file))
     if not os.path.exists(target): raise SystemExit(f"no such backup: {a.file}")
     if calibre_open():
         raise SystemExit("Calibre is running — close it first (it locks metadata.db), then roll back.")

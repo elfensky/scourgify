@@ -337,10 +337,10 @@ class Plan:
         rejects = _step_walk(self.m, self.beh, self.cols, self.perbook, self.changes, unique,
                              self.known_chars, self.tagcanon)
         if rejects:
-            from scourgify.common import log_rejects, REJECTS
+            from scourgify.common import log_rejects, rejects_path
             log_rejects(rejects)
             nauto = sum(1 for r in rejects if r["class"] == "auto")
-            print(f"  logged {len(rejects)} reject(s) -> {os.path.basename(REJECTS)}"
+            print(f"  logged {len(rejects)} reject(s) -> {os.path.basename(rejects_path())}"
                   + (f"  ({nauto} → run `scourgify overrides` to stop them recurring)" if nauto else ""))
 
     def write(self, force: bool = False) -> None:

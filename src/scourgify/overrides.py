@@ -222,10 +222,10 @@ def _append_override(path: str, lines: list) -> list:
 def build_overrides(do_apply: bool = False, master: bool = False) -> None:
     """Read data/rejects.csv, turn the auto-suppressible wrangle rejects into identity-override lines
     (grouped by target file), and list the manual ones for hand-editing. Dry-run unless do_apply."""
-    from scourgify.common import REJECTS
-    if not os.path.exists(REJECTS):
-        print(f"no rejects logged yet ({os.path.basename(REJECTS)} not found — reject something in `apply --step` first)."); return
-    rows = [r for r in read_csv(REJECTS) if r.get("stage") == "wrangle"]
+    from scourgify.common import rejects_path
+    if not os.path.exists(rejects_path()):
+        print(f"no rejects logged yet ({os.path.basename(rejects_path())} not found — reject something in `apply --step` first)."); return
+    rows = [r for r in read_csv(rejects_path()) if r.get("stage") == "wrangle"]
     if not rows:
         print("no wrangle rejects to act on (classify rejects are AI hallucinations — log-only)."); return
     seen, auto, manual = set(), collections.defaultdict(list), []
@@ -270,15 +270,15 @@ def build_overrides(do_apply: bool = False, master: bool = False) -> None:
 def _archive_consumed_rejects() -> None:
     """Move the auto (now-suppressed) wrangle rejects out of rejects.csv into a timestamped archive;
     keep manual wrangle rows and all classify rows (still actionable / informational)."""
-    from scourgify.common import REJECTS, REJECT_COLS
-    rows = read_csv(REJECTS)
+    from scourgify.common import rejects_path, REJECT_COLS
+    rows = read_csv(rejects_path())
     keep = [r for r in rows if not (r.get("stage") == "wrangle" and r.get("class") == "auto")]
     gone = [r for r in rows if r.get("stage") == "wrangle" and r.get("class") == "auto"]
     if gone:
-        arch = REJECTS.replace(".csv", f"_applied_{time.strftime('%Y%m%d-%H%M%S')}.csv")
+        arch = rejects_path().replace(".csv", f"_applied_{time.strftime('%Y%m%d-%H%M%S')}.csv")
         with open(arch, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=REJECT_COLS, extrasaction="ignore"); w.writeheader(); w.writerows(gone)
-    with open(REJECTS, "w", newline="") as f:
+    with open(rejects_path(), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=REJECT_COLS, extrasaction="ignore"); w.writeheader(); w.writerows(keep)
 
 

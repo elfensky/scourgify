@@ -38,27 +38,43 @@ def test_user_dir_default_is_dot_config():
         assert user_dir() == os.path.join(os.path.expanduser("~/.config"), "scourgify")
 
 
+def test_data_paths_follow_scourgify_home_after_import():
+    """The whole data/ tree late-binds through user_dir() — $SCOURGIFY_HOME set AFTER import
+    still redirects every artifact path (no import-time freeze, no monkeypatching module globals)."""
+    from scourgify import artifacts
+    with env(SCOURGIFY_HOME="/tmp/sg-late"):
+        assert common.data_dir() == "/tmp/sg-late/data"
+        assert common.backups_dir() == "/tmp/sg-late/data/backups"
+        assert common.rejects_path() == "/tmp/sg-late/data/rejects.csv"
+        assert artifacts.prop() == "/tmp/sg-late/data/classify_proposal.csv"
+        for p in (artifacts.rank(), artifacts.fail(), artifacts.review(), artifacts.ledger()):
+            assert p.startswith("/tmp/sg-late/data/")
+
+
+def test_applied_proposal_archives_found_by_owner():
+    """The 'which proposals were applied' glob lives WITH the archive convention (artifacts.py) —
+    promote.backfill can't silently miss archives because a filename convention changed elsewhere."""
+    from scourgify import artifacts, promote
+    with tempfile.TemporaryDirectory() as td, env(SCOURGIFY_HOME=td):
+        os.makedirs(os.path.join(td, "data"))
+        artifacts.write_proposal([{"book_id": 1, "title": "A", "added_tags": ["X"], "proposed_new": []}])
+        arch = artifacts.archive(artifacts.prop(), "applied")
+        assert artifacts.applied_proposals() == [arch]
+        artifacts.write_proposal([{"book_id": 2, "title": "B", "added_tags": [], "proposed_new": []}])
+        assert promote._proposal_files() == [arch, artifacts.prop()]   # archives + the live proposal
+
+
 def test_backups_size_counts_and_sums():
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as td, env(SCOURGIFY_HOME=td):
+        d = os.path.join(td, "data", "backups"); os.makedirs(d)
         for name, blob in (("ff_1.db", b"a" * 10), ("ff_2.db", b"b" * 25), ("notes.txt", b"x" * 99)):
             open(os.path.join(d, name), "wb").write(blob)
-        saved = common.BACKUPS
-        try:
-            common.BACKUPS = d
-            n, total = backups_size()
-        finally:
-            common.BACKUPS = saved
-        assert n == 2 and total == 35             # only the two *.db files, txt ignored
+        assert backups_size() == (2, 35)          # only the two *.db files, txt ignored
 
 
 def test_backups_size_empty():
-    with tempfile.TemporaryDirectory() as d:
-        saved = common.BACKUPS
-        try:
-            common.BACKUPS = d
-            assert backups_size() == (0, 0)
-        finally:
-            common.BACKUPS = saved
+    with tempfile.TemporaryDirectory() as td, env(SCOURGIFY_HOME=td):
+        assert backups_size() == (0, 0)
 
 
 if __name__ == "__main__":

@@ -12,15 +12,14 @@ import argparse, glob, json, os, re, collections
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import difflib
 
-from scourgify.artifacts import (RANK, PROP, LEDGER, REVIEW,
+from scourgify.artifacts import (prop, rank, ledger, review, applied_proposals,
                                  append_ledger, read_rows, split_tags, write_review, archive)
 from scourgify.classify import existing_terms
 from scourgify.engines import ENGINES, ask_retry, max_workers as engine_workers
-from scourgify.common import (DATA, library, norm, ro_connect, run_writer,
+from scourgify.common import (data_dir, library, norm, ro_connect, run_writer,
                               current_tags, titles as book_titles, op_set_field, interactive, confirm)
 from scourgify.overrides import ov_path, append_lines, append_rows   # overrides/ formats live there
 
-ALIASES = ov_path("promote_aliases.csv")
 VERDICTS = ("promote", "alias", "reject")
 
 
@@ -81,7 +80,8 @@ def _ledger_tags(path):
     return {r["tag"] for r in read_rows(path)}
 
 
-def candidates(ranked_path: str = RANK, proposal_path: str = PROP, ledger_path: str = LEDGER) -> list:
+def candidates(ranked_path: str | None = None, proposal_path: str | None = None, ledger_path: str | None = None) -> list:
+    ranked_path, proposal_path, ledger_path = ranked_path or rank(), proposal_path or prop(), ledger_path or ledger()
     if not os.path.exists(ranked_path):
         raise SystemExit(f"no candidates ({os.path.basename(ranked_path)} not found — run a classify pass first).")
     decided = _ledger_tags(ledger_path)
@@ -137,8 +137,11 @@ def decide(cand: dict, ask, verify_ask=None, existing: list | None = None) -> di
     return {**base, **adv, "contested": False}                     # promote stands
 
 
-def apply_decisions(review_path: str = REVIEW, vocab_path: str | None = None, tropes_path: str | None = None,
-                    aliases_path: str = ALIASES, ledger_path: str = LEDGER) -> dict:
+def apply_decisions(review_path: str | None = None, vocab_path: str | None = None, tropes_path: str | None = None,
+                    aliases_path: str | None = None, ledger_path: str | None = None) -> dict:
+    review_path = review_path or review()
+    aliases_path = aliases_path or ov_path("promote_aliases.csv")
+    ledger_path = ledger_path or ledger()
     vocab_path = vocab_path or ov_path("classify_vocab.txt")
     tropes_path = tropes_path or ov_path("tropes.csv")
     if not os.path.exists(review_path):
@@ -196,15 +199,15 @@ def backfill_wanted(resolution: dict, proposal_rows: list) -> dict:
 
 def _proposal_files():
     """Every file carrying the book↔proposed_new record: archived applied proposals + the current one."""
-    fs = sorted(glob.glob(f"{DATA}/classify_proposal_applied_*.csv"))
-    if os.path.exists(PROP): fs.append(PROP)
+    fs = applied_proposals()                       # the archive-naming convention lives with archive()
+    if os.path.exists(prop()): fs.append(prop())
     return fs
 
 
-def backfill_plan(ledger_path: str = LEDGER) -> tuple[dict, dict]:
+def backfill_plan(ledger_path: str | None = None) -> tuple[dict, dict]:
     """-> (chg {book: sorted full tag set}, adds {book: set(new tags)}) for books that
     should carry a promoted/aliased tag but don't yet. Reads the ledger + all proposals + live tags."""
-    res = resolve_ledger(read_rows(ledger_path))
+    res = resolve_ledger(read_rows(ledger_path or ledger()))
     rows = [r for pf in _proposal_files() for r in read_rows(pf)]
     want = backfill_wanted(res, rows)
     if not want: return {}, {}
@@ -239,11 +242,12 @@ def backfill(yes: bool = False) -> int:
     return len(chg)
 
 
-def run(a: argparse.Namespace, ranked_path: str = RANK, proposal_path: str = PROP,
-        review_path: str = REVIEW, existing: list | None = None,
+def run(a: argparse.Namespace, ranked_path: str | None = None, proposal_path: str | None = None,
+        review_path: str | None = None, existing: list | None = None,
         ask=None, verify_ask=None) -> None:
     """ask/verify_ask: prompt -> response text. Default to the configured engines; tests pass
     callables directly (the same seam decide() already has) instead of faking the registry."""
+    review_path = review_path or review()
     if os.path.exists(review_path) and not getattr(a, "yes", False):
         raise SystemExit(f"a pending review exists at {review_path} — apply it (scourgify promote --apply), "
                          f"delete it, or re-run with --yes to overwrite.")
@@ -264,7 +268,7 @@ def run(a: argparse.Namespace, ranked_path: str = RANK, proposal_path: str = PRO
         futs = [ex.submit(decide, c, ask, verify_ask, existing) for c in cands]
         for fut in as_completed(futs): rows.append(fut.result())
     rows.sort(key=lambda r: (r["verdict"] != "promote", -r["count"]))   # promotes first, by count
-    os.makedirs(DATA, exist_ok=True)
+    os.makedirs(data_dir(), exist_ok=True)
     write_review(rows, review_path)
     tally = {v: sum(1 for r in rows if r["verdict"] == v) for v in VERDICTS}
     nerr = sum(1 for r in rows if r["verdict"] == "error")
@@ -292,7 +296,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def normalize(a: argparse.Namespace) -> argparse.Namespace:
     library()                                       # fail fast with the clear CALIBRE_LIBRARY message
-    os.makedirs(DATA, exist_ok=True)
+    os.makedirs(data_dir(), exist_ok=True)
     return a
 
 
