@@ -118,7 +118,9 @@ def test_apply_decisions_routing():
     n = apply_decisions(review, vocab, tropes, aliases, ledger)
     assert n == {"promote": 1, "alias": 1, "reject": 1}
     assert "Gacha Mechanic" in open(vocab).read()
-    trows = list(csv.reader(open(tropes), delimiter=";"))
+    # fresh override files are comma-delimited (the overrides.py owner's default; appends to a
+    # legacy ';' file would sniff and keep ';' — see test_overrides_append_honors_delimiter)
+    trows = list(csv.reader(open(tropes)))
     assert ["Amoral Deity", "Morality", "tag"] in trows
     assert ["Amoral Deity", "Morality"] in list(csv.reader(open(aliases)))
     ledger_tags = {r["tag"] for r in csv.DictReader(open(ledger))}
@@ -134,23 +136,19 @@ def test_parse_resp_applied_alias_snap(tmp=None):
     with open(os.path.join(d, "overrides", "promote_aliases.csv"), "w", newline="") as f:
         w = csv.writer(f); w.writerow(["candidate", "target"]); w.writerow(["Post-Apocalyptic", "Angst"])
     old = os.environ.get("SCOURGIFY_HOME"); os.environ["SCOURGIFY_HOME"] = d   # overrides resolve under user_dir()
-    classify._ALIASES = None; classify._VOCAB = None
+    classify.clear_caches()
     try:
         vt, nt = classify.parse_resp('{"tags": [], "new": ["Post-Apocalyptic"]}')
         assert "Angst" in vt          # snapped to the aliased vocab term, applied
         assert "Post-Apocalyptic" not in nt
     finally:
         os.environ.pop("SCOURGIFY_HOME", None) if old is None else os.environ.__setitem__("SCOURGIFY_HOME", old)
-        classify._ALIASES = None; classify._VOCAB = None
+        classify.clear_caches()
 
 
 def test_promote_run_writes_review(tmp=None):
     import os, csv, tempfile
-    from scourgify import classify, promote
-    class Fake:                                     # advocate promotes, skeptic agrees -> promote stands
-        def __init__(self, model, timeout): pass
-        def ask(self, prompt): return '{"verdict":"promote","reason":"novel reusable trope","confidence":"high"}'
-    classify.ENGINES["fake"] = Fake
+    from scourgify import promote
     d = tempfile.mkdtemp()
     ranked = os.path.join(d, "r.csv"); prop = os.path.join(d, "p.csv")
     with open(ranked, "w", newline="") as f:
@@ -158,11 +156,12 @@ def test_promote_run_writes_review(tmp=None):
     with open(prop, "w", newline="") as f:
         w = csv.writer(f); w.writerow(["book_id", "title", "added_tags", "proposed_new"]); w.writerow(["1", "Bend It", "", "Reality Warping"])
     review = os.path.join(d, "promote_review.csv")
-    a = promote.build_parser().parse_args(["--engine", "fake", "--yes"])
-    promote.run(a, ranked_path=ranked, proposal_path=prop, review_path=review, existing=["Time Travel", "Fluff"])
+    a = promote.build_parser().parse_args(["--yes"])
+    # ask is an injected callable — the same seam decide() has; no engine registry to fake
+    promote.run(a, ranked_path=ranked, proposal_path=prop, review_path=review, existing=["Time Travel", "Fluff"],
+                ask=lambda p: '{"verdict":"promote","reason":"novel reusable trope","confidence":"high"}')
     rows = list(csv.DictReader(open(review)))
     assert len(rows) == 1 and rows[0]["tag"] == "Reality Warping" and rows[0]["verdict"] == "promote"
-    del classify.ENGINES["fake"]
 
 
 def test_apply_decisions_normalizes_verdict():
@@ -224,11 +223,8 @@ def test_decide_skeptic_inconclusive_marks_low():
 
 def test_run_raises_on_existing_review():
     import os, csv, tempfile
-    from scourgify import classify, promote
-    class Fake:
-        def __init__(self, model, timeout): pass
-        def ask(self, prompt): return '{"verdict":"promote","reason":"novel","confidence":"high"}'
-    classify.ENGINES["fake2"] = Fake
+    from scourgify import promote
+    fake_ask = lambda p: '{"verdict":"promote","reason":"novel","confidence":"high"}'
     d = tempfile.mkdtemp()
     ranked = os.path.join(d, "r.csv"); prop = os.path.join(d, "p.csv")
     with open(ranked, "w", newline="") as f:
@@ -239,19 +235,18 @@ def test_run_raises_on_existing_review():
     # pre-create the review file to simulate a pending review
     with open(review, "w") as f: f.write("existing content")
     # without --yes, should raise SystemExit
-    a = promote.build_parser().parse_args(["--engine", "fake2"])
+    a = promote.build_parser().parse_args([])
     raised = False
     try:
-        promote.run(a, ranked_path=ranked, proposal_path=prop, review_path=review)
+        promote.run(a, ranked_path=ranked, proposal_path=prop, review_path=review, ask=fake_ask)
     except SystemExit as e:
         raised = True
         assert "pending review" in str(e)
     assert raised, "expected SystemExit when review file exists and --yes not set"
     # with --yes, should overwrite without error
-    a2 = promote.build_parser().parse_args(["--engine", "fake2", "--yes"])
+    a2 = promote.build_parser().parse_args(["--yes"])
     # candidates list is empty (prop has no rows), so run exits early with "nothing to do"
-    promote.run(a2, ranked_path=ranked, proposal_path=prop, review_path=review)
-    del classify.ENGINES["fake2"]
+    promote.run(a2, ranked_path=ranked, proposal_path=prop, review_path=review, ask=fake_ask)
 
 
 def test_decide_downgrades_self_and_unknown_alias():

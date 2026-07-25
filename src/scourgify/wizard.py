@@ -21,7 +21,8 @@ from rich import box
 from rich.table import Table
 
 from scourgify import artifacts, common, engines, wrangle, classify, staleness, select, promote, overrides
-from scourgify.common import library, db_path, ro_connect, custom_column_id, calibre_open
+from scourgify import setup as setup_mod
+from scourgify.common import library, db_path, load_config, ro_connect, custom_column_id, calibre_open
 
 COLS = ["#fandoms", "#characters", "#relationships", "#genres", "#status", "#updated", "#wrangled"]
 ENGINE_KEYS = engines.ENGINE_ENV               # single source of truth (defined in engines); never disagree
@@ -38,7 +39,7 @@ def _proposal_counts(rows: list) -> tuple[int, int]:
 def snapshot():
     try:
         con = ro_connect()
-        books = con.execute("SELECT count(*) FROM books").fetchone()[0]
+        books = common.book_count(con)
         missing = [c for c in COLS if custom_column_id(con, c) is None]
         # new/changed since the last classify-apply — same select.changed() the classify stage uses
         changed = len(select.changed(con)) if "#updated" not in missing and "#wrangled" not in missing else None
@@ -48,14 +49,14 @@ def snapshot():
     pending, to_stamp = _proposal_counts(artifacts.read_proposal())
     # cheap file-based signals of unfinished work, surfaced as menu hints
     candidates = 0
-    if os.path.exists(classify.RANK):
+    if os.path.exists(artifacts.RANK):
         try: candidates = len(promote.candidates())          # new-tag candidates not yet adjudicated
         except SystemExit: candidates = 0
-    verdicts_pending = os.path.exists(promote.REVIEW)         # adjudicated promote verdicts awaiting apply
+    verdicts_pending = os.path.exists(artifacts.REVIEW)       # adjudicated promote verdicts awaiting apply
     rejects = sum(1 for r in artifacts.read_rows(common.REJECTS)
                   if r.get("stage") == "wrangle" and r.get("class") == "auto")
     backfill_n = 0                                            # actual books that would gain a tag — clears once backfilled,
-    if os.path.exists(promote.LEDGER):                       # unlike a "ledger has promotions" flag, which never clears
+    if os.path.exists(artifacts.LEDGER):                     # unlike a "ledger has promotions" flag, which never clears
         try: backfill_n = len(promote.backfill_plan()[0])
         except Exception: backfill_n = 0
     return {"books": books, "missing": missing, "changed": changed,
@@ -89,23 +90,27 @@ def header(info):
 
 # ---------------- lifecycle stages ----------------
 def stage_setup():
-    wrangle.setup(wrangle.load_config())
+    setup_mod.setup(load_config())
 
 
 def stage_wrangle():
-    cfg = wrangle.load_config(); maps = wrangle.load_maps(cfg)
-    n = wrangle.apply_changes(cfg, maps, do_write=False, cli_hint=False)   # dry run: report + SAFETY
-    if not n:
+    cfg = load_config()
+    p = wrangle.plan(cfg, wrangle.load_maps(cfg))   # ONE compute: the preview, step review, and write all read it
+    p.preview()                                     # dry-run report (mass folds + unique changes + SAFETY)
+    p.guard()                                       # guardrail SystemExit -> _stage_guard skips the stage
+    if not p.n_books:
         ui.say("nothing to normalize ✓", "green"); return
     ui.say("(per-value detail any time: scourgify audit)", "dim")
-    choice = ui.menu(f"apply to {n} books? (Calibre closed; auto-backup)", [
+    choice = ui.menu(f"apply to {p.n_books} books? (Calibre closed; auto-backup)", [
         ("a", "apply all", "write every book's normalizations in one pass"),
         ("r", "review 1-by-1", "walk each book's unique changes; untick to reject (mass folds auto-apply)"),
         ("s", "skip", "leave the library unchanged"),
     ], default="a")
     if choice == "s":
         ui.say("(skipped — nothing written)", "dim"); return
-    wrangle.apply_changes(cfg, maps, do_write=True, detail=False, step=choice == "r")
+    if choice == "r":
+        p.step()
+    p.write()
     ui.say("done ✓", "green")
 
 
@@ -113,12 +118,7 @@ def stage_staleness():
     label, rows = staleness.compute()
     if not rows:
         ui.say("all #status values already consistent ✓", "green"); return
-    t = Table(box=box.SIMPLE, title=f"{label} re-derivations")
-    t.add_column("transition"); t.add_column("books", justify="right")
-    for k, c in collections.Counter(f"{o} → {n}" for _, o, n, _ in rows).most_common():
-        t.add_row(k, str(c))
-    console.print(t)
-    ui.say("examples: " + ", ".join(f"#{b} {o}→{n} ({yrs:.1f}y)" for b, o, n, yrs in rows[:5]), "dim")
+    staleness.show(label, rows)                     # the ONE renderer — same output as `scourgify staleness`
     if ui.confirm(f"re-derive {label} for {len(rows)} books? (Calibre closed; auto-backup)", default=True):
         staleness.write(label, rows)
         ui.say("done ✓", "green")
@@ -126,46 +126,66 @@ def stage_staleness():
         ui.say("(skipped — nothing written)", "dim")
 
 
-def _engines():
+def _engines(env=None):
     """[(name, usable, hint)] for the engine menus — derived from engines.ENGINES + usable_engines(),
-    so a newly registered engine shows up here automatically instead of silently missing."""
-    ok = set(engines.usable_engines())
+    so a newly registered engine shows up here automatically instead of silently missing.
+    `env` passes through to usable_engines (tests inject a dict)."""
+    ok = set(engines.usable_engines(env))
     hints = {"apple": ("free, on-device", "needs the afm binary or a swift toolchain")}
     return [(e, e in ok, hints.get(e, ("key set ✓", "no API key in env"))[e not in ok])
             for e in engines.ENGINES]
 
 
-def stage_classify():
-    con = ro_connect(); ch = select.changed(con)
-    total = con.execute("SELECT count(*) FROM books").fetchone()[0]; con.close()
+def _scope_options(ch: dict, total: int) -> tuple[list, str]:
+    """PURE half of the scope menu: (options, default) from the changed-map + book count —
+    testable without a console (the drive half below just asks)."""
     opts = []
     if ch:                                        # the cheap default: only what's new since the last run
         why = collections.Counter(ch.values())
         opts.append(("n", f"new/changed — {len(ch)} books",
                      "books added or updated since the last classify: "
                      + ", ".join(f"{n} {r}" for r, n in why.most_common())))
-    else:
-        ui.say("no new or changed books since the last classify.", "dim")
     opts.append(("a", f"whole library — {total:,} books · full pass",
                  "re-tag EVERY book regardless of tag count — a paid engine over this many books costs real money"))
     opts.append(("s", "skip", "tag nothing this run (a targeted redo any time: scourgify classify --last 30 / --since DATE)"))
-    scope = ui.menu("classify scope", opts, default="n" if ch else "a")
+    return opts, ("n" if ch else "a")
+
+
+def _engine_options(engs: list, n_todo: int) -> list:
+    """PURE half of the engine menu: numbered rows with per-engine cost over the books that will
+    actually be billed (the plan's todo set)."""
+    opts = []
+    for i, (e, ok, hint) in enumerate(engs, 1):
+        cost = classify.est_cost(n_todo, e)
+        opts.append((str(i), e, f"{hint}  ·  {'free' if not cost else f'~${cost:.2f}'} for {n_todo} books"))
+    return opts
+
+
+def stage_classify():
+    con = ro_connect(); ch = select.changed(con)
+    total = common.book_count(con); con.close()
+    if not ch:
+        ui.say("no new or changed books since the last classify.", "dim")
+    opts, default = _scope_options(ch, total)
+    scope = ui.menu("classify scope", opts, default=default)
     if scope == "s":
         ui.say("(skipped — nothing tagged)", "dim"); return
     # thin descriptions sample the book text instead of being dropped; exactly one scope flag
-    # (whole-library reuses select.pick("all")). classify_run normalizes for itself.
+    # (whole-library reuses select.pick("all")). The plan is resolved ONCE — the cost shown and
+    # confirmed below is over the same `todo` set classify_run executes (never a re-gather).
     a = classify.default_opts(text_fallback=True, incremental=scope == "n", **{"all": scope == "a"})
-    targets, _, _ = classify.gather(a)
+    p = classify.plan(a)
+    targets, todo = p["targets"], p["todo"]
     if not targets:
         ui.say("no candidates with usable text — nothing to send ✓", "green"); return
+    if not todo:
+        ui.say(f"all {len(targets)} candidate(s) already in the pending proposal — the review step applies them ✓",
+               "green"); return
     while True:                                   # engine choice; 'compare' loops back after the bake-off table
         engs = _engines()                          # [(name, usable, hint)] — computed once, reused below
         hints = {e: h for e, _, h in engs}
         usable = {e: ok for e, ok, _ in engs}
-        opts = []
-        for i, (e, ok, hint) in enumerate(engs, 1):
-            cost = classify.est_cost(len(targets), e)
-            opts.append((str(i), e, f"{hint}  ·  {'free' if not cost else f'~${cost:.2f}'} for {len(targets)} books"))
+        opts = _engine_options(engs, len(todo))
         n_sample = min(5, len(targets))
         opts.append(("c", "compare", f"try {n_sample} sample books on every usable engine first"))
         k = ui.menu("engine", opts, default="1")
@@ -175,16 +195,16 @@ def stage_classify():
                 ui.error(f"{a.engine} isn't usable here — {hints[a.engine]}")
                 continue
             break
-        engines = [e for e, ok, _ in engs if ok]
-        ui.say(f"comparing: {n_sample} books × {', '.join(engines)} (sequential — a minute or two)…", "dim")
-        res = classify.bakeoff(a, targets, engines, n=n_sample)
-        con = ro_connect(); titles = {b: t for b, t in con.execute("SELECT id, title FROM books")}; con.close()
+        usable_engs = [e for e, ok, _ in engs if ok]   # NB: don't shadow the module-level `engines` import
+        ui.say(f"comparing: {n_sample} books × {', '.join(usable_engs)} (sequential — a minute or two)…", "dim")
+        res = classify.bakeoff(a, targets, usable_engs, n=n_sample)
+        con = ro_connect(); titles = common.titles(con, res); con.close()
         t = Table(box=box.SIMPLE, title="engine comparison — vocab tags (+new candidates dimmed)")
         t.add_column("book", max_width=32)
-        for e in engines: t.add_column(e, overflow="fold")
+        for e in usable_engs: t.add_column(e, overflow="fold")
         for b, per in res.items():
             row = [str(titles.get(b, b))[:32]]
-            for e in engines:
+            for e in usable_engs:
                 vt, nt, err = per.get(e, ([], [], "—"))
                 row.append(f"[red]{err}[/]" if err else ("; ".join(vt) or "[dim]none[/]")
                            + (f"\n[dim]+ {'; '.join(nt)}[/]" if nt else ""))
@@ -192,16 +212,16 @@ def stage_classify():
         console.print(t)
     if a.engine != "apple":
         if not ui.confirm(
-                f"send {len(targets)} books to the {a.engine} API (~${classify.est_cost(len(targets), a.engine):.2f})?"):
+                f"send {len(todo)} books to the {a.engine} API (~${classify.est_cost(len(todo), a.engine):.2f})?"):
             ui.say("(skipped — nothing sent)", "dim"); return
         a.yes = True                              # this confirm ANSWERS classify's spend gate — never ask twice
-    classify.classify_run(a)
+    classify.classify_run(p)                      # the SAME plan that was priced — no second gather
 
 
 def stage_review():
-    if not os.path.exists(classify.PROP):
+    if not os.path.exists(artifacts.PROP):
         ui.say("no pending proposal — nothing to review ✓", "green"); return
-    vintage = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(classify.PROP)))
+    vintage = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(artifacts.PROP)))
     rows = artifacts.read_proposal()
     tagged = [r for r in rows if r["added_tags"]]
     if not rows:
@@ -216,7 +236,7 @@ def stage_review():
         if choice == "a":
             classify.apply_proposal(); ui.say("done ✓", "green")
         else:
-            arch = artifacts.archive(classify.PROP, "discarded")
+            arch = artifacts.archive(artifacts.PROP, "discarded")
             ui.say(f"set aside -> {os.path.basename(arch)}", "dim")
         return
     cnt = collections.Counter(t for r in tagged for t in r["added_tags"])
@@ -224,15 +244,15 @@ def stage_review():
     t.add_column("vocab tag"); t.add_column("books", justify="right")
     for tag, c in cnt.most_common(15): t.add_row(tag, str(c))
     console.print(t)
-    if os.path.exists(classify.RANK):
+    if os.path.exists(artifacts.RANK):
         r = Table(box=box.SIMPLE, title="top new-tag candidates (promote into overrides/classify_vocab.txt)")
         r.add_column("count", justify="right", style="cyan"); r.add_column("proposed tag")
         for row in artifacts.read_ranked()[:15]: r.add_row(str(row["count"]), row["proposed_tag"])
         console.print(r)
-    if os.path.exists(classify.FAIL):
-        n = sum(1 for _ in csv.DictReader(open(classify.FAIL)))
-        if n: ui.say(f"⚠ {n} books failed classification — see {classify.FAIL} (recover with --engine apple)", "yellow")
-    ui.say(f"full proposal: {classify.PROP}", "dim")
+    n_failed = len(artifacts.read_rows(artifacts.FAIL))
+    if n_failed:
+        ui.say(f"⚠ {n_failed} books failed classification — see {artifacts.FAIL} (recover with --engine apple)", "yellow")
+    ui.say(f"full proposal: {artifacts.PROP}", "dim")
     choice = ui.menu("proposal", [
         ("a", "apply", f"write tags to {len(tagged)} books + stamp all {len(rows)} processed (Calibre closed; auto-backup)"),
         ("r", "review 1-by-1", "walk each book's tags; untick to reject an AI-guessed tag before it's written"),
@@ -246,7 +266,7 @@ def stage_review():
         classify.apply_proposal_step()
         ui.say("done ✓", "green")
     elif choice == "d":
-        arch = artifacts.archive(classify.PROP, "discarded")
+        arch = artifacts.archive(artifacts.PROP, "discarded")
         ui.say(f"set aside -> {os.path.basename(arch)}", "dim")
     else:
         ui.say("(kept pending)", "dim")
@@ -254,7 +274,7 @@ def stage_review():
 
 def _promote_review_menu():
     """Show the adjudicated verdicts and apply / keep / discard them (shared: fresh run + pending review)."""
-    rows = artifacts.read_rows(promote.REVIEW)
+    rows = artifacts.read_rows(artifacts.REVIEW)
     by = collections.defaultdict(list)
     for r in rows: by[r["verdict"]].append(r)
     for v, col in (("promote", "green"), ("alias", "cyan"), ("reject", "dim")):
@@ -267,7 +287,7 @@ def _promote_review_menu():
             t.add_row(r["tag"] + mark, r["target"] if v == "alias" else r.get("reason", "")[:80])
         if len(rs) > 20: t.add_row("[dim]…[/]", f"[dim]+{len(rs) - 20} more[/]")
         console.print(t)
-    ui.say(f"full verdicts (edit before applying if you like): {promote.REVIEW}", "dim")
+    ui.say(f"full verdicts (edit before applying if you like): {artifacts.REVIEW}", "dim")
     npro, nal = len(by.get("promote", [])), len(by.get("alias", []))
     choice = ui.menu("verdicts", [
         ("a", "apply", f"promote {npro} to the vocab, fold {nal} aliases (writes overrides/)"),
@@ -277,17 +297,17 @@ def _promote_review_menu():
     if choice == "a":
         promote.apply_decisions(); ui.say("done ✓  (run the backfill step to tag the source books)", "green")
     elif choice == "d":
-        arch = artifacts.archive(promote.REVIEW, "discarded")
+        arch = artifacts.archive(artifacts.REVIEW, "discarded")
         ui.say(f"set aside -> {os.path.basename(arch)}", "dim")
     else:
         ui.say("(kept pending)", "dim")
 
 
 def stage_promote():
-    if os.path.exists(promote.REVIEW):            # verdicts already adjudicated — apply them, don't re-spend the API
+    if os.path.exists(artifacts.REVIEW):          # verdicts already adjudicated — apply them, don't re-spend the API
         ui.say("a previously-adjudicated review is pending — apply it, or discard to re-adjudicate.", "dim")
         _promote_review_menu(); return
-    if not os.path.exists(classify.RANK):
+    if not os.path.exists(artifacts.RANK):
         ui.say("no new-tag candidates yet — run classify first ✓", "green"); return
     cands = promote.candidates()
     if not cands:

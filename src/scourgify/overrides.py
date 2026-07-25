@@ -1,13 +1,58 @@
 #!/usr/bin/env python3
-"""The `--step` reject → overrides subsystem, split out of wrangle.py (issue #11).
+"""The ONE owner of the user's overrides/ files — their paths, headers, delimiters, and the
+append-if-absent rule — plus the `--step` reject → overrides subsystem (issue #11).
+
+Writers go through append_lines/append_rows (promote's vocab/trope/alias folds, the
+rejects→overrides flow below), so the formats are decided here once; readers elsewhere
+(wrangle.load_maps, classify.load_vocab/load_aliases) resolve paths via ov_path. Appends honor
+an existing file's delimiter (read_tropes sniffs ','|';'), so mixed-writer files can't corrupt.
 
 `apply --step` walks each book's unique edits and lets you untick individual changes; the rejected
 ones are logged to data/rejects.csv. `scourgify overrides` then turns the deterministic (wrangle)
-rejects into identity-override lines so the same wrong change never recurs. Pure move — no logic
-changes; imports the core engine helpers (read_csv/read_lines/transform) from wrangle."""
+rejects into identity-override lines so the same wrong change never recurs."""
 import os, csv, time, collections
-from scourgify.common import DEFAULTS as DEF, user_dir, norm, ro_connect
-from scourgify.wrangle import read_csv, read_lines, transform
+from scourgify.artifacts import read_rows as read_csv
+from scourgify.common import DEFAULTS as DEF, user_dir, norm, read_lines, ro_connect
+from scourgify.wrangle import transform
+
+
+def ov_path(name: str) -> str:
+    """A file inside the user's overrides/ dir (under user_dir())."""
+    return os.path.join(user_dir(), "overrides", name)
+
+
+def _delim_of(path: str, default: str = ",") -> str:
+    """The delimiter an existing override CSV already uses (sniffed like wrangle.read_tropes);
+    `default` for a new file."""
+    if os.path.exists(path):
+        first = open(path).readline()
+        if ";" in first and first.count(";") >= first.count(","): return ";"
+        if "," in first: return ","
+    return default
+
+
+def append_lines(path: str, lines: list) -> list:
+    """Append plain lines to a list file (vocab / allowlists), skipping ones already present.
+    -> the lines actually added."""
+    return _append_override(path, lines)
+
+
+def append_rows(path: str, header: list, rows: list) -> int:
+    """Append CSV rows, honoring the file's existing delimiter (default ','), writing the header
+    on first write, skipping rows already present. -> how many were added."""
+    delim = _delim_of(path)
+    new = not os.path.exists(path)
+    existing = set() if new else {tuple(r) for r in csv.reader(open(path), delimiter=delim)}
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    added = 0
+    with open(path, "a", newline="") as f:
+        w = csv.writer(f, delimiter=delim)
+        if new: w.writerow(header)
+        for r in rows:
+            key = tuple(str(x) for x in r)
+            if key in existing: continue
+            w.writerow(r); existing.add(key); added += 1
+    return added
 
 
 # ---------------- 1-by-1 review (`--step`): reconstruct + rejects → overrides ----------------
@@ -87,10 +132,10 @@ def _step_walk(m: dict, beh: dict, cols: dict, perbook: dict, changes: dict,
     `changes` and never shown. Mutates `changes` in place (revert-rejected-from-full-result) and
     returns the rejects to log. rich-only — the caller guards with ui.interactive()."""
     from scourgify import ui
+    from scourgify.common import titles as book_titles
     lab2key = {v: k for k, v in cols.items()}
     ids = sorted(unique, reverse=True)                         # newest ids first
-    con = ro_connect()
-    titles = dict(con.execute("SELECT id, title FROM books")) if ids else {}   # fetch all: --step's id set is unbounded, so an IN(?) list could exceed SQLite's variable cap
+    titles = book_titles(ro_connect(), ids) if ids else {}     # large sets fetch all (IN() cap lives in common)
     rejects = []
     for pos, b in enumerate(ids):
         edits = unique[b]

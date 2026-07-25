@@ -20,6 +20,8 @@ SEP = "; "                                    # the in-cell list delimiter for t
 PROP_COLS = ["book_id", "title", "added_tags", "proposed_new"]
 RANK_COLS = ["proposed_tag", "count", "nearest_existing", "similarity", "verdict"]
 REVIEW_COLS = ["tag", "count", "verdict", "target", "reason", "confidence", "contested"]
+LEDGER_COLS = ["tag", "verdict", "target"]
+FAIL_COLS = ["book_id", "title", "reason"]
 
 
 def split_tags(s) -> list:
@@ -77,6 +79,21 @@ def write_review(rows: list, path: str = REVIEW) -> None:
         w = csv.DictWriter(f, fieldnames=REVIEW_COLS, extrasaction="ignore")
         w.writeheader()
         for r in rows: w.writerow({k: r.get(k, "") for k in REVIEW_COLS})
+
+
+def append_ledger(tag: str, verdict: str, target: str, path: str = LEDGER) -> None:
+    """Append one decided candidate to the promote ledger (header on first write)."""
+    new = not os.path.exists(path)
+    with open(path, "a", newline="") as f:
+        w = csv.writer(f)
+        if new: w.writerow(LEDGER_COLS)
+        w.writerow([tag, verdict, target])
+
+
+def write_failures(rows: list, path: str = FAIL) -> None:
+    """rows: FAIL_COLS-ordered lists — the books an engine errored on."""
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f); w.writerow(FAIL_COLS); w.writerows(rows)
 
 
 def archive(path: str, kind: str) -> str:

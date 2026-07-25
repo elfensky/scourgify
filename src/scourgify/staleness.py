@@ -45,6 +45,16 @@ def write(status_label: str, rows: list) -> None:
     run_writer([op_set_field(status_label, {b: n for b, o, n, _ in rows})])
 
 
+def show(label: str, rows: list) -> None:
+    """The ONE dry-run renderer (CLI + wizard): transition counts + examples, rich-or-plain."""
+    from scourgify import report
+    trans = collections.Counter(f"{o} → {n}" for _, o, n, _ in rows)
+    report.table(f"{label} re-derivations — {len(rows)} book(s)", ["transition", "books"],
+                 [[k, str(c)] for k, c in trans.most_common()], right=(1,))
+    if rows:
+        report.say("examples: " + ", ".join(f"#{b} {o}→{n} ({yrs:.1f}y)" for b, o, n, yrs in rows[:5]), "dim")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Re-derive #status from #updated age (activity family only).")
     p.add_argument("--apply", action="store_true", help="write #status (Calibre closed)")
@@ -53,13 +63,8 @@ def main() -> None:
     a = p.parse_args()
 
     label, rows = compute(a.stale_years, a.dead_years)
-    trans = collections.Counter(f"{o} -> {n}" for _, o, n, _ in rows)
     print(f"staleness audit  (today={datetime.date.today()}, stale>={a.stale_years}y, dead>={a.dead_years}y)")
-    print(f"  books reclassified: {len(rows)}")
-    for k, c in trans.most_common(): print(f"    {k:24} {c}")
-    print("  examples:")
-    for b, o, n, yrs in rows[:10]:
-        print(f"    {o:12}->{n:12} ({yrs:.1f}y) #{b}")
+    show(label, rows)
 
     if a.apply:
         write(label, rows)

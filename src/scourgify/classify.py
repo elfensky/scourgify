@@ -17,33 +17,32 @@ Engines (--engine):  apple = on-device Apple Foundation Models via ./afm (free; 
           the sparse-book default (< --min-tags) applies only when no scope flag is given. --apply auto-creates the
           #wrangled datetime column and stamps EVERY processed book, so the state lives IN the library — no external
           file. Selection semantics live in select.py (shared with the wizard header)."""
-import argparse, os, re, csv, json, subprocess, collections, time, difflib
+import argparse, os, csv, json, re, collections, difflib
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from scourgify import select
+from scourgify import booktext, report, select
+from scourgify.booktext import strip_html                               # text extraction lives in booktext.py
 from scourgify.common import (HERE, DATA, user_dir, ro_connect, custom_column_id, run_writer, library,
-                              current_tags, op_create_column, op_set_field, op_stamp_now,
+                              current_tags, titles as book_titles, op_create_column, op_set_field, op_stamp_now,
                               interactive as _interactive, confirm as _confirm)
-from scourgify.artifacts import (PROP, RANK, FAIL, PROP_COLS,           # artifact formats live in artifacts.py;
+from scourgify.overrides import ov_path                                 # overrides/ paths live there
+from scourgify.artifacts import (PROP, RANK, FAIL,                      # artifact formats live in artifacts.py
                                  read_proposal, write_proposal, write_ranked, archive)
 # the engine seam lives in engines.py; re-exported here so `classify.ENGINES` / `classify.ask_retry`
 # stay valid for promote, the wizard, and existing tests
-from scourgify.engines import ENGINES, ENGINE_ENV, PRICING, ERR_TRUNC, usable_engines, ask_retry
-try:                                              # rich is optional: live dashboard/tables in system python3
-    from rich.console import Console, Group
-    from rich.live import Live
-    from rich.panel import Panel
-    from rich.progress import Progress, BarColumn, TextColumn, MofNCompleteColumn, TimeRemainingColumn
-    from rich.table import Table
-    from rich.text import Text
-    _con = Console(stderr=True); RICH = True
-except ImportError:
-    RICH = False
+from scourgify.engines import ENGINES, ENGINE_ENV, PRICING, usable_engines, ask_retry
+from scourgify.report import Dashboard as _Dashboard                    # live display lives in report.py
 
 AO3_VOCAB = f"{DATA}/ao3_vocab.csv"     # per-library canonical AO3 freeforms (name,uses); absent on fresh installs
 SPEND_GATE = 200        # cloud runs above this many books require an explicit yes
 DEDUP_CUTOFF = 0.86     # difflib ratio at/above which a proposed tag counts as a variant of an existing one
 
 _VOCAB = None
+def clear_caches() -> None:
+    """Forget the memoized vocab/alias/AO3 loads (they key off user_dir(), which tests repoint
+    via $SCOURGIFY_HOME) — the supported way to reload, instead of poking module globals."""
+    global _VOCAB, _ALIASES, _AO3
+    _VOCAB = _ALIASES = _AO3 = None
+
 def _read_vocab_file(path: str) -> list:
     return [l.strip() for l in open(path) if l.strip() and not l.startswith("#")] if os.path.exists(path) else []
 
@@ -57,7 +56,7 @@ def load_vocab() -> list:
         for t in (_read_vocab_file(f"{HERE}/defaults/classify_vocab.txt")          # first spelling of a norm wins,
                   + _read_vocab_file(f"{HERE}/defaults/classify_vocab_ao3.txt")):  # so a hand-edit dup can't sneak in
             if t.lower() not in have: terms.append(t); have.add(t.lower())
-        ov = os.path.join(user_dir(), "overrides", "classify_vocab.txt")
+        ov = ov_path("classify_vocab.txt")
         if os.path.exists(ov):
             for l in open(ov):
                 l = l.strip()
@@ -73,7 +72,7 @@ def load_aliases() -> dict:
     so tags we've decided are synonyms stop getting re-proposed as 'new'. {} if absent."""
     global _ALIASES
     if _ALIASES is None:
-        p = os.path.join(user_dir(), "overrides", "promote_aliases.csv")
+        p = ov_path("promote_aliases.csv")
         _ALIASES = {}
         if os.path.exists(p):
             for r in csv.DictReader(open(p)):
@@ -166,76 +165,6 @@ def annotate_new(ranked, cutoff: float = DEDUP_CUTOFF, existing: list | None = N
     return rows
 
 
-# ---- live run display ----
-def sparkline(vals: list, width: int = 28) -> str:
-    """Unicode sparkline of a numeric series (last `width` points), scaled to its max."""
-    vals = [v for v in vals][-width:]
-    if not vals: return ""
-    blocks = "▁▂▃▄▅▆▇█"
-    hi = max(vals)
-    if hi <= 0: return blocks[0] * len(vals)
-    return "".join(blocks[min(7, int(v * 8 / hi))] for v in vals)
-
-class _Dashboard:
-    """Live display for a classify run: progress bar, running numbers (tagged / failed /
-    no-match / rate), a throughput sparkline, and the rising new-tag candidates.
-    rich renders it live; without rich it degrades to a checkpoint line every 25 books."""
-    BUCKET = 5.0                                   # seconds per throughput bucket
-
-    def __init__(self, todo_n, done_before, targets_n):
-        self.total, self.done_before, self.targets = todo_n, done_before, targets_n
-        self.n = self.tagged = self.fails = 0
-        self.newtags = collections.Counter()
-        self.t0 = time.monotonic(); self.hist = [0]
-        self.live = self.prog = self.task = None
-
-    def __enter__(self):
-        if RICH and self.total:
-            self.prog = Progress(TextColumn("[cyan]classifying"), BarColumn(bar_width=None),
-                                 MofNCompleteColumn(), TimeRemainingColumn(), console=_con)
-            self.task = self.prog.add_task("", total=self.total)
-            self.live = Live(self._render(), console=_con, refresh_per_second=4)
-            self.live.__enter__()
-        return self
-
-    def __exit__(self, *exc):
-        if self.live: self.live.__exit__(*exc)
-        return False
-
-    def update(self, vt, nt, err):
-        self.n += 1
-        if err: self.fails += 1
-        elif vt: self.tagged += 1
-        self.newtags.update(nt)
-        b = int((time.monotonic() - self.t0) // self.BUCKET)
-        while len(self.hist) <= b: self.hist.append(0)
-        self.hist[b] += 1
-        if self.live:
-            self.prog.update(self.task, advance=1)
-            self.live.update(self._render())
-        elif self.n % 25 == 0:
-            el = time.monotonic() - self.t0
-            print(f"  +{self.n}/{self.total} … {self.tagged} tagged, {self.fails} failed, {self.n / el:.1f}/s")
-
-    def _render(self):
-        el = time.monotonic() - self.t0
-        rate = self.n / el if el > 1 else 0.0
-        g = Table.grid(padding=(0, 2))
-        g.add_row("[bold]this run[/]", f"{self.n}/{self.total}",
-                  "[green]tagged[/]", str(self.tagged),
-                  "[red]failed[/]", str(self.fails),
-                  "[dim]no match[/]", str(max(0, self.n - self.tagged - self.fails)),
-                  "[bold]rate[/]", f"{rate:.1f}/s")
-        parts = [self.prog, g]
-        spark = sparkline(self.hist)
-        if spark: parts.append(Text.assemble(("throughput  ", "bold"), (spark, "cyan")))
-        if self.newtags:
-            top = " · ".join(f"{t} ×{c}" for t, c in self.newtags.most_common(5))
-            parts.append(Text.assemble(("rising candidates  ", "bold"), (top, "magenta")))
-        return Panel(Group(*parts), border_style="cyan", padding=(0, 1),
-                     title=f"classify — {self.done_before + self.n}/{self.targets} total")
-
-
 # ---- apply: 'added_tags' + stamp #wrangled — standalone, no LLM calls ----
 def apply_proposal() -> None:
     if not os.path.exists(PROP):
@@ -272,7 +201,7 @@ def apply_proposal_step() -> None:
     from scourgify.common import log_rejects
     con = ro_connect()
     desc = {b: strip_html(t) for b, t in con.execute("SELECT book, text FROM comments")}
-    titles = {b: t for b, t in con.execute("SELECT id, title FROM books")}
+    titles = book_titles(con)
     decided, pending, rejects, quit_ = [], [], [], False
     for r in read_proposal():
         tags = r["added_tags"]
@@ -296,35 +225,12 @@ def apply_proposal_step() -> None:
 
 
 # ---- gather books (read-only) ----
-def strip_html(s: str | None) -> str: return re.sub(r"<[^>]+>", " ", s or "").strip()
-
-def book_text(path: str | None, limit: int = 6000) -> str:
-    if not path or not os.path.exists(path): return ""
-    if path.lower().endswith(".epub"):                  # fast path: epub is a zip of XHTML
-        import zipfile
-        try:
-            z = zipfile.ZipFile(path); out = []
-            for n in z.namelist():
-                if not n.lower().endswith((".xhtml", ".html", ".htm")): continue
-                if z.getinfo(n).file_size > 2_000_000: continue        # untrusted download: skip zip-bomb members
-                t = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", z.read(n).decode("utf-8", "ignore"))).strip()
-                if len(t) > 200: out.append(t)           # skip nav/title pages
-                if sum(len(x) for x in out) > limit: break
-            return " ".join(out)[:limit]
-        except Exception: return ""
-    import tempfile                                      # other formats (MOBI/PDF/DOCX/…): let calibre extract
-    try:
-        with tempfile.TemporaryDirectory() as td:
-            o = os.path.join(td, "o.txt")
-            subprocess.run(["ebook-convert", path, o], capture_output=True, timeout=180)
-            return re.sub(r"\s+", " ", open(o, errors="ignore").read()).strip()[:limit] if os.path.exists(o) else ""
-    except Exception: return ""
-
 def gather(a: argparse.Namespace) -> tuple:
     """-> (targets [(book, text)], titles, needs). Scope comes from the flags, first match wins:
     --incremental / --last N / --since DATE select ONLY matching books (newest-added-first);
     bare classify keeps the sparse mode (fewer than --min-tags tags). `needs(b)` is True for
-    explicitly scoped books — the resume logic uses it to re-process them even if already proposed."""
+    explicitly scoped books — the resume logic uses it to re-process them even if already proposed.
+    Text extraction (EPUB zip / ebook-convert) lives in booktext.py."""
     con = ro_connect(); c = con.cursor()
     if a.all:         ids, scope = select.pick(con, "all"), "whole library"
     elif a.incremental: ids, scope = select.pick(con, "incremental"), "new/changed since last classify"
@@ -334,18 +240,12 @@ def gather(a: argparse.Namespace) -> tuple:
     explicit = set(ids) if (a.all or a.incremental or a.last or a.since) else set()
     def needs(b): return b in explicit
     desc = {b: t for b, t in c.execute("SELECT book, text FROM comments")}
-    bookfile = {}
-    if a.text_fallback:                           # when the description is thin, sample the book's own text
-        bp = {b: p for b, p in c.execute("SELECT id, path FROM books")}
-        byb = {}
-        for b, fmt, name in c.execute("SELECT book, format, name FROM data"):
-            byb.setdefault(b, {})[fmt.upper()] = os.path.join(library(), bp[b], name + "." + fmt.lower())
-        for b, fm in byb.items():
-            bookfile[b] = fm.get("EPUB") or next(iter(fm.values()))   # prefer EPUB, else any available format
+    # when the description is thin, sample the book's own text instead of dropping the book
+    bookfile = booktext.paths(con) if a.text_fallback else {}
     def text_for(b):
         d = strip_html(desc.get(b, ""))
         if len(d) >= 80 or not a.text_fallback: return d
-        et = book_text(bookfile.get(b, ""))
+        et = booktext.extract(bookfile.get(b, ""))
         return (d + " " + et).strip() if et else d
     targets = [(b, text_for(b)) for b in ids]
     kept = [(b, t) for b, t in targets if t and len(t) >= 40]
@@ -353,9 +253,28 @@ def gather(a: argparse.Namespace) -> tuple:
     if len(kept) < len(targets):                  # no silent drops: thin descriptions are reported, not vanished
         print(f"  note: {len(targets) - len(kept)} dropped (description under 40 chars"
               + (")" if a.text_fallback else "; --text-fallback samples the book text instead)"))
-    titles = {b: t for b, t in c.execute("SELECT id, title FROM books")}
+    titles = book_titles(con)
     if a.limit: kept = kept[:a.limit]
     return kept, titles, needs
+
+
+def plan(a: argparse.Namespace) -> dict:
+    """Resolve a classify run ONCE — scope → targets (gather), resume → todo — and return the
+    whole Run as a dict. The wizard prices/confirms over this plan and classify_run executes the
+    SAME plan, so the confirmed cost is the billed cost and the expensive text extraction never
+    runs twice. Keys: opts, targets, titles, needs, proposal, done, todo."""
+    a = normalize(a)
+    targets, titles, needs = gather(a)
+    proposal, done = {}, set()                     # book -> (vocab_tags, proposed_new_tags)
+    if not a.fresh:                                # resume: skip books already in proposal
+        for r in read_proposal():
+            bid, at = r["book_id"], r["added_tags"]
+            proposal[bid] = (at, r["proposed_new"])
+            if (at or not a.text_fallback) and not needs(bid): done.add(bid)   # re-process books changed since last wrangle
+    todo = [(b, d) for b, d in targets if b not in done]
+    if a.batch: todo = todo[:a.batch]
+    return {"opts": a, "targets": targets, "titles": titles, "needs": needs,
+            "proposal": proposal, "done": done, "todo": todo}
 
 
 def bakeoff(a: argparse.Namespace, targets: list, engines: list, n: int = 5) -> dict:
@@ -383,24 +302,18 @@ def spend_gate(n_books: int, engine: str, yes: bool) -> None:
         raise SystemExit("aborted (nothing sent).")
 
 
-def classify_run(a: argparse.Namespace) -> None:
-    a = normalize(a)                               # owns its invariants (apple → workers=1) regardless of caller
-    targets, titles, needs = gather(a)
+def classify_run(run) -> None:
+    """Execute a classify Run. Accepts the dict from plan() (the wizard's path — planned,
+    priced, and confirmed once) or a bare argparse Namespace (the CLI path — planned here)."""
+    if isinstance(run, argparse.Namespace): run = plan(run)
+    a, targets, titles = run["opts"], run["targets"], run["titles"]
+    proposal, done, todo = run["proposal"], run["done"], run["todo"]
     print(f"engine={a.engine}  candidate books: {len(targets)}")
-
-    proposal, done = {}, set()                     # book -> (vocab_tags, proposed_new_tags)
-    if not a.fresh:                                # resume: skip books already in proposal
-        for r in read_proposal():
-            bid, at = r["book_id"], r["added_tags"]
-            proposal[bid] = (at, r["proposed_new"])
-            if (at or not a.text_fallback) and not needs(bid): done.add(bid)   # re-process books changed since last wrangle
-        if done: print(f"  resuming: {len(done)} already in proposal (pass --fresh to restart)")
+    if done: print(f"  resuming: {len(done)} already in proposal (pass --fresh to restart)")
     def dump():
         write_proposal([{"book_id": b, "title": titles.get(b, ""), "added_tags": vt, "proposed_new": nt}
                         for b, (vt, nt) in proposal.items()])
 
-    todo = [(b, d) for b, d in targets if b not in done]
-    if a.batch: todo = todo[:a.batch]
     spend_gate(len(todo), a.engine, a.yes)         # cloud runs cost real money
 
     eng = ENGINES[a.engine](a.model, a.timeout)
@@ -408,8 +321,9 @@ def classify_run(a: argparse.Namespace) -> None:
         out, err = ask_retry(eng, prompt_for(d, a.max_tags)); vt, nt = parse_resp(out, a.max_tags, a.dedup_cutoff); return b, err, vt, nt
 
     failures = []
-    print(f"  {len(todo)} to do this run, {a.workers} concurrent")
-    ex = ThreadPoolExecutor(max_workers=a.workers)
+    workers = 1 if a.engine == "apple" else a.workers    # apple = one subprocess pipe, not thread-safe
+    print(f"  {len(todo)} to do this run, {workers} concurrent")
+    ex = ThreadPoolExecutor(max_workers=workers)
     interrupted = False
     try:
         with _Dashboard(len(todo), len(done), len(targets)) as dash:
@@ -433,9 +347,8 @@ def classify_run(a: argparse.Namespace) -> None:
     if interrupted:
         print(f"\n  interrupted — {len(proposal)} results saved to the proposal; re-run to resume where you left off.")
     if failures:
-        with open(FAIL, "w", newline="") as f:
-            w = csv.writer(f); w.writerow(["book_id", "title", "reason"])
-            for b, e in failures: w.writerow([b, titles.get(b, ""), e])
+        from scourgify.artifacts import write_failures
+        write_failures([[b, titles.get(b, ""), e] for b, e in failures])
         bytype = collections.Counter(e.split(":")[0].split(" ")[0] for _, e in failures)
         print(f"failures: {len(failures)} -> {os.path.basename(FAIL)}  by type: {dict(bytype)}")
         print("  (recover blocked books with a no-policy engine: scourgify classify --engine apple)")
@@ -448,18 +361,12 @@ def classify_run(a: argparse.Namespace) -> None:
     write_ranked(rows)
     print(f"\nOutput 1 (apply): {sum(1 for v in proposal.values() if v[0])} books with vocab tags -> {os.path.basename(PROP)} (col 'added_tags')")
     print(f"Output 2 (grow):  {len(fresh)} new + {len(rows) - len(fresh)} near-dupes of existing tags -> {os.path.basename(RANK)} (promote 'verdict=new' rows into defaults/classify_vocab.txt)")
-    if RICH and rows:
-        tbl = Table(title="top new-tag candidates (verdict=new → promote; near-duplicate ≈ an existing tag)")
-        tbl.add_column("count", justify="right", style="cyan"); tbl.add_column("proposed tag")
-        tbl.add_column("nearest existing", style="dim"); tbl.add_column("verdict")
-        for tag, cnt, nearest, sim, verdict in rows[:25]:
-            tbl.add_row(str(cnt), tag, f"{nearest} ({sim})" if nearest else "",
-                        f"[green]new[/]" if verdict == "new" else f"[yellow]≈ dupe[/]")
-        _con.print(tbl)
-    elif rows:
-        print("top new-tag candidates (verdict | count | tag | nearest existing):")
-        for tag, cnt, nearest, sim, verdict in rows[:25]:
-            print(f"  {verdict:14} {cnt:4}  {tag}" + (f"  ≈ {nearest} ({sim})" if nearest else ""))
+    if rows:
+        report.table("top new-tag candidates (verdict=new → promote; near-duplicate ≈ an existing tag)",
+                     ["count", "proposed tag", "nearest existing", "verdict"],
+                     [[(str(cnt), "cyan"), tag, (f"{nearest} ({sim})" if nearest else "", "dim"),
+                       ("new", "green") if verdict == "new" else ("≈ dupe", "yellow")]
+                      for tag, cnt, nearest, sim, verdict in rows[:25]], right=(0,))
     print("\nApply vocab tags with: scourgify classify --apply   (Calibre closed)")
 
 
@@ -488,9 +395,8 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 def normalize(a: argparse.Namespace) -> argparse.Namespace:
-    """Post-parse invariants (idempotent; classify_run applies them itself, so callers never
-    have to worry about ordering them around engine choice)."""
-    if a.engine == "apple": a.workers = 1        # apple = one subprocess pipe, not thread-safe
+    """Post-parse invariants (idempotent). Engine-dependent settings (apple → 1 worker) are
+    resolved at use inside classify_run, so the wizard can pick an engine after planning."""
     library()                                    # fail fast with a clear message
     os.makedirs(DATA, exist_ok=True)
     return a

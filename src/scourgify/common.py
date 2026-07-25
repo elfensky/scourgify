@@ -95,6 +95,12 @@ def confirm(msg: str, default: bool = False) -> bool:
     return default
 
 
+def read_lines(path: str) -> list:
+    """Lines of a text file without trailing newlines; [] if missing — the shared list-file
+    reader (allow/block/junk lists). The CSV twin is artifacts.read_rows."""
+    return [l.rstrip("\n") for l in open(path)] if os.path.exists(path) else []
+
+
 # ---------------- normalization ----------------
 def norm(s) -> str:
     s = str(s).strip().lower(); s = re.sub(r"[\[\]\(\)]", "", s); s = s.replace("&", "and")
@@ -124,6 +130,22 @@ def read_custom_column(con: sqlite3.Connection, label: str, multi: bool = False)
         if multi: out[b].append(v)
         else: out[b] = v
     return dict(out)
+
+
+IN_CAP = 500   # above this many ids, fetch all titles instead of building an IN() list (SQLite variable cap)
+
+def titles(con: sqlite3.Connection, ids=None) -> dict:
+    """{book_id: title}. ids=None (or a large set — see IN_CAP) fetches the whole table;
+    the ONE owner of the title lookup every preview/report used to hand-roll."""
+    ids = list(ids) if ids is not None else None
+    if ids is not None and not ids: return {}
+    if ids is None or len(ids) > IN_CAP:
+        return dict(con.execute("SELECT id, title FROM books"))
+    return dict(con.execute(f"SELECT id, title FROM books WHERE id IN ({','.join('?' * len(ids))})", ids))
+
+
+def book_count(con: sqlite3.Connection) -> int:
+    return con.execute("SELECT count(*) FROM books").fetchone()[0]
 
 
 def current_tags(con: sqlite3.Connection) -> dict:
@@ -204,20 +226,24 @@ def calibre_open() -> bool:
         return any(_is_calibre_gui(l) for l in out.splitlines())
     return True   # ponytail: no pgrep/ps → undetectable → assume open; never fail open on the safety guard
 
-def _backup_path():
-    """A fresh, collision-proof snapshot path in BACKUPS: ff_<timestamp>[_N].db. The old /tmp path
-    used whole-second granularity, so two writes in the same second (a guided wizard run fires
-    several) silently overwrote one snapshot — the _N suffix guarantees each write keeps its own."""
-    os.makedirs(BACKUPS, exist_ok=True)
+def _backup_path(dirpath: str | None = None):
+    """A fresh, collision-proof snapshot path (default BACKUPS): ff_<timestamp>[_N].db. The old
+    /tmp path used whole-second granularity, so two writes in the same second (a guided wizard run
+    fires several) silently overwrote one snapshot — the _N suffix guarantees each write keeps its
+    own. `dirpath` is a parameter so tests point at a temp dir instead of mutating the global."""
+    dirpath = dirpath or BACKUPS
+    os.makedirs(dirpath, exist_ok=True)
     base = time.strftime("ff_%Y%m%dT%H%M%S")
-    p = os.path.join(BACKUPS, base + ".db"); n = 2
+    p = os.path.join(dirpath, base + ".db"); n = 2
     while os.path.exists(p):
-        p = os.path.join(BACKUPS, f"{base}_{n}.db"); n += 1
+        p = os.path.join(dirpath, f"{base}_{n}.db"); n += 1
     return p
 
-def _prune_backups():
-    """Keep only the BACKUP_KEEP newest snapshots (the timestamp name sorts chronologically)."""
-    for p in sorted(glob.glob(os.path.join(BACKUPS, "ff_*.db")))[:-BACKUP_KEEP]:
+def _prune_backups(dirpath: str | None = None, keep: int | None = None):
+    """Keep only the `keep` (default BACKUP_KEEP) newest snapshots (the timestamp name sorts
+    chronologically)."""
+    dirpath, keep = dirpath or BACKUPS, keep or BACKUP_KEEP
+    for p in sorted(glob.glob(os.path.join(dirpath, "ff_*.db")))[:-keep]:
         try: os.remove(p)
         except OSError: pass
 

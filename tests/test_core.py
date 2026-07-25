@@ -10,7 +10,8 @@ from scourgify.common import norm, ascii_fold, load_config
 from scourgify.wrangle import (transform, resolve_trope_chains, build_tagcanon, is_junk,
                                tag_loss_guard, data_loss_guard,
                                TAG_SHRINK_FLOOR, TAG_SHRINK_FRACTION)
-from scourgify.classify import parse_resp, sparkline, load_vocab
+from scourgify.classify import parse_resp, load_vocab
+from scourgify.report import sparkline
 VOCAB = load_vocab()
 from scourgify.staleness import derive
 
@@ -172,19 +173,10 @@ def test_vocab_merges_ao3_seed_without_dups():
     assert len(VOCAB) > 200                                         # the seed meaningfully broadens the tiny core
 
 def test_usable_engines_reflects_env_keys():
-    from scourgify.classify import usable_engines, ENGINE_ENV
-    saved = {k: os.environ.get(k) for keys in ENGINE_ENV.values() for k in keys}
-    try:
-        for keys in ENGINE_ENV.values():
-            for k in keys: os.environ.pop(k, None)
-        assert "claude" not in usable_engines()                        # no key -> engine not offered
-        os.environ["ANTHROPIC_API_KEY"] = "sk-test"
-        assert "claude" in usable_engines()                            # key present -> offered
-    finally:
-        for keys in ENGINE_ENV.values():
-            for k in keys: os.environ.pop(k, None)
-        for k, v in saved.items():
-            if v is not None: os.environ[k] = v
+    from scourgify.engines import usable_engines
+    assert "claude" not in usable_engines(env={})                          # no key -> engine not offered
+    assert "claude" in usable_engines(env={"ANTHROPIC_API_KEY": "sk-t"})   # key present -> offered
+    assert "gemini" in usable_engines(env={"GOOGLE_API_KEY": "g-t"})       # either gemini key works
 
 def test_sparkline():
     assert sparkline([]) == ""
@@ -218,14 +210,14 @@ def test_vocab_overrides_merge():
         with open(os.path.join(td, "overrides", "classify_vocab.txt"), "w") as f:
             f.write("# my terms\nSentient Toaster Romance\n-Time Travel\n")
         old = os.environ.get("SCOURGIFY_HOME")
-        os.environ["SCOURGIFY_HOME"] = td; classify._VOCAB = None      # overrides resolve under user_dir()
+        os.environ["SCOURGIFY_HOME"] = td; classify.clear_caches()     # overrides resolve under user_dir()
         try:
             v = classify.load_vocab()
             assert "Sentient Toaster Romance" in v                     # appended
             assert "Time Travel" not in v                              # '-term' removed a bundled term
         finally:
             os.environ.pop("SCOURGIFY_HOME", None) if old is None else os.environ.__setitem__("SCOURGIFY_HOME", old)
-            classify._VOCAB = None
+            classify.clear_caches()
 
 def test_est_cost():
     from scourgify.classify import est_cost

@@ -8,18 +8,19 @@ proposed_new list should be promoted to the vocab, aliased to an existing tag, o
 
 Reasons each candidate against a difflib shortlist of the master tag list (curated vocab ∪ ao3_vocab)
 plus the example books that proposed it. Audit-first: verdicts are a reviewed artifact you apply."""
-import argparse, csv, glob, json, os, re, collections
+import argparse, glob, json, os, re, collections
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import difflib
 
-from scourgify.artifacts import (RANK, PROP, LEDGER, REVIEW, REVIEW_COLS,
-                                 read_rows, split_tags, write_review, archive)
+from scourgify.artifacts import (RANK, PROP, LEDGER, REVIEW,
+                                 append_ledger, read_rows, split_tags, write_review, archive)
 from scourgify.classify import existing_terms
 from scourgify.engines import ENGINES, ask_retry
-from scourgify.common import (DATA, user_dir, library, norm, ro_connect, run_writer,
-                              current_tags, op_set_field, interactive, confirm)
+from scourgify.common import (DATA, library, norm, ro_connect, run_writer,
+                              current_tags, titles as book_titles, op_set_field, interactive, confirm)
+from scourgify.overrides import ov_path, append_lines, append_rows   # overrides/ formats live there
 
-ALIASES = os.path.join(user_dir(), "overrides", "promote_aliases.csv")
+ALIASES = ov_path("promote_aliases.csv")
 VERDICTS = ("promote", "alias", "reject")
 
 
@@ -133,43 +134,29 @@ def decide(cand: dict, ask, verify_ask=None, existing: list | None = None) -> di
     return {**base, **adv, "contested": False}                     # promote stands
 
 
-def _append_line(path, line):
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "a") as f: f.write(line + "\n")
-
-
-def _append_row(path, header, row, delim=","):
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    new = not os.path.exists(path)
-    with open(path, "a", newline="") as f:
-        w = csv.writer(f, delimiter=delim)
-        if new: w.writerow(header)
-        w.writerow(row)
-
-
 def apply_decisions(review_path: str = REVIEW, vocab_path: str | None = None, tropes_path: str | None = None,
                     aliases_path: str = ALIASES, ledger_path: str = LEDGER) -> dict:
-    vocab_path = vocab_path or os.path.join(user_dir(), "overrides", "classify_vocab.txt")
-    tropes_path = tropes_path or os.path.join(user_dir(), "overrides", "tropes.csv")
+    vocab_path = vocab_path or ov_path("classify_vocab.txt")
+    tropes_path = tropes_path or ov_path("tropes.csv")
     if not os.path.exists(review_path):
         raise SystemExit(f"no review to apply ({os.path.basename(review_path)} not found — run promote first).")
     n = {"promote": 0, "alias": 0, "reject": 0}
-    for r in csv.DictReader(open(review_path)):
+    for r in read_rows(review_path):
         tag, target = r["tag"], r.get("target", "")
         v = r["verdict"].strip().lower()
         if v not in VERDICTS:
             print(f"  skipped {tag}: unknown verdict {r['verdict']!r}")
             continue
         if v == "promote":
-            _append_line(vocab_path, tag)
+            append_lines(vocab_path, [tag])
         elif v == "alias":
             if not target.strip() or norm(target) == norm(tag):    # hand-edited self/empty alias: never write a junk fold
                 print(f"  skipped {tag}: alias needs a distinct target (got {target!r})")
                 continue
-            _append_row(tropes_path, ["variant", "canonical", "route"], [tag, target, "tag"], delim=";")
-            _append_row(aliases_path, ["candidate", "target"], [tag, target])
+            append_rows(tropes_path, ["variant", "canonical", "route"], [[tag, target, "tag"]])
+            append_rows(aliases_path, ["candidate", "target"], [[tag, target]])
         n[v] = n.get(v, 0) + 1
-        _append_row(ledger_path, ["tag", "verdict", "target"], [tag, v, target])
+        append_ledger(tag, v, target, ledger_path)
     arch = archive(review_path, "applied")
     print(f"applied: {n['promote']} promoted, {n['alias']} aliased, {n['reject']} rejected; "
           f"review archived -> {os.path.basename(arch)}")
@@ -235,7 +222,7 @@ def backfill(yes: bool = False) -> int:
     print(f"backfill: {len(chg)} book(s) gain {total} promoted/aliased tag-assignment(s), e.g.:")
     preview = list(adds)[:8]
     con = ro_connect()
-    titles = dict(con.execute(f"SELECT id, title FROM books WHERE id IN ({','.join('?' * len(preview))})", preview)) if preview else {}
+    titles = book_titles(con, preview)
     con.close()
     for b in preview: print(f"  #{b} {str(titles.get(b, ''))[:50]}: + {', '.join(sorted(adds[b]))}")
     if len(adds) > 8: print(f"  … +{len(adds) - 8} more books")
@@ -250,7 +237,10 @@ def backfill(yes: bool = False) -> int:
 
 
 def run(a: argparse.Namespace, ranked_path: str = RANK, proposal_path: str = PROP,
-        review_path: str = REVIEW, existing: list | None = None) -> None:
+        review_path: str = REVIEW, existing: list | None = None,
+        ask=None, verify_ask=None) -> None:
+    """ask/verify_ask: prompt -> response text. Default to the configured engines; tests pass
+    callables directly (the same seam decide() already has) instead of faking the registry."""
     if os.path.exists(review_path) and not getattr(a, "yes", False):
         raise SystemExit(f"a pending review exists at {review_path} — apply it (scourgify promote --apply), "
                          f"delete it, or re-run with --yes to overwrite.")
@@ -259,11 +249,13 @@ def run(a: argparse.Namespace, ranked_path: str = RANK, proposal_path: str = PRO
     if a.batch: cands = cands[:a.batch]
     if not cands:
         print("no undecided candidates — nothing to do."); return
-    eng = ENGINES[a.engine](a.model, a.timeout)
-    veng = ENGINES[a.verify_with]("", a.timeout) if a.verify_with else None
-    ask = lambda p: ask_retry(eng, p)[0]
-    verify_ask = (lambda p: ask_retry(veng, p)[0]) if veng else None
-    print(f"engine={a.engine}{'  verify-with='+a.verify_with if veng else ''}  candidates: {len(cands)}")
+    if ask is None:
+        eng = ENGINES[a.engine](a.model, a.timeout)
+        ask = lambda p: ask_retry(eng, p)[0]
+    if verify_ask is None and a.verify_with:
+        veng = ENGINES[a.verify_with]("", a.timeout)
+        verify_ask = lambda p: ask_retry(veng, p)[0]
+    print(f"engine={a.engine}{'  verify-with=' + a.verify_with if a.verify_with else ''}  candidates: {len(cands)}")
     rows = []
     with ThreadPoolExecutor(max_workers=1 if a.engine == "apple" else a.workers) as ex:
         futs = [ex.submit(decide, c, ask, verify_ask, existing) for c in cands]

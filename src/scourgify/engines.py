@@ -110,14 +110,16 @@ ENGINE_ENV = {"claude": ("ANTHROPIC_API_KEY",), "openai": ("OPENAI_API_KEY",),
               "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"), "mistral": ("MISTRAL_API_KEY",)}
 
 
-def usable_engines() -> list:
-    """Engines runnable here right now: apple needs the afm binary or a swift toolchain, cloud engines a key."""
+def usable_engines(env=None) -> list:
+    """Engines runnable here right now: apple needs the afm binary or a swift toolchain, cloud
+    engines a key. `env` defaults to os.environ — tests pass a dict instead of juggling it."""
     import shutil
+    env = os.environ if env is None else env
     out = []
     for e in ENGINES:
         if e == "apple":
             if os.path.exists(f"{HERE}/afm") or shutil.which("swift"): out.append(e)
-        elif any(os.environ.get(k) for k in ENGINE_ENV[e]): out.append(e)
+        elif any(env.get(k) for k in ENGINE_ENV[e]): out.append(e)
     return out
 
 
