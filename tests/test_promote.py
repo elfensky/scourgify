@@ -279,6 +279,17 @@ def test_apply_skips_hand_edited_self_alias():
     assert not os.path.exists(ledger) or "Self Ref" not in open(ledger).read()
 
 
+def test_decide_transport_failure_is_not_a_reject():
+    """ask_retry returns ("", err) on a transport failure — and RuntimeError (Gemini's empty-parts
+    case) gets zero retries. A reject would be ledgered and the candidate skipped forever, so a
+    no-response must stay undecided. "error" is outside VERDICTS, which is what makes
+    apply_decisions skip it without ledgering (see test_apply_decisions_normalizes_verdict)."""
+    from scourgify.promote import decide, VERDICTS
+    d = decide({"tag": "Slow Burn", "count": 9}, lambda p: "", existing=["Fluff"])
+    assert d["verdict"] == "error" and d["verdict"] not in VERDICTS
+    assert d["tag"] == "Slow Burn" and not d["target"]
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

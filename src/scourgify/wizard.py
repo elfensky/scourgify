@@ -277,7 +277,7 @@ def _promote_review_menu():
     rows = artifacts.read_rows(artifacts.REVIEW)
     by = collections.defaultdict(list)
     for r in rows: by[r["verdict"]].append(r)
-    for v, col in (("promote", "green"), ("alias", "cyan"), ("reject", "dim")):
+    for v, col in (("promote", "green"), ("alias", "cyan"), ("reject", "dim"), ("error", "red")):
         rs = by.get(v, [])
         if not rs: continue
         t = Table(box=box.SIMPLE, title=f"[{col}]{v}[/] — {len(rs)}")

@@ -121,8 +121,11 @@ def decide(cand: dict, ask, verify_ask=None, existing: list | None = None) -> di
     base = {"tag": cand["tag"], "count": cand.get("count", 0)}
     adv = parse_decision(ask(advocate_prompt(cand, near)))
     if adv is None:
-        return {**base, "verdict": "reject", "target": "", "contested": False,
-                "reason": "advocate response unparseable", "confidence": "low"}
+        # NOT a reject: ask_retry returns ("", err) on a transport failure, so a network hiccup would
+        # otherwise become a durable verdict in the ledger and the tag would never be adjudicated again.
+        # "error" isn't in VERDICTS, so apply_decisions skips it and the candidate re-runs next time.
+        return {**base, "verdict": "error", "target": "", "contested": False,
+                "reason": "no usable response (transport failure or unparseable)", "confidence": "low"}
     if adv["verdict"] != "promote":
         return _finalize(base, {**adv, "contested": False}, existing)   # alias/reject (alias target validated)
     sk = parse_decision((verify_ask or ask)(skeptic_prompt(cand, adv, near)))
@@ -264,7 +267,9 @@ def run(a: argparse.Namespace, ranked_path: str = RANK, proposal_path: str = PRO
     os.makedirs(DATA, exist_ok=True)
     write_review(rows, review_path)
     tally = {v: sum(1 for r in rows if r["verdict"] == v) for v in VERDICTS}
-    print(f"  {tally['promote']} promote, {tally['alias']} alias, {tally['reject']} reject "
+    nerr = sum(1 for r in rows if r["verdict"] == "error")
+    print(f"  {tally['promote']} promote, {tally['alias']} alias, {tally['reject']} reject"
+          f"{f', {nerr} error (undecided — they re-run)' if nerr else ''} "
           f"-> {os.path.basename(review_path)} (review, then `scourgify promote --apply`)")
 
 
