@@ -46,8 +46,11 @@ def read_proposal(path: str = PROP) -> list:
 
 
 def write_proposal(rows: list, path: str = PROP) -> None:
-    """rows: PROP_COLS dicts; the tag columns may be lists (joined here) or pre-joined strings."""
-    with open(path, "w", newline="") as f:
+    """rows: PROP_COLS dicts; the tag columns may be lists (joined here) or pre-joined strings.
+    Written to a temp file + os.replace so a crash mid-write can never truncate an existing
+    proposal (the rows are paid LLM results)."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=PROP_COLS, extrasaction="ignore")
         w.writeheader()
         for r in rows:
@@ -55,6 +58,7 @@ def write_proposal(rows: list, path: str = PROP) -> None:
             for k in ("added_tags", "proposed_new"):
                 if isinstance(r[k], (list, tuple)): r[k] = join_tags(r[k])
             w.writerow(r)
+    os.replace(tmp, path)
 
 
 def write_ranked(rows: list, path: str = RANK) -> None:
