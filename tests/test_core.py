@@ -378,7 +378,7 @@ def test_step_apply_preserves_pending_rows_when_writer_refuses():
         calls["n"] += 1                                # book 1: accept all; book 2: skip (→ pending)
         return ([0], [], "apply") if calls["n"] == 1 else ([], [0], "skip")
 
-    def refuse():
+    def refuse(rows=None):
         raise SystemExit("Calibre is running — close it first.")
 
     class FakeCon:
@@ -405,9 +405,7 @@ def test_step_apply_preserves_pending_rows_when_writer_refuses():
         except SystemExit:
             raised = True
         assert raised                                   # the refusal still surfaces
-        left = {r["book_id"] for r in store["rows"]}
-        assert 2 in left, "skipped (pending) row lost when the writer refused"
-        assert 1 in left, "decided-but-unapplied row lost when the writer refused"
+        assert store["rows"] == rows, "the on-disk proposal must be untouched when the writer refuses"
     finally:
         (classify.read_proposal, classify.write_proposal, classify.apply_proposal,
          classify.ro_connect, classify.book_titles, classify.prop,

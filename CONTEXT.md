@@ -11,9 +11,12 @@ concept.
 - **Decisions** — transform's own per-value log (`kind, where, before, after`), emitted via
   `transform(..., log=)`. The audit's "examples of what would change" read this log; no report
   re-derives (and desyncs from) the rules.
-- **Run plan** (classify) — `classify.plan(opts)`: scope + resume resolved ONCE into
-  `{targets, todo, …}`; the wizard prices/confirms over `todo` and `classify_run` executes the same
-  plan, so the confirmed cost is the billed cost.
+- **Run plan** (classify) — `classify.plan(opts) → Plan`: scope + resume resolved ONCE
+  (`p.targets` / `p.todo`); the wizard prices/confirms over `todo` and `p.run()` executes the same
+  object, so the confirmed cost is the billed cost. The plan owns a COPY of the options — steering
+  after planning (engine choice, the spend-gate answer) goes through `p.opts`, never by mutating
+  the caller's namespace. `run(ask=)` takes the injected prompt→(text, err) callable in tests,
+  like [[promote]]'s `ask=`.
 - **Report** — `report.py`, the ONE owner of the rich-or-plain rendering policy for the core tools
   (`table`/`tree`/`say` + the live `Dashboard`). `ui.py` stays rich-required (wizard only);
   `_writer.py` imports neither.
