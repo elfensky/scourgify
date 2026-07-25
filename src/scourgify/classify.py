@@ -24,7 +24,7 @@ from scourgify.booktext import strip_html                               # text e
 from scourgify.common import (HERE, DATA, user_dir, ro_connect, custom_column_id, run_writer, library,
                               current_tags, titles as book_titles, op_create_column, op_set_field, op_stamp_now,
                               interactive as _interactive, confirm as _confirm)
-from scourgify.overrides import ov_path                                 # overrides/ paths live there
+from scourgify.overrides import ov_path, merge_vocab, read_aliases      # overrides/ paths + format readers live there
 from scourgify.artifacts import (PROP, RANK, FAIL,                      # artifact formats live in artifacts.py
                                  read_proposal, write_proposal, write_ranked, archive)
 # the engine seam lives in engines.py; re-exported here so `classify.ENGINES` / `classify.ask_retry`
@@ -47,23 +47,16 @@ def _read_vocab_file(path: str) -> list:
     return [l.strip() for l in open(path) if l.strip() and not l.startswith("#")] if os.path.exists(path) else []
 
 def load_vocab() -> list:
-    """Curated core ∪ AO3 high-frequency seed, then optional CWD overrides/classify_vocab.txt (a line appends
-    a term; '-term' removes one — and can trim a seeded term too). Lazy so a packaging problem gives a real
-    error at use, not at import, and installed users can override. See build_classify_seed.py for the seed."""
+    """Curated core ∪ AO3 high-frequency seed, then the user's overrides classify_vocab.txt (a line appends
+    a term; '-term' removes one — and can trim a seeded term too; semantics in overrides.merge_vocab). Lazy so
+    a packaging problem gives a real error at use, not at import, and installed users can override."""
     global _VOCAB
     if _VOCAB is None:
         terms, have = [], set()                                                   # curated core first, then AO3 seed;
         for t in (_read_vocab_file(f"{HERE}/defaults/classify_vocab.txt")          # first spelling of a norm wins,
                   + _read_vocab_file(f"{HERE}/defaults/classify_vocab_ao3.txt")):  # so a hand-edit dup can't sneak in
             if t.lower() not in have: terms.append(t); have.add(t.lower())
-        ov = ov_path("classify_vocab.txt")
-        if os.path.exists(ov):
-            for l in open(ov):
-                l = l.strip()
-                if not l or l.startswith("#"): continue
-                if l.startswith("-"): terms = [t for t in terms if t.lower() != l[1:].strip().lower()]
-                elif l.lower() not in {t.lower() for t in terms}: terms.append(l)
-        _VOCAB = terms
+        _VOCAB = merge_vocab(terms)                # the '-term' semantics live with the file's writer (overrides.py)
     return _VOCAB
 
 _ALIASES = None
@@ -72,12 +65,7 @@ def load_aliases() -> dict:
     so tags we've decided are synonyms stop getting re-proposed as 'new'. {} if absent."""
     global _ALIASES
     if _ALIASES is None:
-        p = ov_path("promote_aliases.csv")
-        _ALIASES = {}
-        if os.path.exists(p):
-            for r in csv.DictReader(open(p)):
-                if r.get("candidate") and r.get("target"):
-                    _ALIASES[r["candidate"].strip().lower()] = r["target"].strip()
+        _ALIASES = read_aliases()                  # delimiter-sniffing reader lives with the writer (overrides.py)
     return _ALIASES
 
 _AO3 = None

@@ -10,16 +10,16 @@ writes shell out to calibre-debug automatically):
 import os, sys, re, csv, collections
 from scourgify import report
 from scourgify.artifacts import read_rows as read_csv     # the ONE "DictReader or []" reader
-from scourgify.common import (DEFAULTS as DEFAULTS_DIR, user_dir, norm, ascii_fold, load_config, library,
+from scourgify.common import (DEFAULTS as DEFAULTS_DIR, norm, ascii_fold, load_config, library,
                               read_lines, ro_connect, read_custom_column, run_writer,
                               titles as book_titles, op_set_field)
+from scourgify.overrides import overrides_dir as _overrides_dir, _delim_of   # overrides.py owns dir + formats
 
 # ---------------- defaults + overrides ----------------
 def read_tropes(path: str) -> list:
     """tropes.csv: delimiter-sniffed (','|';'), positional variant,canonical,route; unknown route (freeform note) -> 'tag'."""
     if not os.path.exists(path): return []
-    with open(path) as f: first = f.readline()
-    delim = ";" if (";" in first and first.count(";") >= first.count(",")) else ","
+    delim = _delim_of(path)                       # the one sniffer (overrides.py owns the formats)
     out = []
     with open(path) as f:
         for c in csv.reader(f, delimiter=delim):
@@ -49,7 +49,7 @@ def load_maps(cfg: dict, defaults_dir: str | None = None, overrides_dir: str | N
     The dirs are parameters with production defaults so tests pass temp layers instead of
     reassigning module globals."""
     DEF = defaults_dir or DEFAULTS_DIR
-    odir = overrides_dir or os.path.join(user_dir(), cfg["overrides"].get("dir", "overrides"))
+    odir = overrides_dir or _overrides_dir(cfg)   # the one dir resolution (overrides.py owns it)
     ao3 = os.path.join(DEF, "ao3")               # generated AO3 layer (build_ao3_layer.py) — loaded FIRST, everything overrides it
     def ao3_pairs(fn):                           # master,name,rel pair rows -> {name: master}; {} if the layer is absent
         return {r["name"]: r["master"] for r in read_csv(os.path.join(ao3, fn))}

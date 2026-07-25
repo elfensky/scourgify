@@ -112,7 +112,8 @@ def setup(cfg: dict, yes: bool = False) -> None:
         lab = colmap.get(k, ""); print(f"        {k:13} → {lab or '(unset — pass not run for this column)'}")
 
     # [5] overrides
-    odir = os.path.join(user_dir(), cfg["overrides"].get("dir", "overrides"))
+    from scourgify.overrides import overrides_dir
+    odir = overrides_dir(cfg)                     # the one dir resolution (overrides.py owns it)
     print("\n[5] Overrides");  print(f"  {OK} {odir}" if os.path.isdir(odir) else f"  {WARN} no overrides/ dir (optional — add your own maps here; they win over defaults/)")
 
     if ops:
