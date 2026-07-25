@@ -364,6 +364,57 @@ def test_classify_edits_labels_match_the_engine():
     assert ("rename", "tags", "WIP", "Work In Progress") not in edits
 
 
+def test_step_apply_preserves_pending_rows_when_writer_refuses():
+    """apply_proposal_step truncates the proposal to the decided rows before the write step; if
+    run_writer then refuses (Calibre open, wipe guard, missing calibre-debug), the skipped/pending
+    rows — paid LLM results — must still be on disk afterwards, not silently destroyed."""
+    from scourgify import classify, ui
+    rows = [{"book_id": 1, "title": "A", "added_tags": ["X"], "proposed_new": []},
+            {"book_id": 2, "title": "B", "added_tags": ["Y"], "proposed_new": []}]
+    store = {"rows": list(rows)}                       # stands in for the proposal file on disk
+    calls = {"n": 0}
+
+    def fake_checklist(title, items, subtitle=""):
+        calls["n"] += 1                                # book 1: accept all; book 2: skip (→ pending)
+        return ([0], [], "apply") if calls["n"] == 1 else ([], [0], "skip")
+
+    def refuse():
+        raise SystemExit("Calibre is running — close it first.")
+
+    class FakeCon:
+        def execute(self, *a): return []
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
+    tmp.write(b"book_id,title,added_tags,proposed_new\n"); tmp.close()
+    saved = (classify.read_proposal, classify.write_proposal, classify.apply_proposal,
+             classify.ro_connect, classify.book_titles, classify.PROP,
+             ui.interactive, ui.checklist, common.log_rejects)
+    try:
+        classify.read_proposal = lambda path=None: [dict(r) for r in store["rows"]]
+        classify.write_proposal = lambda rs, path=None: store.update(rows=list(rs))
+        classify.apply_proposal = refuse
+        classify.ro_connect = lambda: FakeCon()
+        classify.book_titles = lambda con: {}
+        classify.PROP = tmp.name
+        ui.interactive = lambda: True
+        ui.checklist = fake_checklist
+        common.log_rejects = lambda rejects: None
+        raised = False
+        try:
+            classify.apply_proposal_step()
+        except SystemExit:
+            raised = True
+        assert raised                                   # the refusal still surfaces
+        left = {r["book_id"] for r in store["rows"]}
+        assert 2 in left, "skipped (pending) row lost when the writer refused"
+        assert 1 in left, "decided-but-unapplied row lost when the writer refused"
+    finally:
+        (classify.read_proposal, classify.write_proposal, classify.apply_proposal,
+         classify.ro_connect, classify.book_titles, classify.PROP,
+         ui.interactive, ui.checklist, common.log_rejects) = saved
+        os.unlink(tmp.name)
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

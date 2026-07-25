@@ -218,7 +218,13 @@ def apply_proposal_step() -> None:
     log_rejects(rejects)
     if not decided:
         print("(nothing decided — proposal left untouched.)"); return
-    write_proposal(decided); apply_proposal()                  # applies + stamps the decided rows, archives PROP
+    write_proposal(decided)
+    try:
+        apply_proposal()                                       # applies + stamps the decided rows, archives PROP
+    except BaseException:                                      # writer refused (Calibre open, wipe guard, …) or Ctrl-C:
+        write_proposal(decided + pending)                      # PROP held only the decided rows — restore the full set
+        print(f"(nothing applied — proposal intact, {len(decided) + len(pending)} row(s) preserved)")
+        raise
     if pending:
         write_proposal(pending)
         print(f"{len(pending)} book(s) left pending for a later run -> {os.path.basename(PROP)}")
