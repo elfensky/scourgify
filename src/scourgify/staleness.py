@@ -8,7 +8,7 @@ Idempotent & self-correcting — re-run after an #updated refresh and the status
 Rule: <STALE yrs -> In-Progress | STALE..DEAD -> Hiatus | >=DEAD -> Abandoned. Tunable: --stale-years 2 --dead-years 5.
 Completed/Dropped/Rewritten and books without an #updated date are NEVER changed."""
 import argparse, datetime, collections
-from scourgify.common import load_config, ro_connect, read_custom_column, run_writer
+from scourgify.common import load_config, ro_connect, read_custom_column, run_writer, op_set_field
 
 ACTIVITY = {"In-Progress", "Hiatus", "Abandoned"}      # re-derived from activity
 # everything else (Completed, Dropped, Rewritten, blank) is left untouched
@@ -42,7 +42,7 @@ def compute(stale_years: float = 2.0, dead_years: float = 5.0) -> tuple[str, lis
 
 
 def write(status_label: str, rows: list) -> None:
-    run_writer([{"op": "set_field", "field": status_label, "values": {str(b): n for b, o, n, _ in rows}}])
+    run_writer([op_set_field(status_label, {b: n for b, o, n, _ in rows})])
 
 
 def main() -> None:

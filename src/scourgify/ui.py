@@ -5,27 +5,18 @@ The core tools (wrangle/classify/staleness) keep their try/except rich fallbacks
 `_writer.py` stays stdlib-only under calibre-debug's Python; never import this module
 from them. Pattern follows lintle's term.py: one shared Console, prompt helpers that
 validate input, and interactivity detection that requires real TTYs."""
-import os, re, sys
+import re
+from scourgify.common import interactive    # re-export: the ONE tty policy lives in common
 try:
     from rich import box
     from rich.console import Console
     from rich.panel import Panel
-    from rich.prompt import Prompt, Confirm, IntPrompt
+    from rich.prompt import Prompt, Confirm
     from rich.table import Table
 except ImportError:
     raise SystemExit("the wizard needs the `rich` package:  python3 -m pip install rich")
 
 console = Console()
-
-
-def interactive():
-    """Real wizard sessions only: stdin AND stdout are TTYs, no CI/NONINTERACTIVE override."""
-    if os.environ.get("CI") or os.environ.get("NONINTERACTIVE"):
-        return False
-    try:
-        return sys.stdin.isatty() and sys.stdout.isatty()
-    except Exception:
-        return False
 
 
 def clear():
@@ -55,9 +46,6 @@ def menu(title, options, default=None, also=()):
 
 def confirm(msg, default=False):
     return Confirm.ask(msg, default=default, console=console)
-
-def ask_int(msg, default=0):
-    return IntPrompt.ask(msg, default=default, console=console)
 
 
 def pause():

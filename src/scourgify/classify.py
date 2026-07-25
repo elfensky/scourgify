@@ -20,7 +20,14 @@ Engines (--engine):  apple = on-device Apple Foundation Models via ./afm (free; 
 import argparse, os, re, csv, json, subprocess, collections, time, difflib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from scourgify import select
-from scourgify.common import HERE, DATA, user_dir, ro_connect, custom_column_id, run_writer, library
+from scourgify.common import (HERE, DATA, user_dir, ro_connect, custom_column_id, run_writer, library,
+                              current_tags, op_create_column, op_set_field, op_stamp_now,
+                              interactive as _interactive, confirm as _confirm)
+from scourgify.artifacts import (PROP, RANK, FAIL, PROP_COLS,           # artifact formats live in artifacts.py;
+                                 read_proposal, write_proposal, write_ranked, archive)
+# the engine seam lives in engines.py; re-exported here so `classify.ENGINES` / `classify.ask_retry`
+# stay valid for promote, the wizard, and existing tests
+from scourgify.engines import ENGINES, ENGINE_ENV, PRICING, ERR_TRUNC, usable_engines, ask_retry
 try:                                              # rich is optional: live dashboard/tables in system python3
     from rich.console import Console, Group
     from rich.live import Live
@@ -32,16 +39,9 @@ try:                                              # rich is optional: live dashb
 except ImportError:
     RICH = False
 
-PROP = f"{DATA}/classify_proposal.csv"
-RANK = f"{DATA}/classify_newtags_ranked.csv"
-FAIL = f"{DATA}/classify_failures.csv"
 AO3_VOCAB = f"{DATA}/ao3_vocab.csv"     # per-library canonical AO3 freeforms (name,uses); absent on fresh installs
 SPEND_GATE = 200        # cloud runs above this many books require an explicit yes
 DEDUP_CUTOFF = 0.86     # difflib ratio at/above which a proposed tag counts as a variant of an existing one
-ERR_TRUNC = 140         # chars kept when recording an engine error (same width in bakeoff table and failures CSV)
-
-# $/MTok (input, output) for each engine's default model — public list prices as of 2026-07; edit when they change.
-PRICING = {"apple": (0.0, 0.0), "claude": (1.00, 5.00), "openai": (0.15, 0.60), "gemini": (0.30, 2.50), "mistral": (0.20, 0.60)}
 
 _VOCAB = None
 def _read_vocab_file(path: str) -> list:
@@ -166,95 +166,6 @@ def annotate_new(ranked, cutoff: float = DEDUP_CUTOFF, existing: list | None = N
     return rows
 
 
-# ---- engines ----
-class Apple:
-    def __init__(self, model, timeout):
-        exe = f"{HERE}/afm" if os.path.exists(f"{HERE}/afm") else None
-        cmd = [exe] if exe else ["swift", f"{HERE}/afm.swift"]
-        self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
-    def ask(self, prompt):
-        self.p.stdin.write(prompt.replace("\n", "") + "\n"); self.p.stdin.flush()
-        return self.p.stdout.readline()
-
-class Claude:
-    def __init__(self, model, timeout):
-        self.key = os.environ.get("ANTHROPIC_API_KEY")
-        if not self.key: raise SystemExit("claude engine needs ANTHROPIC_API_KEY (or use --engine apple).")
-        self.model = model or "claude-haiku-4-5-20251001"; self.timeout = timeout
-    def ask(self, prompt):
-        import urllib.request
-        body = json.dumps({"model": self.model, "max_tokens": 300,
-                           "messages": [{"role": "user", "content": prompt}]}).encode()
-        req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=body,
-            headers={"x-api-key": self.key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
-        return json.load(urllib.request.urlopen(req, timeout=self.timeout))["content"][0]["text"]
-
-class OpenAI:
-    def __init__(self, model, timeout):
-        self.key = os.environ.get("OPENAI_API_KEY")
-        if not self.key: raise SystemExit("openai engine needs OPENAI_API_KEY.")
-        self.model = model or "gpt-4o-mini"; self.timeout = timeout
-    def ask(self, prompt):
-        import urllib.request
-        body = json.dumps({"model": self.model, "max_tokens": 300,
-                           "messages": [{"role": "user", "content": prompt}]}).encode()
-        req = urllib.request.Request("https://api.openai.com/v1/chat/completions", data=body,
-            headers={"Authorization": f"Bearer {self.key}", "content-type": "application/json"})
-        return json.load(urllib.request.urlopen(req, timeout=self.timeout))["choices"][0]["message"]["content"]
-
-class Gemini:
-    # personal fanfic library: don't let safety filters drop mature/dark stories (the tag list itself lists such terms)
-    SAFE = [{"category": c, "threshold": "BLOCK_NONE"} for c in
-            ("HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
-             "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT")]
-    def __init__(self, model, timeout):
-        self.key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-        if not self.key: raise SystemExit("gemini engine needs GEMINI_API_KEY (or GOOGLE_API_KEY).")
-        self.model = model or "gemini-2.5-flash"; self.timeout = timeout
-    def ask(self, prompt):
-        import urllib.request
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
-        body = json.dumps({"contents": [{"parts": [{"text": prompt}]}], "safetySettings": self.SAFE,
-                           "generationConfig": {"maxOutputTokens": 2048}}).encode()   # bound cost; roomy for thinking models
-        req = urllib.request.Request(url, data=body,
-            headers={"content-type": "application/json", "x-goog-api-key": self.key})  # key in header, never in the URL
-        r = json.load(urllib.request.urlopen(req, timeout=self.timeout))
-        cands = r.get("candidates")
-        if not cands: raise RuntimeError("blocked:" + str(r.get("promptFeedback", {}).get("blockReason")))
-        parts = cands[0].get("content", {}).get("parts")
-        if not parts: raise RuntimeError("nocontent:" + str(cands[0].get("finishReason")))
-        return parts[0]["text"]
-
-class Mistral:
-    def __init__(self, model, timeout):
-        self.key = os.environ.get("MISTRAL_API_KEY")
-        if not self.key: raise SystemExit("mistral engine needs MISTRAL_API_KEY.")
-        self.model = model or "mistral-small-latest"; self.timeout = timeout
-    def ask(self, prompt):
-        import urllib.request
-        body = json.dumps({"model": self.model, "max_tokens": 300,
-                           "messages": [{"role": "user", "content": prompt}]}).encode()
-        req = urllib.request.Request("https://api.mistral.ai/v1/chat/completions", data=body,
-            headers={"Authorization": f"Bearer {self.key}", "content-type": "application/json"})
-        return json.load(urllib.request.urlopen(req, timeout=self.timeout))["choices"][0]["message"]["content"]
-
-ENGINES = {"apple": Apple, "claude": Claude, "openai": OpenAI, "gemini": Gemini, "mistral": Mistral}
-# env var(s) each cloud engine's key is read from (apple is on-device, no key). Single source of truth —
-# wizard.ENGINE_KEYS aliases this so the two can never disagree about which key powers which engine.
-ENGINE_ENV = {"claude": ("ANTHROPIC_API_KEY",), "openai": ("OPENAI_API_KEY",),
-              "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"), "mistral": ("MISTRAL_API_KEY",)}
-
-def usable_engines() -> list:
-    """Engines runnable here right now: apple needs the afm binary or a swift toolchain, cloud engines a key."""
-    import shutil
-    out = []
-    for e in ENGINES:
-        if e == "apple":
-            if os.path.exists(f"{HERE}/afm") or shutil.which("swift"): out.append(e)
-        elif any(os.environ.get(k) for k in ENGINE_ENV[e]): out.append(e)
-    return out
-
-
 # ---- live run display ----
 def sparkline(vals: list, width: int = 28) -> str:
     """Unicode sparkline of a numeric series (last `width` points), scaled to its max."""
@@ -330,33 +241,23 @@ def apply_proposal() -> None:
     if not os.path.exists(PROP):
         raise SystemExit(f"no proposal to apply ({os.path.basename(PROP)} not found — run a classify pass first).")
     con = ro_connect()
-    cur = collections.defaultdict(list)
-    for b, t in con.execute("SELECT l.book, t.name FROM books_tags_link l JOIN tags t ON t.id=l.tag"): cur[b].append(t)
+    cur = current_tags(con)
     have_wrangled = custom_column_id(con, "wrangled") is not None
     chg, processed = {}, []
-    for r in csv.DictReader(open(PROP)):
-        b = int(r["book_id"]); processed.append(b)
-        tags = [t for t in r.get("added_tags", "").split("; ") if t.strip()]
-        if tags: chg[str(b)] = sorted(set(cur.get(b, [])) | set(tags))   # union with current tags
+    for r in read_proposal():
+        b = r["book_id"]; processed.append(b)
+        if r["added_tags"]: chg[b] = sorted(cur.get(b, set()) | set(r["added_tags"]))   # union with current tags
     ops = []
     if not have_wrangled:                                             # first run: create + backfill whole library as wrangled-now
-        ops.append({"op": "create_column", "label": "wrangled", "name": "Wrangled", "datatype": "datetime", "is_multiple": False})
-        ops.append({"op": "stamp_now", "field": "#wrangled", "books": None})
-    ops.append({"op": "set_field", "field": "tags", "values": chg})
+        ops.append(op_create_column("wrangled", "Wrangled", "datetime"))
+        ops.append(op_stamp_now("#wrangled"))
+    ops.append(op_set_field("tags", chg))
     # stamp EVERY processed book, tagged or not — an unstamped no-tag book would be re-sent to the LLM forever
-    ops.append({"op": "stamp_now", "field": "#wrangled", "books": processed})
+    ops.append(op_stamp_now("#wrangled", processed))
     run_writer(ops)
     # archive so a later --apply can't re-add tags you've since hand-removed (stale rows never re-apply)
-    arch = PROP.replace(".csv", f"_applied_{time.strftime('%Y%m%d-%H%M%S')}.csv")
-    os.rename(PROP, arch)
+    arch = archive(PROP, "applied")
     print(f"applied tags to {len(chg)} books + stamped #wrangled on {len(processed)} processed; proposal archived -> {os.path.basename(arch)}")
-
-
-PROP_COLS = ["book_id", "title", "added_tags", "proposed_new"]
-def _write_prop(rows):
-    with open(PROP, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=PROP_COLS, extrasaction="ignore"); w.writeheader()
-        for r in rows: w.writerow({k: r.get(k, "") for k in PROP_COLS})
 
 
 def apply_proposal_step() -> None:
@@ -373,24 +274,24 @@ def apply_proposal_step() -> None:
     desc = {b: strip_html(t) for b, t in con.execute("SELECT book, text FROM comments")}
     titles = {b: t for b, t in con.execute("SELECT id, title FROM books")}
     decided, pending, rejects, quit_ = [], [], [], False
-    for r in csv.DictReader(open(PROP)):
-        tags = [t for t in r.get("added_tags", "").split("; ") if t.strip()]
+    for r in read_proposal():
+        tags = r["added_tags"]
         if quit_: pending.append(r); continue
         if not tags: decided.append(r); continue               # no-tag book: stamp only (else re-sent forever)
-        b = int(r["book_id"]); title = str(r.get("title") or titles.get(b, ""))
+        b = r["book_id"]; title = str(r.get("title") or titles.get(b, ""))
         acc, rej, action = ui.checklist(f"[bold]#{b}[/]  {title[:64]}", tags, subtitle=(desc.get(b, "")[:280] or "(no description)"))
         if action == "quit": quit_ = True; pending.append(r); continue
         if action == "skip": pending.append(r); continue
         for i in rej:
             rejects.append({"stage": "classify", "book": b, "title": title, "kind": "add",
                             "column": "tags", "before": "", "after": tags[i], "class": "ai"})
-        decided.append({**r, "added_tags": "; ".join(tags[i] for i in acc)})
+        decided.append({**r, "added_tags": [tags[i] for i in acc]})
     log_rejects(rejects)
     if not decided:
         print("(nothing decided — proposal left untouched.)"); return
-    _write_prop(decided); apply_proposal()                     # applies + stamps the decided rows, archives PROP
+    write_proposal(decided); apply_proposal()                  # applies + stamps the decided rows, archives PROP
     if pending:
-        _write_prop(pending)
+        write_proposal(pending)
         print(f"{len(pending)} book(s) left pending for a later run -> {os.path.basename(PROP)}")
 
 
@@ -465,54 +366,42 @@ def bakeoff(a: argparse.Namespace, targets: list, engines: list, n: int = 5) -> 
     for e in engines:
         eng = ENGINES[e]("", a.timeout)                       # per-engine default model
         for b, d in targets[:n]:
-            try:
-                vt, nt = parse_resp(eng.ask(prompt_for(d, a.max_tags)), a.max_tags, a.dedup_cutoff); err = ""
-            except Exception as ex:
-                vt, nt, err = [], [], f"{type(ex).__name__}: {ex}"[:ERR_TRUNC]
+            resp, err = ask_retry(eng, prompt_for(d, a.max_tags), tries=1)   # one shot per sample, shared error format
+            vt, nt = parse_resp(resp, a.max_tags, a.dedup_cutoff)
             out.setdefault(b, {})[e] = (vt, nt, err)
     return out
 
 
-def ask_retry(eng, prompt: str, tries: int = 4) -> tuple[str, str]:
-    """Call eng.ask(prompt) with backoff. -> (text, "") on success; ("", reason) on failure.
-    RuntimeError = deterministic content block (no retry); other errors retry with 2**k backoff."""
-    err = ""
-    for k in range(tries):
-        try: return eng.ask(prompt), ""
-        except RuntimeError as e:
-            return "", str(e)[:ERR_TRUNC]
-        except Exception as e:
-            err = f"{type(e).__name__}: {e}"[:ERR_TRUNC]
-            if k == tries - 1: return "", err
-            time.sleep(2 ** k)
-    return "", err
+def spend_gate(n_books: int, engine: str, yes: bool) -> None:
+    """THE cloud-spend confirmation — the single owner of the gate. `yes` answers it up front
+    (the CLI --yes flag, or the wizard's own cost-estimate confirm)."""
+    if engine == "apple" or n_books <= SPEND_GATE or yes: return
+    msg = f"about to send {n_books} books to the {engine} API (costs money; --incremental/--batch shrink it)."
+    if not _interactive():
+        raise SystemExit(f"  {msg}\n  non-interactive: re-run with --yes to confirm.")
+    if not _confirm(f"  {msg} proceed?"):
+        raise SystemExit("aborted (nothing sent).")
 
 
 def classify_run(a: argparse.Namespace) -> None:
+    a = normalize(a)                               # owns its invariants (apple → workers=1) regardless of caller
     targets, titles, needs = gather(a)
     print(f"engine={a.engine}  candidate books: {len(targets)}")
 
     proposal, done = {}, set()                     # book -> (vocab_tags, proposed_new_tags)
-    if os.path.exists(PROP) and not a.fresh:       # resume: skip books already in proposal
-        for r in csv.DictReader(open(PROP)):
-            bid = int(r["book_id"]); at = [t for t in r.get("added_tags", "").split("; ") if t.strip()]
-            proposal[bid] = (at, [t for t in r.get("proposed_new", "").split("; ") if t.strip()])
+    if not a.fresh:                                # resume: skip books already in proposal
+        for r in read_proposal():
+            bid, at = r["book_id"], r["added_tags"]
+            proposal[bid] = (at, r["proposed_new"])
             if (at or not a.text_fallback) and not needs(bid): done.add(bid)   # re-process books changed since last wrangle
         if done: print(f"  resuming: {len(done)} already in proposal (pass --fresh to restart)")
     def dump():
-        with open(PROP, "w", newline="") as f:
-            w = csv.writer(f); w.writerow(["book_id", "title", "added_tags", "proposed_new"])
-            for b, (vt, nt) in proposal.items(): w.writerow([b, titles.get(b, ""), "; ".join(vt), "; ".join(nt)])
+        write_proposal([{"book_id": b, "title": titles.get(b, ""), "added_tags": vt, "proposed_new": nt}
+                        for b, (vt, nt) in proposal.items()])
 
     todo = [(b, d) for b, d in targets if b not in done]
     if a.batch: todo = todo[:a.batch]
-    if a.engine != "apple" and len(todo) > SPEND_GATE and not a.yes:   # spend gate: cloud runs cost real money
-        import sys
-        msg = f"about to send {len(todo)} books to the {a.engine} API (costs money; --incremental/--batch shrink it)."
-        if sys.stdin.isatty() and input(f"  {msg} proceed? [y/N] ").strip().lower() not in ("y", "yes"):
-            raise SystemExit("aborted (nothing sent).")
-        elif not sys.stdin.isatty():
-            raise SystemExit(f"  {msg}\n  non-interactive: re-run with --yes to confirm.")
+    spend_gate(len(todo), a.engine, a.yes)         # cloud runs cost real money
 
     eng = ENGINES[a.engine](a.model, a.timeout)
     def work(b, d):
@@ -556,9 +445,7 @@ def classify_run(a: argparse.Namespace) -> None:
         for t in nt: ranked[t] += 1
     rows = annotate_new(ranked, a.dedup_cutoff)               # nearest existing tag + verdict for each candidate
     fresh = [r for r in rows if r[4] == "new"]                # genuinely novel — the ones worth promoting
-    with open(RANK, "w", newline="") as f:
-        w = csv.writer(f); w.writerow(["proposed_tag", "count", "nearest_existing", "similarity", "verdict"])
-        w.writerows(rows)
+    write_ranked(rows)
     print(f"\nOutput 1 (apply): {sum(1 for v in proposal.values() if v[0])} books with vocab tags -> {os.path.basename(PROP)} (col 'added_tags')")
     print(f"Output 2 (grow):  {len(fresh)} new + {len(rows) - len(fresh)} near-dupes of existing tags -> {os.path.basename(RANK)} (promote 'verdict=new' rows into defaults/classify_vocab.txt)")
     if RICH and rows:
@@ -601,10 +488,19 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 def normalize(a: argparse.Namespace) -> argparse.Namespace:
-    """Post-parse invariants shared by the CLI and the wizard."""
+    """Post-parse invariants (idempotent; classify_run applies them itself, so callers never
+    have to worry about ordering them around engine choice)."""
     if a.engine == "apple": a.workers = 1        # apple = one subprocess pipe, not thread-safe
     library()                                    # fail fast with a clear message
     os.makedirs(DATA, exist_ok=True)
+    return a
+
+
+def default_opts(**overrides) -> argparse.Namespace:
+    """The non-CLI entry to a run's options: parser defaults + keyword overrides. The argparse
+    parser stays the single schema; the wizard is the second adapter that fills it."""
+    a = build_parser().parse_args([])
+    for k, v in overrides.items(): setattr(a, k, v)
     return a
 
 def bakeoff_cli(a: argparse.Namespace) -> None:
