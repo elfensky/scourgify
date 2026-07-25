@@ -155,14 +155,20 @@ def annotate_new(ranked, cutoff: float = DEDUP_CUTOFF, existing: list | None = N
 
 
 # ---- apply: 'added_tags' + stamp #wrangled — standalone, no LLM calls ----
-def apply_proposal() -> None:
-    if not os.path.exists(prop()):
-        raise SystemExit(f"no proposal to apply ({os.path.basename(prop())} not found — run a classify pass first).")
+def apply_proposal(rows: list | None = None) -> None:
+    """rows=None (the --apply path): read the live proposal, apply + stamp it, archive it on
+    success. Explicit rows (the --step path): apply + stamp exactly those; the proposal file is
+    the CALLER's to archive/rewrite — it is never touched here, so a writer refusal loses nothing."""
+    from_file = rows is None
+    if from_file:
+        if not os.path.exists(prop()):
+            raise SystemExit(f"no proposal to apply ({os.path.basename(prop())} not found — run a classify pass first).")
+        rows = read_proposal()
     con = ro_connect()
     cur = current_tags(con)
     have_wrangled = custom_column_id(con, "wrangled") is not None
     chg, processed = {}, []
-    for r in read_proposal():
+    for r in rows:
         b = r["book_id"]; processed.append(b)
         if r["added_tags"]: chg[b] = sorted(cur.get(b, set()) | set(r["added_tags"]))   # union with current tags
     ops = []
@@ -173,9 +179,11 @@ def apply_proposal() -> None:
     # stamp EVERY processed book, tagged or not — an unstamped no-tag book would be re-sent to the LLM forever
     ops.append(op_stamp_now("#wrangled", processed))
     run_writer(ops)
-    # archive so a later --apply can't re-add tags you've since hand-removed (stale rows never re-apply)
-    arch = archive(prop(), "applied")
-    print(f"applied tags to {len(chg)} books + stamped #wrangled on {len(processed)} processed; proposal archived -> {os.path.basename(arch)}")
+    tail = ""
+    if from_file:
+        # archive so a later --apply can't re-add tags you've since hand-removed (stale rows never re-apply)
+        tail = f"; proposal archived -> {os.path.basename(archive(prop(), 'applied'))}"
+    print(f"applied tags to {len(chg)} books + stamped #wrangled on {len(processed)} processed{tail}")
 
 
 def apply_proposal_step() -> None:
@@ -207,13 +215,8 @@ def apply_proposal_step() -> None:
     log_rejects(rejects)
     if not decided:
         print("(nothing decided — proposal left untouched.)"); return
-    write_proposal(decided)
-    try:
-        apply_proposal()                                       # applies + stamps the decided rows, archives PROP
-    except BaseException:                                      # writer refused (Calibre open, wipe guard, …) or Ctrl-C:
-        write_proposal(decided + pending)                      # PROP held only the decided rows — restore the full set
-        print(f"(nothing applied — proposal intact, {len(decided) + len(pending)} row(s) preserved)")
-        raise
+    apply_proposal(rows=decided)                   # PROP untouched until success — a writer refusal loses nothing
+    archive(prop(), "applied")                     # the full record (decided + pending) — backfill reads it back
     if pending:
         write_proposal(pending)
         print(f"{len(pending)} book(s) left pending for a later run -> {os.path.basename(prop())}")
@@ -253,23 +256,101 @@ def gather(a: argparse.Namespace) -> tuple:
     return kept, titles, needs
 
 
-def plan(a: argparse.Namespace) -> dict:
-    """Resolve a classify run ONCE — scope → targets (gather), resume → todo — and return the
-    whole Run as a dict. The wizard prices/confirms over this plan and classify_run executes the
-    SAME plan, so the confirmed cost is the billed cost and the expensive text extraction never
-    runs twice. Keys: opts, targets, titles, needs, proposal, done, todo."""
-    a = normalize(a)
-    targets, titles, needs = gather(a)
-    proposal, done = {}, set()                     # book -> (vocab_tags, proposed_new_tags)
-    if not a.fresh:                                # resume: skip books already in proposal
-        for r in read_proposal():
-            bid, at = r["book_id"], r["added_tags"]
-            proposal[bid] = (at, r["proposed_new"])
-            if (at or not a.text_fallback) and not needs(bid): done.add(bid)   # re-process books changed since last wrangle
-    todo = [(b, d) for b, d in targets if b not in done]
-    if a.batch: todo = todo[:a.batch]
-    return {"opts": a, "targets": targets, "titles": titles, "needs": needs,
-            "proposal": proposal, "done": done, "todo": todo}
+class Plan:
+    """ONE resolved classify run — scope → targets (gather), resume → todo — priced, confirmed,
+    and executed as the same object, so the cost the user confirms is over the exact todo set the
+    run bills and the expensive text extraction never runs twice (mirrors wrangle.Plan; the CLI
+    and the wizard drive the same object). The plan owns a COPY of the caller's options: steering
+    a resolved plan (engine choice, the spend-gate answer) goes through `p.opts`, never through
+    mutating the original namespace — that aliasing was load-bearing once, by accident."""
+
+    def __init__(self, a: argparse.Namespace):
+        import copy
+        a = normalize(copy.copy(a))
+        self.opts = a
+        self.targets, self.titles, self.needs = gather(a)
+        self.proposal, self.done = {}, set()           # book -> (vocab_tags, proposed_new_tags)
+        if not a.fresh:                                # resume: skip books already in proposal
+            for r in read_proposal():
+                bid, at = r["book_id"], r["added_tags"]
+                self.proposal[bid] = (at, r["proposed_new"])
+                if (at or not a.text_fallback) and not self.needs(bid):   # re-process books changed since last wrangle
+                    self.done.add(bid)
+        self.todo = [(b, d) for b, d in self.targets if b not in self.done]
+        if a.batch: self.todo = self.todo[:a.batch]
+
+    def run(self, ask=None) -> None:
+        """Execute the plan. `ask`: prompt -> (text, err) — tests inject a callable (the same
+        seam promote.run has); default builds the configured engine and goes through ask_retry."""
+        a, titles, proposal = self.opts, self.titles, self.proposal
+        print(f"engine={a.engine}  candidate books: {len(self.targets)}")
+        if self.done: print(f"  resuming: {len(self.done)} already in proposal (pass --fresh to restart)")
+        def dump():
+            write_proposal([{"book_id": b, "title": titles.get(b, ""), "added_tags": vt, "proposed_new": nt}
+                            for b, (vt, nt) in proposal.items()])
+
+        spend_gate(len(self.todo), a.engine, a.yes)    # cloud runs cost real money
+
+        if ask is None:
+            eng = ENGINES[a.engine](a.model, a.timeout)
+            ask = lambda prompt: ask_retry(eng, prompt)
+        def work(b, d):
+            out, err = ask(prompt_for(d, a.max_tags)); vt, nt = parse_resp(out, a.max_tags, a.dedup_cutoff); return b, err, vt, nt
+
+        failures = []
+        workers = engine_workers(a.engine, a.workers)   # non-parallel engines (apple) cap at 1
+        print(f"  {len(self.todo)} to do this run, {workers} concurrent")
+        ex = ThreadPoolExecutor(max_workers=workers)
+        interrupted = False
+        try:
+            with _Dashboard(len(self.todo), len(self.done), len(self.targets)) as dash:
+                futs = [ex.submit(work, b, d) for b, d in self.todo]
+                for fut in as_completed(futs):
+                    b, err, vt, nt = fut.result()
+                    if err: failures.append((b, err))
+                    else: proposal[b] = (vt, nt)      # record EVERY non-errored book, even a no-match (vt=nt=[]):
+                                                      # --apply stamps every proposal row, so it isn't re-sent forever.
+                                                      # errors are excluded on purpose — they retry (e.g. --engine apple).
+                    dash.update(vt, nt, err)
+                    if dash.n % 50 == 0: dump()       # checkpoint regardless of UI
+        except KeyboardInterrupt:
+            # Ctrl+C: never start queued work, don't wait for in-flight requests (they're
+            # abandoned; runs are resumable so nothing is lost beyond the requests in the air)
+            interrupted = True
+            ex.shutdown(wait=False, cancel_futures=True)
+        else:
+            ex.shutdown()
+        dump()
+        if interrupted:
+            print(f"\n  interrupted — {len(proposal)} results saved to the proposal; re-run to resume where you left off.")
+        if failures:
+            from scourgify.artifacts import write_failures
+            write_failures([[b, titles.get(b, ""), e] for b, e in failures])
+            bytype = collections.Counter(e.split(":")[0].split(" ")[0] for _, e in failures)
+            print(f"failures: {len(failures)} -> {os.path.basename(fail())}  by type: {dict(bytype)}")
+            print("  (recover blocked books with a no-policy engine: scourgify classify --engine apple)")
+
+        ranked = collections.Counter()
+        for vt, nt in proposal.values():
+            for t in nt: ranked[t] += 1
+        rows = annotate_new(ranked, a.dedup_cutoff)           # nearest existing tag + verdict for each candidate
+        fresh = [r for r in rows if r[4] == "new"]            # genuinely novel — the ones worth promoting
+        write_ranked(rows)
+        print(f"\nOutput 1 (apply): {sum(1 for v in proposal.values() if v[0])} books with vocab tags -> {os.path.basename(prop())} (col 'added_tags')")
+        print(f"Output 2 (grow):  {len(fresh)} new + {len(rows) - len(fresh)} near-dupes of existing tags -> {os.path.basename(rank())} (promote 'verdict=new' rows into defaults/classify_vocab.txt)")
+        if rows:
+            report.table("top new-tag candidates (verdict=new → promote; near-duplicate ≈ an existing tag)",
+                         ["count", "proposed tag", "nearest existing", "verdict"],
+                         [[(str(cnt), "cyan"), tag, (f"{nearest} ({sim})" if nearest else "", "dim"),
+                           ("new", "green") if verdict == "new" else ("≈ dupe", "yellow")]
+                          for tag, cnt, nearest, sim, verdict in rows[:25]], right=(0,))
+        print("\nApply vocab tags with: scourgify classify --apply   (Calibre closed)")
+
+
+def plan(a: argparse.Namespace) -> Plan:
+    """Resolve a classify run ONCE. The wizard prices/confirms over this plan and run() executes
+    the SAME plan — see Plan."""
+    return Plan(a)
 
 
 def bakeoff(a: argparse.Namespace, targets: list, engines: list, n: int = 5) -> dict:
@@ -298,71 +379,9 @@ def spend_gate(n_books: int, engine: str, yes: bool) -> None:
 
 
 def classify_run(run) -> None:
-    """Execute a classify Run. Accepts the dict from plan() (the wizard's path — planned,
-    priced, and confirmed once) or a bare argparse Namespace (the CLI path — planned here)."""
-    if isinstance(run, argparse.Namespace): run = plan(run)
-    a, targets, titles = run["opts"], run["targets"], run["titles"]
-    proposal, done, todo = run["proposal"], run["done"], run["todo"]
-    print(f"engine={a.engine}  candidate books: {len(targets)}")
-    if done: print(f"  resuming: {len(done)} already in proposal (pass --fresh to restart)")
-    def dump():
-        write_proposal([{"book_id": b, "title": titles.get(b, ""), "added_tags": vt, "proposed_new": nt}
-                        for b, (vt, nt) in proposal.items()])
-
-    spend_gate(len(todo), a.engine, a.yes)         # cloud runs cost real money
-
-    eng = ENGINES[a.engine](a.model, a.timeout)
-    def work(b, d):
-        out, err = ask_retry(eng, prompt_for(d, a.max_tags)); vt, nt = parse_resp(out, a.max_tags, a.dedup_cutoff); return b, err, vt, nt
-
-    failures = []
-    workers = engine_workers(a.engine, a.workers)        # non-parallel engines (apple) cap at 1
-    print(f"  {len(todo)} to do this run, {workers} concurrent")
-    ex = ThreadPoolExecutor(max_workers=workers)
-    interrupted = False
-    try:
-        with _Dashboard(len(todo), len(done), len(targets)) as dash:
-            futs = [ex.submit(work, b, d) for b, d in todo]
-            for fut in as_completed(futs):
-                b, err, vt, nt = fut.result()
-                if err: failures.append((b, err))
-                else: proposal[b] = (vt, nt)          # record EVERY non-errored book, even a no-match (vt=nt=[]):
-                                                      # --apply stamps every proposal row, so it isn't re-sent forever.
-                                                      # errors are excluded on purpose — they retry (e.g. --engine apple).
-                dash.update(vt, nt, err)
-                if dash.n % 50 == 0: dump()           # checkpoint regardless of UI
-    except KeyboardInterrupt:
-        # Ctrl+C: never start queued work, don't wait for in-flight requests (they're
-        # abandoned; runs are resumable so nothing is lost beyond the requests in the air)
-        interrupted = True
-        ex.shutdown(wait=False, cancel_futures=True)
-    else:
-        ex.shutdown()
-    dump()
-    if interrupted:
-        print(f"\n  interrupted — {len(proposal)} results saved to the proposal; re-run to resume where you left off.")
-    if failures:
-        from scourgify.artifacts import write_failures
-        write_failures([[b, titles.get(b, ""), e] for b, e in failures])
-        bytype = collections.Counter(e.split(":")[0].split(" ")[0] for _, e in failures)
-        print(f"failures: {len(failures)} -> {os.path.basename(fail())}  by type: {dict(bytype)}")
-        print("  (recover blocked books with a no-policy engine: scourgify classify --engine apple)")
-
-    ranked = collections.Counter()
-    for vt, nt in proposal.values():
-        for t in nt: ranked[t] += 1
-    rows = annotate_new(ranked, a.dedup_cutoff)               # nearest existing tag + verdict for each candidate
-    fresh = [r for r in rows if r[4] == "new"]                # genuinely novel — the ones worth promoting
-    write_ranked(rows)
-    print(f"\nOutput 1 (apply): {sum(1 for v in proposal.values() if v[0])} books with vocab tags -> {os.path.basename(prop())} (col 'added_tags')")
-    print(f"Output 2 (grow):  {len(fresh)} new + {len(rows) - len(fresh)} near-dupes of existing tags -> {os.path.basename(rank())} (promote 'verdict=new' rows into defaults/classify_vocab.txt)")
-    if rows:
-        report.table("top new-tag candidates (verdict=new → promote; near-duplicate ≈ an existing tag)",
-                     ["count", "proposed tag", "nearest existing", "verdict"],
-                     [[(str(cnt), "cyan"), tag, (f"{nearest} ({sim})" if nearest else "", "dim"),
-                       ("new", "green") if verdict == "new" else ("≈ dupe", "yellow")]
-                      for tag, cnt, nearest, sim, verdict in rows[:25]], right=(0,))
-    print("\nApply vocab tags with: scourgify classify --apply   (Calibre closed)")
+    """Execute a classify run: a Plan (the wizard's path — planned, priced, and confirmed once)
+    or a bare argparse Namespace (the CLI path — planned here)."""
+    (plan(run) if isinstance(run, argparse.Namespace) else run).run()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -391,7 +410,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def normalize(a: argparse.Namespace) -> argparse.Namespace:
     """Post-parse invariants (idempotent). Engine-dependent settings (apple → 1 worker) are
-    resolved at use inside classify_run, so the wizard can pick an engine after planning."""
+    resolved at run time, so the wizard can pick an engine after planning (via p.opts)."""
     library()                                    # fail fast with a clear message
     os.makedirs(data_dir(), exist_ok=True)
     return a

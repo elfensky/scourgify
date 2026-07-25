@@ -60,9 +60,22 @@ def test_plan_resolves_scope_and_resume_once():
     with harness(books):
         artifacts.write_proposal([{"book_id": 2, "title": "b2", "added_tags": ["X"], "proposed_new": []}])
         p = classify.plan(classify.default_opts())            # sparse default: no scope flag
-        assert {b for b, _ in p["targets"]} == {1, 2, 3}
-        assert {b for b, _ in p["todo"]} == {1, 3}            # book 2 rides the existing proposal
-        assert p["proposal"][2] == (["X"], []) and 2 in p["done"]
+        assert {b for b, _ in p.targets} == {1, 2, 3}
+        assert {b for b, _ in p.todo} == {1, 3}               # book 2 rides the existing proposal
+        assert p.proposal[2] == (["X"], []) and 2 in p.done
+
+
+def test_plan_is_isolated_from_later_caller_mutation():
+    """The old bare-dict plan kept the caller's Namespace by identity — mutating it after
+    planning silently steered the run. The Plan owns a copy: callers steer through p.opts."""
+    books = [{"id": 1, "added": "2026-01-01 10:00:00", "desc": DESC}]
+    with harness(books):
+        a = classify.default_opts()
+        p = classify.plan(a)
+        a.engine = "gemini"                                   # caller keeps mutating its own namespace…
+        assert p.opts.engine == "apple"                       # …the resolved plan doesn't move
+        p.opts.engine = "claude"                              # the sanctioned way: through the plan
+        assert p.opts.engine == "claude" and a.engine == "gemini"
 
 
 def test_run_records_hits_no_matches_and_failures():
@@ -75,10 +88,9 @@ def test_run_records_hits_no_matches_and_failures():
     with harness(books):
         ENGINES["fake"] = FakeEngine
         try:
-            a = classify.default_opts()
-            p = classify.plan(a)
-            a.engine = "fake"                                 # chosen after planning, like the wizard
-            classify.classify_run(p)
+            p = classify.plan(classify.default_opts())
+            p.opts.engine = "fake"                            # chosen after planning, like the wizard
+            classify.classify_run(p)                          # accepts a Plan (or a bare Namespace)
         finally:
             del ENGINES["fake"]
         rows = {r["book_id"]: r for r in artifacts.read_proposal()}
@@ -114,6 +126,16 @@ def test_apply_proposal_ops_union_stamp_archive():
         assert common.op_stamp_now("#wrangled", [1, 2]) in ops               # BOTH books stamped
         assert not any(o["op"] == "create_column" for o in ops)              # column already exists
         assert not os.path.exists(artifacts.prop()) and len(artifacts.applied_proposals()) == 1
+
+
+def test_run_accepts_injected_ask():
+    """Plan.run(ask=) — the injected prompt->(text, err) seam, like promote.run's ask=."""
+    books = [{"id": 1, "added": "2026-01-01 10:00:00", "desc": DESC}]
+    with harness(books):
+        p = classify.plan(classify.default_opts())
+        p.run(ask=lambda prompt: ('{"tags": [], "new": ["Injected Tag"]}', ""))
+        (row,) = artifacts.read_proposal()
+        assert row["book_id"] == 1 and row["proposed_new"] == ["Injected Tag"]
 
 
 if __name__ == "__main__":

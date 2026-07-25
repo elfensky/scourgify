@@ -200,8 +200,8 @@ def stage_classify():
     # (whole-library reuses select.pick("all")). The plan is resolved ONCE — the cost shown and
     # confirmed below is over the same `todo` set classify_run executes (never a re-gather).
     a = classify.default_opts(text_fallback=True, incremental=scope == "n", **{"all": scope == "a"})
-    p = classify.plan(a)
-    targets, todo = p["targets"], p["todo"]
+    p = classify.plan(a)                          # owns a COPY of a — steering goes through p.opts
+    targets, todo = p.targets, p.todo
     if not targets:
         ui.say("no candidates with usable text — nothing to send ✓", "green"); return
     if not todo:
@@ -213,10 +213,10 @@ def stage_classify():
                         extra=(("c", "compare", f"try {n_sample} sample books on every usable engine first"),))
         if k is None: return                      # nothing usable — the picker already said why
         if k != "c":
-            a.engine = k; break
+            p.opts.engine = k; break
         usable_engs = engines.usable_engines()         # NB: don't shadow the module-level `engines` import
         ui.say(f"comparing: {n_sample} books × {', '.join(usable_engs)} (sequential — a minute or two)…", "dim")
-        res = classify.bakeoff(a, targets, usable_engs, n=n_sample)
+        res = classify.bakeoff(p.opts, targets, usable_engs, n=n_sample)
         con = ro_connect(); titles = common.titles(con, res); con.close()
         t = Table(box=box.SIMPLE, title="engine comparison — vocab tags (+new candidates dimmed)")
         t.add_column("book", max_width=32)
@@ -229,12 +229,12 @@ def stage_classify():
                            + (f"\n[dim]+ {'; '.join(nt)}[/]" if nt else ""))
             t.add_row(*row)
         console.print(t)
-    if not engines.is_free(a.engine):
+    if not engines.is_free(p.opts.engine):
         if not ui.confirm(
-                f"send {len(todo)} books to the {a.engine} API (~${classify.est_cost(len(todo), a.engine):.2f})?"):
+                f"send {len(todo)} books to the {p.opts.engine} API (~${classify.est_cost(len(todo), p.opts.engine):.2f})?"):
             ui.say("(skipped — nothing sent)", "dim"); return
-        a.yes = True                              # this confirm ANSWERS classify's spend gate — never ask twice
-    classify.classify_run(p)                      # the SAME plan that was priced — no second gather
+        p.opts.yes = True                         # this confirm ANSWERS classify's spend gate — never ask twice
+    p.run()                                       # the SAME plan that was priced — no second gather
 
 
 def stage_review():
