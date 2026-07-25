@@ -21,18 +21,19 @@ import argparse, os, csv, json, re, collections, difflib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from scourgify import booktext, report, select
 from scourgify.booktext import strip_html                               # text extraction lives in booktext.py
-from scourgify.common import (HERE, DATA, user_dir, ro_connect, custom_column_id, run_writer, library,
+from scourgify.common import (HERE, data_dir, user_dir, ro_connect, custom_column_id, run_writer, library,
                               current_tags, titles as book_titles, op_create_column, op_set_field, op_stamp_now,
                               interactive as _interactive, confirm as _confirm)
 from scourgify.overrides import ov_path, merge_vocab, read_aliases      # overrides/ paths + format readers live there
-from scourgify.artifacts import (PROP, RANK, FAIL,                      # artifact formats live in artifacts.py
+from scourgify.artifacts import (prop, rank, fail,                      # artifact paths + formats live in artifacts.py
                                  read_proposal, write_proposal, write_ranked, archive)
 # the engine seam lives in engines.py; re-exported here so `classify.ENGINES` / `classify.ask_retry`
 # stay valid for promote, the wizard, and existing tests
 from scourgify.engines import ENGINES, ENGINE_ENV, PRICING, usable_engines, ask_retry, is_free, max_workers as engine_workers
 from scourgify.report import Dashboard as _Dashboard                    # live display lives in report.py
 
-AO3_VOCAB = f"{DATA}/ao3_vocab.csv"     # per-library canonical AO3 freeforms (name,uses); absent on fresh installs
+def _ao3_vocab_path() -> str:           # per-library canonical AO3 freeforms (name,uses); absent on fresh installs
+    return os.path.join(data_dir(), "ao3_vocab.csv")
 SPEND_GATE = 200        # cloud runs above this many books require an explicit yes
 DEDUP_CUTOFF = 0.86     # difflib ratio at/above which a proposed tag counts as a variant of an existing one
 
@@ -75,7 +76,7 @@ def load_ao3_vocab() -> list:
     global _AO3
     if _AO3 is None:
         try:
-            _AO3 = [r["name"] for r in csv.DictReader(open(AO3_VOCAB)) if r.get("name", "").strip()]
+            _AO3 = [r["name"] for r in csv.DictReader(open(_ao3_vocab_path())) if r.get("name", "").strip()]
         except OSError:
             _AO3 = []
     return _AO3
@@ -155,8 +156,8 @@ def annotate_new(ranked, cutoff: float = DEDUP_CUTOFF, existing: list | None = N
 
 # ---- apply: 'added_tags' + stamp #wrangled — standalone, no LLM calls ----
 def apply_proposal() -> None:
-    if not os.path.exists(PROP):
-        raise SystemExit(f"no proposal to apply ({os.path.basename(PROP)} not found — run a classify pass first).")
+    if not os.path.exists(prop()):
+        raise SystemExit(f"no proposal to apply ({os.path.basename(prop())} not found — run a classify pass first).")
     con = ro_connect()
     cur = current_tags(con)
     have_wrangled = custom_column_id(con, "wrangled") is not None
@@ -173,7 +174,7 @@ def apply_proposal() -> None:
     ops.append(op_stamp_now("#wrangled", processed))
     run_writer(ops)
     # archive so a later --apply can't re-add tags you've since hand-removed (stale rows never re-apply)
-    arch = archive(PROP, "applied")
+    arch = archive(prop(), "applied")
     print(f"applied tags to {len(chg)} books + stamped #wrangled on {len(processed)} processed; proposal archived -> {os.path.basename(arch)}")
 
 
@@ -181,8 +182,8 @@ def apply_proposal_step() -> None:
     """1-by-1 review of the proposal: each book's proposed tags as a checklist. Accepted tags are
     applied + the book stamped; rejected tags are dropped and logged (class=ai, a hallucination filter,
     NOT a rule bug). Skip/quit leave a book's row pending in the proposal for a later run."""
-    if not os.path.exists(PROP):
-        raise SystemExit(f"no proposal to apply ({os.path.basename(PROP)} not found — run a classify pass first).")
+    if not os.path.exists(prop()):
+        raise SystemExit(f"no proposal to apply ({os.path.basename(prop())} not found — run a classify pass first).")
     from scourgify import ui
     if not ui.interactive():
         raise SystemExit("--step needs an interactive terminal (omit it to apply the whole proposal).")
@@ -215,7 +216,7 @@ def apply_proposal_step() -> None:
         raise
     if pending:
         write_proposal(pending)
-        print(f"{len(pending)} book(s) left pending for a later run -> {os.path.basename(PROP)}")
+        print(f"{len(pending)} book(s) left pending for a later run -> {os.path.basename(prop())}")
 
 
 # ---- gather books (read-only) ----
@@ -344,7 +345,7 @@ def classify_run(run) -> None:
         from scourgify.artifacts import write_failures
         write_failures([[b, titles.get(b, ""), e] for b, e in failures])
         bytype = collections.Counter(e.split(":")[0].split(" ")[0] for _, e in failures)
-        print(f"failures: {len(failures)} -> {os.path.basename(FAIL)}  by type: {dict(bytype)}")
+        print(f"failures: {len(failures)} -> {os.path.basename(fail())}  by type: {dict(bytype)}")
         print("  (recover blocked books with a no-policy engine: scourgify classify --engine apple)")
 
     ranked = collections.Counter()
@@ -353,8 +354,8 @@ def classify_run(run) -> None:
     rows = annotate_new(ranked, a.dedup_cutoff)               # nearest existing tag + verdict for each candidate
     fresh = [r for r in rows if r[4] == "new"]                # genuinely novel — the ones worth promoting
     write_ranked(rows)
-    print(f"\nOutput 1 (apply): {sum(1 for v in proposal.values() if v[0])} books with vocab tags -> {os.path.basename(PROP)} (col 'added_tags')")
-    print(f"Output 2 (grow):  {len(fresh)} new + {len(rows) - len(fresh)} near-dupes of existing tags -> {os.path.basename(RANK)} (promote 'verdict=new' rows into defaults/classify_vocab.txt)")
+    print(f"\nOutput 1 (apply): {sum(1 for v in proposal.values() if v[0])} books with vocab tags -> {os.path.basename(prop())} (col 'added_tags')")
+    print(f"Output 2 (grow):  {len(fresh)} new + {len(rows) - len(fresh)} near-dupes of existing tags -> {os.path.basename(rank())} (promote 'verdict=new' rows into defaults/classify_vocab.txt)")
     if rows:
         report.table("top new-tag candidates (verdict=new → promote; near-duplicate ≈ an existing tag)",
                      ["count", "proposed tag", "nearest existing", "verdict"],
@@ -392,7 +393,7 @@ def normalize(a: argparse.Namespace) -> argparse.Namespace:
     """Post-parse invariants (idempotent). Engine-dependent settings (apple → 1 worker) are
     resolved at use inside classify_run, so the wizard can pick an engine after planning."""
     library()                                    # fail fast with a clear message
-    os.makedirs(DATA, exist_ok=True)
+    os.makedirs(data_dir(), exist_ok=True)
     return a
 
 

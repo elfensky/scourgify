@@ -27,7 +27,7 @@ Note: name-stem grouping unifies media-type splits of the SAME name (X (TV) / X 
 renamed adaptations (Game of Thrones vs A Song of Ice and Fire) still need a hand-added row."""
 import argparse, csv, os, re, shutil, sys, time
 
-from scourgify.common import DATA, norm, ro_connect, read_custom_column
+from scourgify.common import data_dir, norm, ro_connect, read_custom_column
 
 TYPES = {"Fandom": "fandom", "Character": "character", "Freeform": "tag"}
 
@@ -137,7 +137,7 @@ def adopt_tropes():
     """Trust AO3 wholesale: append every ao3_tropes.csv fold that current maps don't already
     handle to overrides/tropes.csv. Genre-allowlisted canonicals route to genre, the rest to tag."""
     from scourgify import wrangle
-    src = os.path.join(DATA, "ao3_tropes.csv")
+    src = os.path.join(data_dir(), "ao3_tropes.csv")
     if not os.path.exists(src): raise SystemExit(f"{src} not found — run ao3_import.py first")
     m = wrangle.load_maps(wrangle.load_config())
     dst = os.path.join(os.getcwd(), "overrides", "tropes.csv")
@@ -173,9 +173,9 @@ def adopt_franchises(path):
 
 
 def emit(lib, validated, aliases, canon_by_id):
-    os.makedirs(DATA, exist_ok=True)
+    os.makedirs(data_dir(), exist_ok=True)
     def w(fn, header, data):
-        p = os.path.join(DATA, fn)
+        p = os.path.join(data_dir(), fn)
         with open(p, "w", newline="") as f:
             cw = csv.writer(f); cw.writerow(header); cw.writerows(data)
         print(f"  {fn:20} {len(data):6} rows")
@@ -253,7 +253,7 @@ def main():
     p.add_argument("--dump", default=os.path.expanduser("~/Downloads/20210226-stats/tags-20210226.csv"))
     p.add_argument("--selftest", action="store_true")
     p.add_argument("--adopt-tropes", action="store_true", help="append data/ao3_tropes.csv folds to overrides/tropes.csv")
-    p.add_argument("--adopt-franchises", nargs="?", const=os.path.join(DATA, "ao3_franchises.csv"), metavar="FILE",
+    p.add_argument("--adopt-franchises", nargs="?", const=os.path.join(data_dir(), "ao3_franchises.csv"), metavar="FILE",
                    help="append reviewed universe rows to overrides/fandoms.csv")
     a = p.parse_args()
     if a.selftest: return selftest()

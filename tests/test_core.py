@@ -387,7 +387,7 @@ def test_step_apply_preserves_pending_rows_when_writer_refuses():
     tmp = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
     tmp.write(b"book_id,title,added_tags,proposed_new\n"); tmp.close()
     saved = (classify.read_proposal, classify.write_proposal, classify.apply_proposal,
-             classify.ro_connect, classify.book_titles, classify.PROP,
+             classify.ro_connect, classify.book_titles, classify.prop,
              ui.interactive, ui.checklist, common.log_rejects)
     try:
         classify.read_proposal = lambda path=None: [dict(r) for r in store["rows"]]
@@ -395,7 +395,7 @@ def test_step_apply_preserves_pending_rows_when_writer_refuses():
         classify.apply_proposal = refuse
         classify.ro_connect = lambda: FakeCon()
         classify.book_titles = lambda con: {}
-        classify.PROP = tmp.name
+        classify.prop = lambda: tmp.name          # the module-attribute seam (paths are functions now)
         ui.interactive = lambda: True
         ui.checklist = fake_checklist
         common.log_rejects = lambda rejects: None
@@ -410,7 +410,7 @@ def test_step_apply_preserves_pending_rows_when_writer_refuses():
         assert 1 in left, "decided-but-unapplied row lost when the writer refused"
     finally:
         (classify.read_proposal, classify.write_proposal, classify.apply_proposal,
-         classify.ro_connect, classify.book_titles, classify.PROP,
+         classify.ro_connect, classify.book_titles, classify.prop,
          ui.interactive, ui.checklist, common.log_rejects) = saved
         os.unlink(tmp.name)
 

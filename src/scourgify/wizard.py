@@ -49,14 +49,14 @@ def snapshot():
     pending, to_stamp = _proposal_counts(artifacts.read_proposal())
     # cheap file-based signals of unfinished work, surfaced as menu hints
     candidates = 0
-    if os.path.exists(artifacts.RANK):
+    if os.path.exists(artifacts.rank()):
         try: candidates = len(promote.candidates())          # new-tag candidates not yet adjudicated
         except SystemExit: candidates = 0
-    verdicts_pending = os.path.exists(artifacts.REVIEW)       # adjudicated promote verdicts awaiting apply
-    rejects = sum(1 for r in artifacts.read_rows(common.REJECTS)
+    verdicts_pending = os.path.exists(artifacts.review())       # adjudicated promote verdicts awaiting apply
+    rejects = sum(1 for r in artifacts.read_rows(common.rejects_path())
                   if r.get("stage") == "wrangle" and r.get("class") == "auto")
     backfill_n = 0                                            # actual books that would gain a tag — clears once backfilled,
-    if os.path.exists(artifacts.LEDGER):                     # unlike a "ledger has promotions" flag, which never clears
+    if os.path.exists(artifacts.ledger()):                     # unlike a "ledger has promotions" flag, which never clears
         try: backfill_n = len(promote.backfill_plan()[0])
         except Exception: backfill_n = 0
     return {"books": books, "missing": missing, "changed": changed,
@@ -238,9 +238,9 @@ def stage_classify():
 
 
 def stage_review():
-    if not os.path.exists(artifacts.PROP):
+    if not os.path.exists(artifacts.prop()):
         ui.say("no pending proposal — nothing to review ✓", "green"); return
-    vintage = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(artifacts.PROP)))
+    vintage = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(artifacts.prop())))
     rows = artifacts.read_proposal()
     tagged = [r for r in rows if r["added_tags"]]
     if not rows:
@@ -255,7 +255,7 @@ def stage_review():
         if choice == "a":
             classify.apply_proposal(); ui.say("done ✓", "green")
         else:
-            arch = artifacts.archive(artifacts.PROP, "discarded")
+            arch = artifacts.archive(artifacts.prop(), "discarded")
             ui.say(f"set aside -> {os.path.basename(arch)}", "dim")
         return
     cnt = collections.Counter(t for r in tagged for t in r["added_tags"])
@@ -263,15 +263,15 @@ def stage_review():
     t.add_column("vocab tag"); t.add_column("books", justify="right")
     for tag, c in cnt.most_common(15): t.add_row(tag, str(c))
     console.print(t)
-    if os.path.exists(artifacts.RANK):
+    if os.path.exists(artifacts.rank()):
         r = Table(box=box.SIMPLE, title="top new-tag candidates (promote into overrides/classify_vocab.txt)")
         r.add_column("count", justify="right", style="cyan"); r.add_column("proposed tag")
         for row in artifacts.read_ranked()[:15]: r.add_row(str(row["count"]), row["proposed_tag"])
         console.print(r)
-    n_failed = len(artifacts.read_rows(artifacts.FAIL))
+    n_failed = len(artifacts.read_rows(artifacts.fail()))
     if n_failed:
-        ui.say(f"⚠ {n_failed} books failed classification — see {artifacts.FAIL} (recover with --engine apple)", "yellow")
-    ui.say(f"full proposal: {artifacts.PROP}", "dim")
+        ui.say(f"⚠ {n_failed} books failed classification — see {artifacts.fail()} (recover with --engine apple)", "yellow")
+    ui.say(f"full proposal: {artifacts.prop()}", "dim")
     choice = ui.menu("proposal", [
         ("a", "apply", f"write tags to {len(tagged)} books + stamp all {len(rows)} processed (Calibre closed; auto-backup)"),
         ("r", "review 1-by-1", "walk each book's tags; untick to reject an AI-guessed tag before it's written"),
@@ -285,7 +285,7 @@ def stage_review():
         classify.apply_proposal_step()
         ui.say("done ✓", "green")
     elif choice == "d":
-        arch = artifacts.archive(artifacts.PROP, "discarded")
+        arch = artifacts.archive(artifacts.prop(), "discarded")
         ui.say(f"set aside -> {os.path.basename(arch)}", "dim")
     else:
         ui.say("(kept pending)", "dim")
@@ -293,7 +293,7 @@ def stage_review():
 
 def _promote_review_menu():
     """Show the adjudicated verdicts and apply / keep / discard them (shared: fresh run + pending review)."""
-    rows = artifacts.read_rows(artifacts.REVIEW)
+    rows = artifacts.read_rows(artifacts.review())
     by = collections.defaultdict(list)
     for r in rows: by[r["verdict"]].append(r)
     for v, col in (("promote", "green"), ("alias", "cyan"), ("reject", "dim"), ("error", "red")):
@@ -306,7 +306,7 @@ def _promote_review_menu():
             t.add_row(r["tag"] + mark, r["target"] if v == "alias" else r.get("reason", "")[:80])
         if len(rs) > 20: t.add_row("[dim]…[/]", f"[dim]+{len(rs) - 20} more[/]")
         console.print(t)
-    ui.say(f"full verdicts (edit before applying if you like): {artifacts.REVIEW}", "dim")
+    ui.say(f"full verdicts (edit before applying if you like): {artifacts.review()}", "dim")
     npro, nal = len(by.get("promote", [])), len(by.get("alias", []))
     choice = ui.menu("verdicts", [
         ("a", "apply", f"promote {npro} to the vocab, fold {nal} aliases (writes overrides/)"),
@@ -316,17 +316,17 @@ def _promote_review_menu():
     if choice == "a":
         promote.apply_decisions(); ui.say("done ✓  (run the backfill step to tag the source books)", "green")
     elif choice == "d":
-        arch = artifacts.archive(artifacts.REVIEW, "discarded")
+        arch = artifacts.archive(artifacts.review(), "discarded")
         ui.say(f"set aside -> {os.path.basename(arch)}", "dim")
     else:
         ui.say("(kept pending)", "dim")
 
 
 def stage_promote():
-    if os.path.exists(artifacts.REVIEW):          # verdicts already adjudicated — apply them, don't re-spend the API
+    if os.path.exists(artifacts.review()):          # verdicts already adjudicated — apply them, don't re-spend the API
         ui.say("a previously-adjudicated review is pending — apply it, or discard to re-adjudicate.", "dim")
         _promote_review_menu(); return
-    if not os.path.exists(artifacts.RANK):
+    if not os.path.exists(artifacts.rank()):
         ui.say("no new-tag candidates yet — run classify first ✓", "green"); return
     cands = promote.candidates()
     if not cands:
@@ -355,7 +355,7 @@ def stage_backfill():
 
 
 def stage_overrides():
-    if not os.path.exists(common.REJECTS):
+    if not os.path.exists(common.rejects_path()):
         ui.say("no rejected changes logged — nothing to convert ✓", "green")
         ui.say("(reject deterministic changes in `apply --step` to feed this)", "dim")
         return
