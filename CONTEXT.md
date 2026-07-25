@@ -23,7 +23,8 @@ concept.
 - **Classify** — LLM content tagging from the **controlled vocabulary**; produces the **proposal**.
 - **Engine** — one LLM adapter (apple/claude/openai/gemini/mistral) behind the seam in
   `engines.py`. `_post_json` is the transport; a fake engine or a monkeypatched transport stands in
-  for the network in tests.
+  for the network in tests. What an engine is *like* is data there too (`TRAITS` + `is_free` off
+  `PRICING` + `max_workers`) — callers never string-test the name.
 - **Artifact** — a CSV the tools hand each other under `data/`, owned by `artifacts.py`:
   - **Proposal** (`classify_proposal.csv`) — per-book `added_tags` (vocab, applied) +
     `proposed_new` (novel candidates, never applied directly).

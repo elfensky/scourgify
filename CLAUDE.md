@@ -150,8 +150,9 @@ into the numbered Series field, and aggressive franchise unification (e.g. all F
 
 **`classify.py` — content-based tagging** (separate from the deterministic engine; uses an LLM).
 The LLM engine adapters + retry + availability live in **`engines.py`** (one seam: `_post_json` is the
-HTTP transport tests monkeypatch; `ENGINES`/`ENGINE_ENV`/`PRICING`/`usable_engines(env=…)`/`ask_retry`
-are the single source the tools and the wizard derive from). The cross-tool CSV formats (proposal /
+HTTP transport tests monkeypatch; `ENGINES`/`ENGINE_ENV`/`PRICING`/`TRAITS`/`usable_engines(env=…)`/
+`ask_retry` are the single source the tools and the wizard derive from — traits (`is_free`/
+`max_workers`/`trait`) replace name string-tests, so adding an engine is one row). The cross-tool CSV formats (proposal /
 ranked / review / ledger / failures, the `"; "` delimiter, timestamped archiving) live in
 **`artifacts.py`** — never hand-read/write those files elsewhere. The user's overrides dir (config
 `[overrides] dir`) and its file formats (headers, delimiter sniffing, append-if-absent, the vocab
