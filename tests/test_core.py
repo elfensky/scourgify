@@ -415,6 +415,21 @@ def test_step_apply_preserves_pending_rows_when_writer_refuses():
         os.unlink(tmp.name)
 
 
+def test_spend_gate_keys_off_free_pricing_not_engine_name():
+    """A free engine (list price 0,0) never hits the cloud-spend gate — free-ness is a PRICING
+    fact, not an 'is it apple' string test."""
+    from scourgify import classify, engines
+    saved_pricing = dict(engines.PRICING)
+    saved_inter = classify._interactive
+    engines.PRICING["zerocost"] = (0.0, 0.0)
+    classify._interactive = lambda: False          # deterministic: a prompt would raise, not block
+    try:
+        classify.spend_gate(10_000, "zerocost", yes=False)     # must return silently
+    finally:
+        engines.PRICING.clear(); engines.PRICING.update(saved_pricing)
+        classify._interactive = saved_inter
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

@@ -16,6 +16,29 @@ ERR_TRUNC = 140   # chars kept when recording an engine error (same width in bak
 # $/MTok (input, output) for each engine's default model — public list prices as of 2026-07; edit when they change.
 PRICING = {"apple": (0.0, 0.0), "claude": (1.00, 5.00), "openai": (0.15, 0.60), "gemini": (0.30, 2.50), "mistral": (0.20, 0.60)}
 
+# What each engine is LIKE — callers consult these instead of string-testing the name, so adding
+# an engine is a row here, not a hunt for `== "apple"` scattered across the tools.
+# (Free-ness is a PRICING fact — an engine is free iff its list price is (0, 0) — not a trait row.)
+_TRAIT_DEFAULTS = {"parallel": True, "judge": True, "hint": "key set ✓", "unusable": "no API key in env"}
+TRAITS = {"apple": {"parallel": False,               # one subprocess pipe — not thread-safe
+                    "judge": False,                  # too weak for promote's adversarial refereeing
+                    "hint": "free, on-device", "unusable": "needs the afm binary or a swift toolchain"}}
+
+
+def trait(e: str, k: str):
+    """One engine's trait, falling back to the cloud-engine defaults for unlisted engines."""
+    return TRAITS.get(e, {}).get(k, _TRAIT_DEFAULTS[k])
+
+
+def is_free(e: str) -> bool:
+    """True iff the engine's list price is (0, 0) — the spend gate and cost confirms key off this."""
+    return PRICING.get(e) == (0.0, 0.0)
+
+
+def max_workers(e: str, requested: int) -> int:
+    """The concurrency the engine can actually take (a non-parallel engine caps at 1)."""
+    return requested if trait(e, "parallel") else 1
+
 
 def _post_json(url: str, headers: dict, payload: dict, timeout: int) -> dict:
     """POST JSON, return the decoded JSON response — the one transport seam for every cloud engine."""
@@ -117,7 +140,7 @@ def usable_engines(env=None) -> list:
     env = os.environ if env is None else env
     out = []
     for e in ENGINES:
-        if e == "apple":
+        if not ENGINE_ENV.get(e):                 # no key env = on-device: needs the local runtime
             if os.path.exists(f"{HERE}/afm") or shutil.which("swift"): out.append(e)
         elif any(env.get(k) for k in ENGINE_ENV[e]): out.append(e)
     return out

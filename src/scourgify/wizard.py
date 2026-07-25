@@ -127,13 +127,39 @@ def stage_staleness():
 
 
 def _engines(env=None):
-    """[(name, usable, hint)] for the engine menus — derived from engines.ENGINES + usable_engines(),
-    so a newly registered engine shows up here automatically instead of silently missing.
+    """[(name, usable, hint)] for the engine menu — derived from engines.ENGINES + usable_engines()
+    + TRAITS, so a newly registered engine shows up here automatically instead of silently missing.
     `env` passes through to usable_engines (tests inject a dict)."""
     ok = set(engines.usable_engines(env))
-    hints = {"apple": ("free, on-device", "needs the afm binary or a swift toolchain")}
-    return [(e, e in ok, hints.get(e, ("key set ✓", "no API key in env"))[e not in ok])
-            for e in engines.ENGINES]
+    return [(e, e in ok, engines.trait(e, "hint" if e in ok else "unusable")) for e in engines.ENGINES]
+
+
+def _default_engine_key(opts: list, judge: bool = False) -> str:
+    """PURE half of the menu default: the first option normally; for judge work (promote's
+    adversarial refereeing) the first judge-capable engine."""
+    if not judge: return opts[0][0]
+    return next((k for k, lbl, _ in opts if engines.trait(lbl, "judge")), opts[0][0])
+
+
+def _ask_engine(n_todo: int | None = None, judge: bool = False, extra: tuple = ()):
+    """The ONE engine-menu drive loop (classify + promote share it): numbered engines (with a
+    per-engine cost column when n_todo is given), `extra` rows appended verbatim (their key is
+    returned as-is), re-ask on an unusable choice. -> engine name, an extra key, or None when
+    no engine is usable at all."""
+    while True:
+        engs = _engines()
+        if not any(ok for _, ok, _ in engs):
+            ui.error("no engine is usable — set an API key, or install the afm binary / a swift toolchain.")
+            return None
+        opts = (_engine_options(engs, n_todo) if n_todo is not None
+                else [(str(i), e, h) for i, (e, _, h) in enumerate(engs, 1)])
+        opts += list(extra)
+        k = ui.menu("engine", opts, default=_default_engine_key(opts, judge))
+        if k in {key for key, _, _ in extra}: return k
+        name = {key: lbl for key, lbl, _ in opts}[k]
+        if not {e: ok for e, ok, _ in engs}[name]:
+            ui.error(f"{name} isn't usable here — {dict((e, h) for e, _, h in engs)[name]}"); continue
+        return name
 
 
 def _scope_options(ch: dict, total: int) -> tuple[list, str]:
@@ -181,21 +207,14 @@ def stage_classify():
     if not todo:
         ui.say(f"all {len(targets)} candidate(s) already in the pending proposal — the review step applies them ✓",
                "green"); return
+    n_sample = min(5, len(targets))
     while True:                                   # engine choice; 'compare' loops back after the bake-off table
-        engs = _engines()                          # [(name, usable, hint)] — computed once, reused below
-        hints = {e: h for e, _, h in engs}
-        usable = {e: ok for e, ok, _ in engs}
-        opts = _engine_options(engs, len(todo))
-        n_sample = min(5, len(targets))
-        opts.append(("c", "compare", f"try {n_sample} sample books on every usable engine first"))
-        k = ui.menu("engine", opts, default="1")
+        k = _ask_engine(n_todo=len(todo),
+                        extra=(("c", "compare", f"try {n_sample} sample books on every usable engine first"),))
+        if k is None: return                      # nothing usable — the picker already said why
         if k != "c":
-            a.engine = dict((key, lbl) for key, lbl, _ in opts)[k]
-            if not usable.get(a.engine):
-                ui.error(f"{a.engine} isn't usable here — {hints[a.engine]}")
-                continue
-            break
-        usable_engs = [e for e, ok, _ in engs if ok]   # NB: don't shadow the module-level `engines` import
+            a.engine = k; break
+        usable_engs = engines.usable_engines()         # NB: don't shadow the module-level `engines` import
         ui.say(f"comparing: {n_sample} books × {', '.join(usable_engs)} (sequential — a minute or two)…", "dim")
         res = classify.bakeoff(a, targets, usable_engs, n=n_sample)
         con = ro_connect(); titles = common.titles(con, res); con.close()
@@ -210,7 +229,7 @@ def stage_classify():
                            + (f"\n[dim]+ {'; '.join(nt)}[/]" if nt else ""))
             t.add_row(*row)
         console.print(t)
-    if a.engine != "apple":
+    if not engines.is_free(a.engine):
         if not ui.confirm(
                 f"send {len(todo)} books to the {a.engine} API (~${classify.est_cost(len(todo), a.engine):.2f})?"):
             ui.say("(skipped — nothing sent)", "dim"); return
@@ -315,18 +334,12 @@ def stage_promote():
     ui.say(f"[cyan]{len(cands)}[/] new-tag candidates to weigh against the master tag list "
            "(promote / alias / reject)")
     a = promote.default_opts(yes=True)            # yes: the pending-review case was already handled above
-    engs = _engines()                             # computed once, reused for opts + the error hint
-    hints = {e: h for e, _, h in engs}
-    usable = {e: ok for e, ok, _ in engs}
-    opts = [(str(i), e, hint) for i, (e, ok, hint) in enumerate(engs, 1)]
-    default = next((key for key, lbl, _ in opts if lbl == "claude"), opts[0][0])
-    k = ui.menu("engine", opts, default=default)  # default claude; skip apple (too weak for this judgement)
-    a.engine = dict((key, lbl) for key, lbl, _ in opts)[k]
-    if not usable.get(a.engine):
-        ui.error(f"{a.engine} isn't usable here — {hints[a.engine]}"); return
-    if a.engine == "apple":
-        ui.say("note: on-device apple is weak at this reasoning — a cloud engine gives far better verdicts.", "yellow")
-    if a.engine != "apple" and not ui.confirm(f"send {len(cands)} candidates to the {a.engine} API?"):
+    eng = _ask_engine(judge=True)                 # default: first judge-capable engine (apple is not)
+    if eng is None: return                        # nothing usable — the picker already said why
+    a.engine = eng
+    if not engines.trait(a.engine, "judge"):
+        ui.say(f"note: {a.engine} is weak at this reasoning — a cloud engine gives far better verdicts.", "yellow")
+    if not engines.is_free(a.engine) and not ui.confirm(f"send {len(cands)} candidates to the {a.engine} API?"):
         ui.say("(skipped)", "dim"); return
     promote.run(a)
     _promote_review_menu()

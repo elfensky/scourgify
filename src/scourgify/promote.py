@@ -15,7 +15,7 @@ import difflib
 from scourgify.artifacts import (RANK, PROP, LEDGER, REVIEW,
                                  append_ledger, read_rows, split_tags, write_review, archive)
 from scourgify.classify import existing_terms
-from scourgify.engines import ENGINES, ask_retry
+from scourgify.engines import ENGINES, ask_retry, max_workers as engine_workers
 from scourgify.common import (DATA, library, norm, ro_connect, run_writer,
                               current_tags, titles as book_titles, op_set_field, interactive, confirm)
 from scourgify.overrides import ov_path, append_lines, append_rows   # overrides/ formats live there
@@ -260,7 +260,7 @@ def run(a: argparse.Namespace, ranked_path: str = RANK, proposal_path: str = PRO
         verify_ask = lambda p: ask_retry(veng, p)[0]
     print(f"engine={a.engine}{'  verify-with=' + a.verify_with if a.verify_with else ''}  candidates: {len(cands)}")
     rows = []
-    with ThreadPoolExecutor(max_workers=1 if a.engine == "apple" else a.workers) as ex:
+    with ThreadPoolExecutor(max_workers=engine_workers(a.engine, a.workers)) as ex:
         futs = [ex.submit(decide, c, ask, verify_ask, existing) for c in cands]
         for fut in as_completed(futs): rows.append(fut.result())
     rows.sort(key=lambda r: (r["verdict"] != "promote", -r["count"]))   # promotes first, by count

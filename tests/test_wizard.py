@@ -67,6 +67,14 @@ def test_engines_cloud_usable_iff_key_in_env():
     assert all(h for _, _, h in wizard._engines(env={}))                 # every engine always carries a hint
 
 
+def test_default_engine_key_judge_prefers_first_judge_capable():
+    """The promote picker's default: first judge-capable engine (apple is not); classify's: '1'."""
+    opts = [("1", "apple", "h"), ("2", "claude", "h"), ("3", "openai", "h")]
+    assert wizard._default_engine_key(opts, judge=False) == "1"
+    assert wizard._default_engine_key(opts, judge=True) == "2"
+    assert wizard._default_engine_key([("1", "apple", "h")], judge=True) == "1"   # nothing capable: first
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

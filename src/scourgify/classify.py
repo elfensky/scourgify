@@ -29,7 +29,7 @@ from scourgify.artifacts import (PROP, RANK, FAIL,                      # artifa
                                  read_proposal, write_proposal, write_ranked, archive)
 # the engine seam lives in engines.py; re-exported here so `classify.ENGINES` / `classify.ask_retry`
 # stay valid for promote, the wizard, and existing tests
-from scourgify.engines import ENGINES, ENGINE_ENV, PRICING, usable_engines, ask_retry
+from scourgify.engines import ENGINES, ENGINE_ENV, PRICING, usable_engines, ask_retry, is_free, max_workers as engine_workers
 from scourgify.report import Dashboard as _Dashboard                    # live display lives in report.py
 
 AO3_VOCAB = f"{DATA}/ao3_vocab.csv"     # per-library canonical AO3 freeforms (name,uses); absent on fresh installs
@@ -288,7 +288,7 @@ def bakeoff(a: argparse.Namespace, targets: list, engines: list, n: int = 5) -> 
 def spend_gate(n_books: int, engine: str, yes: bool) -> None:
     """THE cloud-spend confirmation — the single owner of the gate. `yes` answers it up front
     (the CLI --yes flag, or the wizard's own cost-estimate confirm)."""
-    if engine == "apple" or n_books <= SPEND_GATE or yes: return
+    if is_free(engine) or n_books <= SPEND_GATE or yes: return
     msg = f"about to send {n_books} books to the {engine} API (costs money; --incremental/--batch shrink it)."
     if not _interactive():
         raise SystemExit(f"  {msg}\n  non-interactive: re-run with --yes to confirm.")
@@ -315,7 +315,7 @@ def classify_run(run) -> None:
         out, err = ask_retry(eng, prompt_for(d, a.max_tags)); vt, nt = parse_resp(out, a.max_tags, a.dedup_cutoff); return b, err, vt, nt
 
     failures = []
-    workers = 1 if a.engine == "apple" else a.workers    # apple = one subprocess pipe, not thread-safe
+    workers = engine_workers(a.engine, a.workers)        # non-parallel engines (apple) cap at 1
     print(f"  {len(todo)} to do this run, {workers} concurrent")
     ex = ThreadPoolExecutor(max_workers=workers)
     interrupted = False
