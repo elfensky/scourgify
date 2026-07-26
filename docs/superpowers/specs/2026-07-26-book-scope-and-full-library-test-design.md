@@ -47,7 +47,7 @@ new scope mode belong there and nowhere else.
 | Tool | Seam | Semantics |
 |---|---|---|
 | `classify` | new `"ids"` mode in `select.pick` | sits alongside the existing scope modes; `--books` is just another way to produce the target list |
-| `wrangle audit` / `apply` | `Plan.restrict(ids)`, applied **after** the full compute | the read stays library-wide; only the write set narrows |
+| `wrangle apply` | `Plan.restrict(ids)`, applied **after** the full compute | the read stays library-wide; only the write set narrows |
 | `staleness` | filter `compute()`'s returned rows | per-book independent, so a plain filter is correct |
 
 ### Why `wrangle` restricts instead of reading less
@@ -61,6 +61,11 @@ selling point is being audit-first.
 So `Plan` computes the full pass as it does today, and `restrict(ids)` narrows
 `self.changes` and `self.diffs` afterwards. The preview, the 1-by-1 step review, the
 guards, and the write all already read those two structures, so nothing else changes.
+
+`audit` is deliberately left library-wide. Its report reads `transform`'s decision log, whose
+`(kind, where, before, after)` tuples carry no book id, so there is nothing to filter on; adding
+one would change the log's shape for every consumer. The scoped diff is what `apply --books`
+previews.
 
 ### Guardrail correctness under scoping
 
