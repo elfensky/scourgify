@@ -11,6 +11,9 @@ fandoms, characters, relationships and genres** in a
 library. Data-driven from **~1,700 bundled generic defaults**, fully customizable, audit-first and
 reversible.
 
+**New here? Start with the [user guide](docs/USERGUIDE.md)** — the friendly walkthrough; this
+README is the full technical reference.
+
 ```bash
 pipx install scourgify                                # or: uv tool install scourgify  (one dependency: rich)
 
