@@ -86,6 +86,35 @@ def test_changed_pure_day_granularity():               # date-only #updated on t
     assert select.changed_pure(added, {1: "2026-06-27"}, {1: STAMP}) == {1: "updated"}
 
 
+def test_parse_books_forms():
+    assert select.parse_books("3,1,2") == [3, 1, 2]            # order preserved, not sorted
+    assert select.parse_books("10-13") == [10, 11, 12, 13]     # inclusive range
+    assert select.parse_books("7") == [7]
+    assert select.parse_books("5, 1-3 ,5,2") == [5, 1, 2, 3]   # whitespace tolerated, de-duplicated
+
+
+def test_parse_books_at_file():
+    path = os.path.join(tempfile.mkdtemp(), "ids.txt")
+    open(path, "w").write("# a comment\n7\n8,9\n\n10-11   # trailing comment\n")
+    assert select.parse_books(f"@{path},1") == [7, 8, 9, 10, 11, 1]
+
+
+def test_parse_books_rejects_garbage():
+    nested = os.path.join(tempfile.mkdtemp(), "loop.txt")
+    open(nested, "w").write("@%s\n" % nested)
+    for bad in ("x", "1,2x", "9-3", "1-", "@/nonexistent/ids.txt", f"@{nested}"):
+        try:
+            select.parse_books(bad)
+            assert False, f"expected SystemExit for {bad!r}"
+        except SystemExit:
+            pass
+
+
+def test_pick_ids():
+    assert select.pick(_con(), "ids", ids=[4, 2, 99]) == [2, 4]   # newest-added-first; 99 absent -> dropped
+    assert select.pick(_con(), "ids", ids=[]) == []
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
