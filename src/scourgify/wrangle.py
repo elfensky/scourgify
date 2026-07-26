@@ -198,12 +198,14 @@ def transform(d: dict, m: dict, beh: dict, known_chars: frozenset | set = frozen
         tv = _lookup(m["trope"], t)
         if tv:
             canon, route = tv; route = trope_route(canon, route, beh)
-            # A fold target that junk.txt deletes settles HERE. It used to fall through to the tag
-            # fold below, so the canon value was re-added and only junk.txt removed it on the NEXT
-            # run — the same end state, one pass later, which is why `apply --apply` was not a
-            # fixed point. ponytail: route == "drop" is NOT honored here on purpose — see
-            # trope_route; those rules have never fired and enabling them is a data decision.
-            if is_junk(canon, m): note(("drop", "tags", t, "")); continue
+            # Both settle HERE rather than falling through to the tag fold below, which re-added
+            # the value and left junk.txt to remove it on the NEXT run — the same end state one
+            # pass later, which is why `apply --apply` was not a fixed point.
+            #   route == "drop": read_tropes allowlists it, so it is a real route; the chain
+            #     simply never had a branch for it. It beats its own canonical — a
+            #     `variant,canonical,drop` row drops the variant instead of renaming it.
+            #   is_junk(canon): a fold target the user's own junk list deletes.
+            if route == "drop" or is_junk(canon, m): note(("drop", "tags", t, "")); continue
             if canon != t: note(("fold", "tags", t, canon))
             if route == "genre": (nG if genre_allowed(norm(canon), m) else nT).add(canon)   # genre only if allowlisted, else tag (keeps #genres idempotent)
             elif route == "fandom": nF.add(m["fan"].get(canon, canon)); note(("move", "tags → fandoms", t, ""))
