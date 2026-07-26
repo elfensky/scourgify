@@ -166,11 +166,17 @@ def apply_proposal(rows: list | None = None) -> None:
         rows = read_proposal()
     con = ro_connect()
     cur = current_tags(con)
+    known = {b for (b,) in con.execute("SELECT id FROM books")}
     have_wrangled = custom_column_id(con, "wrangled") is not None
-    chg, processed = {}, []
+    chg, processed, stale = {}, [], []
     for r in rows:
-        b = r["book_id"]; processed.append(b)
+        b = r["book_id"]
+        if b not in known:                         # a row can outlive its book (deleted / re-imported with
+            stale.append(b); continue              # a new id) — a dead id would FK-abort the whole write
+        processed.append(b)
         if r["added_tags"]: chg[b] = sorted(cur.get(b, set()) | set(r["added_tags"]))   # union with current tags
+    if stale:
+        print(f"  note: {len(stale)} stale proposal row(s) for books no longer in the library — skipped: {stale[:10]}")
     ops = []
     if not have_wrangled:                                             # first run: create + backfill whole library as wrangled-now
         ops.append(op_create_column("wrangled", "Wrangled", "datetime"))

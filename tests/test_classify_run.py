@@ -138,6 +138,27 @@ def test_run_accepts_injected_ask():
         assert row["book_id"] == 1 and row["proposed_new"] == ["Injected Tag"]
 
 
+def test_apply_proposal_skips_rows_for_deleted_books():
+    """A proposal row can outlive its book (deleted / re-imported with a new id since the run).
+    Shipping the dead id to Calibre dies with a foreign-key violation mid-write — stale rows are
+    skipped (visibly), never sent."""
+    books = [{"id": 1, "added": "2026-01-01 10:00:00"}]
+    with harness(books):
+        artifacts.write_proposal([{"book_id": 1, "title": "b1", "added_tags": ["New"], "proposed_new": []},
+                                  {"book_id": 99, "title": "gone", "added_tags": ["X"], "proposed_new": []}])
+        recorded = []
+        saved = classify.run_writer
+        classify.run_writer = lambda ops, force=False: recorded.append(ops)
+        try:
+            classify.apply_proposal()
+        finally:
+            classify.run_writer = saved
+        (ops,) = recorded
+        assert common.op_set_field("tags", {1: ["New"]}) in ops              # live book applies
+        assert common.op_stamp_now("#wrangled", [1]) in ops                  # stale id 99 not stamped
+        assert not any("99" in str(o.get("values", {})) or 99 in (o.get("books") or []) for o in ops)
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
