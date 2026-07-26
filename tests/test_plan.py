@@ -37,15 +37,24 @@ def test_transform_decision_log_kinds():
     assert ("drop", "tags", "Complete", "") in dec
 
 
-def test_trope_route_drop_is_currently_inert():
-    """Characterization, not endorsement. The route chain has no `drop` branch, so a trope routed
-    'drop' falls through to the tag fold and the tag survives. 77 real rules have this shape and
-    have never once fired. Honoring them would delete tags like ANBU/Avatar/Completed from a real
-    library, so it is a data decision for the library's owner — not a bug fix to slip in. This
-    test exists so the current behavior is deliberate and visible rather than accidental."""
+def test_trope_route_drop_deletes_the_tag():
+    """`drop` is one of the five routes read_tropes allowlists, but the route chain had no branch
+    for it, so every such rule fell through to the tag fold and silently did nothing. Honored
+    now: the tag goes, and the decision log says so."""
+    log = []
     m = maps(trope={"anbu": ("ANBU", "drop")})                      # keys are norm()'d
-    nd, _, _ = wrangle.transform({"tags": ["ANBU"]}, m, BEH)
-    assert nd["tags"] == ["ANBU"]
+    nd, _, _ = wrangle.transform({"tags": ["ANBU", "Keeper"]}, m, BEH, log=log)
+    assert nd["tags"] == ["Keeper"]
+    assert ("drop", "tags", "ANBU", "") in set(log)
+
+
+def test_trope_route_drop_beats_its_own_rename_target():
+    """A `variant,canonical,drop` row drops the variant rather than renaming it — the route wins
+    over the canonical. Pinned because the two readings are not obviously distinguishable and
+    silently renaming instead would resurrect the value under a different name."""
+    nd, _, _ = wrangle.transform({"tags": ["ANBU - Freeform"]},
+                                 maps(trope={"anbu freeform": ("ANBU", "drop")}), BEH)
+    assert nd["tags"] == []
 
 
 def test_trope_fold_target_that_is_junk_is_dropped_in_one_pass():
