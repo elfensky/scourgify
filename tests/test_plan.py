@@ -60,6 +60,26 @@ def test_plan_single_compute_feeds_changes_guards_and_decisions():
         os.environ.pop("CALIBRE_LIBRARY", None) if old is None else os.environ.__setitem__("CALIBRE_LIBRARY", old)
 
 
+def test_plan_keeps_loss_accounting_per_book():
+    """The SAFETY counters are per-book so a scoped write can be judged on its own books
+    (see restrict()). The aggregate properties keep the old names and the old meaning."""
+    lib = tempfile.mkdtemp()
+    build(os.path.join(lib, "metadata.db"),
+          [dict(id=1, added="2026-01-01", tags=["Complete"]),
+           dict(id=2, added="2026-01-02", tags=["Complete", "Keeper"])],
+          custom=[("fandoms", {1: "Ghost", 2: "Real Fandom"})]).close()
+    old = os.environ.get("CALIBRE_LIBRARY"); os.environ["CALIBRE_LIBRARY"] = lib
+    try:
+        cfg = load_config(path="/nonexistent/config.toml")
+        p = wrangle.plan(cfg, maps(fan={"Ghost": ""}, junk_exact={"complete"}))
+        assert p.lost == {1: (True, False)}          # only book 1 loses its last fandom
+        assert p.tagn == {1: (1, 0), 2: (2, 1)}      # every book carries its tag counts
+        assert (p.lostF, p.lostC) == (1, 0)          # aggregates unchanged in name and meaning
+        assert (p.tagsB, p.tagsA) == (3, 1)
+    finally:
+        os.environ.pop("CALIBRE_LIBRARY", None) if old is None else os.environ.__setitem__("CALIBRE_LIBRARY", old)
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

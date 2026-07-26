@@ -287,13 +287,14 @@ class Plan:
         self.diffs = collections.defaultdict(dict)     # {book: {label: (gone, added)}} — what previews show
         self.before = {k: set() for k in self.cols}; self.after = {k: set() for k in self.cols}
         self.decisions = []                            # transform's own (kind, where, before, after) log
-        self.lostF = self.lostC = self.tagsB = self.tagsA = 0
+        self.lost = {}       # book -> (lost_fandom, lost_char), only for books with a loss
+        self.tagn = {}       # book -> (tags_before, tags_after) — per-book so restrict() can re-derive
         for b in allb:
             d = {k: self.perbook[b].get(k, []) for k in self.cols}
             for k in self.cols: self.before[k].update(d.get(k, []))
             nd, lf, lc = transform(d, self.m, self.beh, self.known_chars, self.tagcanon, log=self.decisions)
-            self.lostF += lf; self.lostC += lc
-            self.tagsB += len(d.get("tags", [])); self.tagsA += len(nd.get("tags", []))
+            if lf or lc: self.lost[b] = (lf, lc)
+            self.tagn[b] = (len(d.get("tags", [])), len(nd.get("tags", [])))
             booknorms = None
             for k, lab in self.cols.items():
                 if k in nd: self.after[k].update(nd[k])
@@ -310,6 +311,20 @@ class Plan:
     def n_books(self) -> int:
         """Distinct books that would change (the wizard auto-skips a clean library on 0)."""
         return len({b for ch in self.changes.values() for b in ch})
+
+    # The SAFETY aggregates the guards and reports read. Derived, not accumulated, so narrowing
+    # the plan (restrict) narrows these too instead of judging a scoped write on library totals.
+    @property
+    def lostF(self) -> int: return sum(1 for lf, _ in self.lost.values() if lf)
+
+    @property
+    def lostC(self) -> int: return sum(1 for _, lc in self.lost.values() if lc)
+
+    @property
+    def tagsB(self) -> int: return sum(b for b, _ in self.tagn.values())
+
+    @property
+    def tagsA(self) -> int: return sum(a for _, a in self.tagn.values())
 
     def preview(self, detail: bool = True, write: bool = False) -> None:
         """Per-column changed counts (+ the mass/unique detail with detail=True) + the SAFETY line."""
