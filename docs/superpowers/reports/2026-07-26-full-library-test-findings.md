@@ -14,7 +14,7 @@ Run alongside the `--books` feature this test motivated (see
 
 ## Findings
 
-### 1 — `apply --apply` is not a single-pass fixed point · **fixed (partly)**
+### 1 — `apply --apply` is not a single-pass fixed point · **FIXED** (all three causes)
 
 Running `apply --apply` twice showed the second pass still wanting changes, on a tool whose
 own maintenance loop documents that step as *"idempotent"*.
@@ -51,14 +51,22 @@ Avatar, Completed" — three of the most legitimate-sounding names out of 25, wh
 a list that is overwhelmingly junk. Reading the full impact set before advising, rather than a
 sample of it, would have avoided that.
 
-**(c) fold-then-route chains still take two passes.** A tag folded to `Y` whose *own* trope
-entry routes to `#fandoms`/`#characters` is not re-resolved in the same pass —
-`resolve_trope_chains` flattens variant chains at load but does not propagate the terminal's
-*route*. Observed on book 9922: `House Targaryen (A Song of Ice and Fire)` → tag
-`House Targaryen` (pass 1) → `#fandoms` (pass 2). **NOT fixed** — same class of decision as (b).
+**(c) chains took the terminal's NAME but kept the START's route.** `resolve_trope_chains`
+flattens variant chains at load without propagating the terminal's *route*, so the same final
+value landed in a different column depending on which spelling you started from — and only
+reached the right one on a second pass. Observed on book 9922:
+`House Targaryen (A Song of Ice and Fire)` → tag `House Targaryen` (pass 1) → `#fandoms`
+(pass 2). **FIXED** (`0597bdc`): the terminal's own rule decides when it has one, otherwise the
+start's route stands.
 
-**Measured convergence: 2 passes, consistently — and after (a) and (b) were both fixed, `apply` reached a true single-pass fixed point on the settled library.** It always converged; it was
-never a loop.
+2,160 rules change route under this fix, but **zero books** — verified by simulating the patched
+resolver against the live library before committing (`4 books; 31022 → 31018` both with and
+without). It is purely preventive: it stops the two-pass shape recurring for tags added later.
+
+**Outcome:** with (a), (b) and (c) fixed, `apply` is a single-pass fixed point, and the whole
+documented maintenance loop (`apply` → `staleness` → `backfill`) writes nothing on two
+consecutive laps. It always converged even before the fixes; it was never a loop — unlike
+finding 9, which was.
 
 ### 2 — the redundancy-strip and cross-column routes were invisible to `audit` · **fixed**
 
