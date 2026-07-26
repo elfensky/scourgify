@@ -84,26 +84,32 @@ Informational only — it never affected what was written — but it lied about 
 **FIXED** (`26ffceb`), regression test
 `test_absent_note_counts_the_library_not_the_status_column`.
 
-### 4 — `classify_failures.csv` is never cleared · **open**
+### 4 — `classify_failures.csv` is never cleared · **FIXED** (`0597bdc`)
 
 Gemini blocked 7 of 50 books as `PROHIBITED_CONTENT`. Re-running the same 50 through openai —
 **the exact recovery CLAUDE.md recommends** — classified all 7 successfully, but the failures
 CSV still lists them. A `--fresh` run does not reset it and a success does not clear the book's
 row, so the log only ever grows and cannot be used to see what is still outstanding.
 
-### 5 — Gemini's block rate is 14× the documented figure · **observation, not a bug**
+`merge_failures()` is now applied on every run: books this run answered for are re-stated only if
+they failed again, books outside the run's scope carry through untouched. Verified live — seeding
+the log with 2 blocked books plus 1 out-of-scope entry, then recovering the 2 on openai, left
+exactly the out-of-scope row.
+
+### 5 — Gemini's block rate is 14× the documented figure · **docs corrected** (`0597bdc`)
 
 CLAUDE.md says Gemini hard-blocks *"~1% of extreme content"*. On this sample it was **7/50 =
 14%**. Deterministic and correctly logged; openai recovered every one. Worth correcting the
 figure in the docs — a user planning a full-library run should expect to route roughly one book
 in seven to a second engine, not one in a hundred.
 
-### 6 — `promote --backfill --apply` gives a misleading error · **open, minor**
+### 6 — `promote --backfill --apply` gives a misleading error · **FIXED** (`0597bdc`)
 
 `--backfill` writes with `--yes`, not `--apply`. Passing `--apply` routes into the
 promote-review branch and fails with *"no review to apply (promote_review.csv not found — run
 promote first)"* — after `promote --apply` has just archived that very file. The dry-run's own
-hint says `--yes`, so the fix is to make `--backfill --apply` either work or say so.
+hint says `--yes`. `--backfill --apply` now means "fold the verdicts in, then backfill": a
+missing review is reported and the backfill still runs, since it reads the ledger, not the review.
 
 ### 7 — `--books` on `audit` is rejected, on `classify --apply` is rejected · **fixed pre-run**
 
@@ -113,10 +119,29 @@ Both were caught by the final whole-branch review before this run and fixed. Als
 Verified live: every `--books` error path now exits with a clean one-line message and no
 traceback.
 
-### 8 — cosmetic: classify's `scope:` line collides with the live dashboard border · **open**
+### 8 — classify's `scope:` line collides with the live dashboard border · **not a bug; hardened**
 
-`╰────────╯  scope: 50 book(s) by id -> 50 books` — the scope print lands on the dashboard
-panel's closing line.
+Re-checked under a real TTY: the order is correct there. The overlap was block-buffering in the
+*test harness* — plain `print()` buffers when stdout is a pipe while the rich Live writes straight
+through. The product was fine. The three prints ahead of the dashboard now pass `flush=True` so
+piped and CI output keeps its order too (`0597bdc`).
+
+### 9 — `backfill` and `wrangle` fight forever · **FIXED** (`0597bdc`) · found on re-test
+
+The most serious defect of the whole exercise, and it only appeared once the earlier fixes let the
+library reach a fixed point. `backfill` proposed tags the book **already carried in a structured
+column**; `wrangle` stripped them as redundant (backfill-before-strip); `backfill` then saw them
+missing and added them back. Reproduced live on 4 books — `Alternate Universe`, `Fantasy`,
+`Crossover`, `Dimension Travel`, each already in that book's `#genres`:
+
+```
+wrangle apply  -> set tags: 4 books        (strips them)
+promote --backfill -> #9915 + Dimension Travel, #9908 + Crossover, …   (adds them straight back)
+```
+
+The documented maintenance loop therefore never settled. `backfill_drop_redundant()` filters
+proposed adds against the same norm()-based home set wrangle strips against. Verified: the full
+loop (`apply` → `staleness` → `backfill`) now writes nothing on two consecutive laps.
 
 ---
 
