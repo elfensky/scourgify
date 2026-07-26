@@ -26,13 +26,30 @@ Three distinct causes, found by instrumenting `transform` by hand:
 state, one pass later. **3,862 real mappings have this shape.** — **FIXED** (`65dc0f3`),
 regression test `test_trope_fold_target_that_is_junk_is_dropped_in_one_pass`.
 
-**(b) `route == "drop"` has no branch in the route chain.** The value falls through to
-`else: nT.add(canon)` and is re-added as a tag. **All 77 such rules have never once fired** —
-they are dead configuration, not a two-pass delay. **NOT fixed, deliberately:** honoring them
-would delete `ANBU`, `Avatar`, `Completed`, `Abusive Dursley Family (Harry Potter)` and others
-from 92 books. That is a decision about your curated `tropes.csv`, not a bug to slip into a fix
-commit. `test_trope_route_drop_is_currently_inert` pins the present behavior so it stays
-deliberate rather than accidental. **This one needs your call.**
+**(b) `route == "drop"` had no branch in the route chain.** The value fell through to
+`else: nT.add(canon)` and was re-added as a tag, so every such rule silently did nothing.
+**FIXED** (`3699028`) after establishing intent, which took three independent checks:
+
+- `read_tropes` **allowlists** `drop` as one of five valid routes ([wrangle.py:30](../../../src/scourgify/wrangle.py#L30)); anything
+  unrecognized is normalized to `tag` right there, so `drop` surviving that filter was deliberate.
+- All 43 rules live in the user's own `overrides/tropes.csv`; the shipped defaults have **zero**.
+- **No code path writes them** — `promote --apply` has zero overlap with them across all five
+  archived review files, and `synth_reject` emits route `tag`. They are hand-written.
+- Their content is what one hand-writes to delete something: *"The Company Fucks Everyone"*
+  (23×), *"Cunning; resourceful and ambitious"* (11×), `Rewrite`, `Translation`, `Completed`,
+  *"Smug As Fuck"*, *"Humor If You Squint"*.
+
+Applied: **91 assignments across 89 books**, every one the unambiguous `X;X;drop` shape (the
+ambiguous `rename + drop` rows in the file match no book). Verified afterwards: the named tags
+are gone, 7,949 books intact. A `variant,canonical,drop` row drops the variant rather than
+renaming it — the route beats its own canonical, pinned by
+`test_trope_route_drop_beats_its_own_rename_target`, since renaming instead would resurrect the
+value under a different name.
+
+*Process note:* the first draft of this report warned that enabling these would delete "ANBU,
+Avatar, Completed" — three of the most legitimate-sounding names out of 25, which misrepresented
+a list that is overwhelmingly junk. Reading the full impact set before advising, rather than a
+sample of it, would have avoided that.
 
 **(c) fold-then-route chains still take two passes.** A tag folded to `Y` whose *own* trope
 entry routes to `#fandoms`/`#characters` is not re-resolved in the same pass —
@@ -40,7 +57,7 @@ entry routes to `#fandoms`/`#characters` is not re-resolved in the same pass —
 *route*. Observed on book 9922: `House Targaryen (A Song of Ice and Fire)` → tag
 `House Targaryen` (pass 1) → `#fandoms` (pass 2). **NOT fixed** — same class of decision as (b).
 
-**Measured convergence after the fix: 2 passes, consistently.** It always converged; it was
+**Measured convergence: 2 passes, consistently — and after (a) and (b) were both fixed, `apply` reached a true single-pass fixed point on the settled library.** It always converged; it was
 never a loop.
 
 ### 2 — the redundancy-strip and cross-column routes were invisible to `audit` · **fixed**
