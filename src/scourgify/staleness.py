@@ -39,6 +39,9 @@ def compute(stale_years: float = 2.0, dead_years: float = 5.0,
         try: return (today - datetime.date.fromisoformat(str(updated.get(b))[:10])).days / 365.25
         except Exception: return None
     want = None if books is None else set(books)
+    if want is not None:
+        absent = [b for b in want if b not in status]
+        if absent: print(f"  note: {len(absent)} requested id(s) not in the library")
     rows = []
     for b, s in status.items():
         if want is not None and b not in want: continue
@@ -66,11 +69,11 @@ def main() -> None:
     p.add_argument("--apply", action="store_true", help="write #status (Calibre closed)")
     p.add_argument("--stale-years", type=float, default=2)
     p.add_argument("--dead-years", type=float, default=5)
-    p.add_argument("--books", default="", metavar="SPEC",
+    p.add_argument("--books", default=None, metavar="SPEC",
                    help="only these books: '1,2,3', '10-20', '@ids.txt' (one id per line), or a combination")
     a = p.parse_args()
 
-    books = select.parse_books(a.books) if a.books else None
+    books = select.parse_books(a.books) if a.books is not None else None
     label, rows = compute(a.stale_years, a.dead_years, books)
     print(f"staleness audit  (today={datetime.date.today()}, stale>={a.stale_years}y, dead>={a.dead_years}y"
           + (f", scoped to {len(books)} book(s)" if books is not None else "") + ")")

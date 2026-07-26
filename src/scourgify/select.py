@@ -63,7 +63,10 @@ def parse_books(spec: str) -> list[int]:
         else:
             try: out.append(int(t))
             except ValueError: raise SystemExit(f"--books: {t!r} is not a book id")
-    return list(dict.fromkeys(out))          # de-dup, first-seen order
+    out = list(dict.fromkeys(out))          # de-dup, first-seen order
+    if not out:
+        raise SystemExit(f"--books: {spec!r} names no book ids")
+    return out
 
 
 def changed_pure(added: dict, updated: dict, stamped: dict) -> dict:
