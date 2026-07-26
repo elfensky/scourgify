@@ -522,11 +522,14 @@ def main() -> None:
                    help="setup: interactive health check + configure | audit: read-only dry-run | apply: write changes | (none): wizard")
     p.add_argument("--apply", action="store_true", help="with `apply`: actually write (Calibre closed)")
     p.add_argument("--step", action="store_true", help="with `apply`: review each book's unique changes 1-by-1 (interactive)")
-    p.add_argument("--books", default="", metavar="SPEC",
+    p.add_argument("--books", default=None, metavar="SPEC",
                    help="with `apply`: only these books — '1,2,3', '10-20', '@ids.txt' (audit is always library-wide)")
     p.add_argument("--force", action="store_true", help="override the tag mass-deletion guardrail")
     p.add_argument("--yes", "-y", action="store_true", help="non-interactive: take the recommended default for every prompt")
     a = p.parse_args()
+    if a.books is not None and a.command != "apply":
+        raise SystemExit("--books applies to `apply` only (audit is always library-wide: its report "
+                         "reads the transform's decision log, which carries no book ids).")
     if a.command is None:
         from scourgify.common import interactive
         if interactive():
@@ -546,11 +549,13 @@ def main() -> None:
     elif a.command == "apply":
         do_write = a.apply or a.step
         p = plan(cfg, maps)                        # ONE compute: preview, guards, step, and write all read it
-        if a.books:
+        if a.books is not None:
             from scourgify import select
             want = select.parse_books(a.books)
             p.restrict(want)                       # narrows the WRITE set; the read stays library-wide
             print(f"  scope: {len(want)} book(s) by id -> {p.n_books} with changes")
+            absent = sum(1 for b in want if b not in p.tagn)
+            if absent: print(f"  note: {absent} requested id(s) not in the library")
         p.preview(write=do_write)
         p.guard(a.force)
         if a.step: p.step()

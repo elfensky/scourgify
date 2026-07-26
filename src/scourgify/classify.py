@@ -237,7 +237,7 @@ def gather(a: argparse.Namespace) -> tuple:
     Text extraction (EPUB zip / ebook-convert) lives in booktext.py."""
     con = ro_connect(); c = con.cursor()
     missing = 0
-    if a.books:                                   # explicit ids win over every other scope flag
+    if a.books is not None:                       # explicit ids win over every other scope flag
         want = select.parse_books(a.books)
         ids = select.pick(con, "ids", ids=want)
         missing, scope = len(want) - len(ids), f"{len(want)} book(s) by id"
@@ -246,7 +246,7 @@ def gather(a: argparse.Namespace) -> tuple:
     elif a.last:      ids, scope = select.pick(con, "last", n=a.last), f"last {a.last} added"
     elif a.since:     ids, scope = select.pick(con, "since", since=a.since), f"added/updated since {a.since}"
     else:             ids, scope = select.pick(con, "sparse", min_tags=a.min_tags), f"fewer than {a.min_tags} tags"
-    explicit = set(ids) if (a.books or a.all or a.incremental or a.last or a.since) else set()
+    explicit = set(ids) if (a.books is not None or a.all or a.incremental or a.last or a.since) else set()
     def needs(b): return b in explicit
     desc = {b: t for b, t in c.execute("SELECT book, text FROM comments")}
     # when the description is thin, sample the book's own text instead of dropping the book
@@ -401,7 +401,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--engine", default="apple", choices=sorted(ENGINES), help="apple = on-device, free (default)")
     p.add_argument("--apply", action="store_true", help="apply 'added_tags' from the proposal + stamp #wrangled (Calibre closed)")
     p.add_argument("--step", action="store_true", help="with --apply: review each book's tags 1-by-1 (interactive; untick to reject)")
-    p.add_argument("--books", default="", metavar="SPEC",
+    p.add_argument("--books", default=None, metavar="SPEC",
                    help="only these books: '1,2,3', '10-20', '@ids.txt' (one id per line), or a combination")
     p.add_argument("--incremental", action="store_true", help="only new/changed books (never classified, #updated newer than their #wrangled marker, or re-fetched)")
     p.add_argument("--all", action="store_true", help="the WHOLE library — every book, regardless of tag count (a full cloud pass costs real money)")
@@ -460,6 +460,9 @@ def bakeoff_cli(a: argparse.Namespace) -> None:
 
 def main() -> None:
     a = normalize(build_parser().parse_args())
+    if a.books is not None and a.apply:
+        raise SystemExit("--books scopes which books are CLASSIFIED, not which proposal rows are applied. "
+                         "Run `classify --books ...` first, then `classify --apply` to write the reviewed proposal.")
     if a.bakeoff: bakeoff_cli(a)
     elif a.apply: apply_proposal_step() if a.step else apply_proposal()
     else: classify_run(a)
