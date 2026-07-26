@@ -102,7 +102,9 @@ def test_parse_books_at_file():
 def test_parse_books_rejects_garbage():
     nested = os.path.join(tempfile.mkdtemp(), "loop.txt")
     open(nested, "w").write("@%s\n" % nested)
-    for bad in ("x", "1,2x", "9-3", "1-", "@/nonexistent/ids.txt", f"@{nested}"):
+    binary = os.path.join(tempfile.mkdtemp(), "cover.jpg")
+    open(binary, "wb").write(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00")
+    for bad in ("x", "1,2x", "9-3", "1-", "@/nonexistent/ids.txt", f"@{nested}", f"@{binary}"):
         try:
             select.parse_books(bad)
             assert False, f"expected SystemExit for {bad!r}"
