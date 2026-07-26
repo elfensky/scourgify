@@ -231,17 +231,22 @@ def apply_proposal_step() -> None:
 # ---- gather books (read-only) ----
 def gather(a: argparse.Namespace) -> tuple:
     """-> (targets [(book, text)], titles, needs). Scope comes from the flags, first match wins:
-    --incremental / --last N / --since DATE select ONLY matching books (newest-added-first);
+    --books SPEC / --incremental / --last N / --since DATE select ONLY matching books (newest-added-first);
     bare classify keeps the sparse mode (fewer than --min-tags tags). `needs(b)` is True for
     explicitly scoped books — the resume logic uses it to re-process them even if already proposed.
     Text extraction (EPUB zip / ebook-convert) lives in booktext.py."""
     con = ro_connect(); c = con.cursor()
-    if a.all:         ids, scope = select.pick(con, "all"), "whole library"
+    missing = 0
+    if a.books:                                   # explicit ids win over every other scope flag
+        want = select.parse_books(a.books)
+        ids = select.pick(con, "ids", ids=want)
+        missing, scope = len(want) - len(ids), f"{len(want)} book(s) by id"
+    elif a.all:       ids, scope = select.pick(con, "all"), "whole library"
     elif a.incremental: ids, scope = select.pick(con, "incremental"), "new/changed since last classify"
     elif a.last:      ids, scope = select.pick(con, "last", n=a.last), f"last {a.last} added"
     elif a.since:     ids, scope = select.pick(con, "since", since=a.since), f"added/updated since {a.since}"
     else:             ids, scope = select.pick(con, "sparse", min_tags=a.min_tags), f"fewer than {a.min_tags} tags"
-    explicit = set(ids) if (a.all or a.incremental or a.last or a.since) else set()
+    explicit = set(ids) if (a.books or a.all or a.incremental or a.last or a.since) else set()
     def needs(b): return b in explicit
     desc = {b: t for b, t in c.execute("SELECT book, text FROM comments")}
     # when the description is thin, sample the book's own text instead of dropping the book
@@ -254,6 +259,7 @@ def gather(a: argparse.Namespace) -> tuple:
     targets = [(b, text_for(b)) for b in ids]
     kept = [(b, t) for b, t in targets if t and len(t) >= 40]
     print(f"  scope: {scope} -> {len(ids)} books")
+    if missing: print(f"  note: {missing} requested id(s) not in the library")
     if len(kept) < len(targets):                  # no silent drops: thin descriptions are reported, not vanished
         print(f"  note: {len(targets) - len(kept)} dropped (description under 40 chars"
               + (")" if a.text_fallback else "; --text-fallback samples the book text instead)"))
@@ -395,6 +401,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--engine", default="apple", choices=sorted(ENGINES), help="apple = on-device, free (default)")
     p.add_argument("--apply", action="store_true", help="apply 'added_tags' from the proposal + stamp #wrangled (Calibre closed)")
     p.add_argument("--step", action="store_true", help="with --apply: review each book's tags 1-by-1 (interactive; untick to reject)")
+    p.add_argument("--books", default="", metavar="SPEC",
+                   help="only these books: '1,2,3', '10-20', '@ids.txt' (one id per line), or a combination")
     p.add_argument("--incremental", action="store_true", help="only new/changed books (never classified, #updated newer than their #wrangled marker, or re-fetched)")
     p.add_argument("--all", action="store_true", help="the WHOLE library — every book, regardless of tag count (a full cloud pass costs real money)")
     p.add_argument("--last", type=int, default=0, metavar="N", help="(re)process the N most recently added books")

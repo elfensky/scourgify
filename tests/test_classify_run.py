@@ -159,6 +159,27 @@ def test_apply_proposal_skips_rows_for_deleted_books():
         assert not any("99" in str(o.get("values", {})) or 99 in (o.get("books") or []) for o in ops)
 
 
+def test_books_scope_selects_exactly_those_books():
+    """--books names books directly — no stamp state, no tag-count heuristic. Ids not in the
+    library are dropped (and counted), never fatal."""
+    books = [{"id": i, "added": f"2026-01-0{i} 10:00:00", "desc": DESC, "tags": ["t", "u"]}
+             for i in (1, 2, 3)]
+    with harness(books):
+        p = classify.plan(classify.default_opts(books="3,1,99"))
+        assert {b for b, _ in p.targets} == {1, 3}            # book 2 untouched, 99 dropped
+        assert [b for b, _ in p.targets] == [3, 1]            # newest-added-first
+
+
+def test_books_scope_counts_as_explicit_so_resume_reprocesses():
+    """A --books book already sitting in the proposal is re-processed, like every other explicit
+    scope — the user asked for it by id."""
+    books = [{"id": 1, "added": "2026-01-01 10:00:00", "desc": DESC}]
+    with harness(books):
+        artifacts.write_proposal([{"book_id": 1, "title": "b1", "added_tags": ["X"], "proposed_new": []}])
+        p = classify.plan(classify.default_opts(books="1"))
+        assert [b for b, _ in p.todo] == [1] and not p.done
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
