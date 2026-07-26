@@ -40,7 +40,11 @@ def compute(stale_years: float = 2.0, dead_years: float = 5.0,
         except Exception: return None
     want = None if books is None else set(books)
     if want is not None:
-        absent = [b for b in want if b not in status]
+        # membership is the BOOKS table, not the #status column: a book with no status set is
+        # still in the library (about a fifth of a real FanFicFare library), and counting it as
+        # absent turned an informational note into a lie about the user's own ids.
+        known = {r[0] for r in con.execute("SELECT id FROM books")}
+        absent = [b for b in want if b not in known]
         if absent: print(f"  note: {len(absent)} requested id(s) not in the library")
     rows = []
     for b, s in status.items():
