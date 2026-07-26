@@ -122,8 +122,23 @@ def append_ledger(tag: str, verdict: str, target: str, path: str | None = None) 
         w.writerow([tag, verdict, target])
 
 
+def merge_failures(prev: list, processed, failures: list) -> list:
+    """prev (FAIL_COLS dict rows) + the books this run PROCESSED + this run's failures
+    -> the new FAIL_COLS-ordered rows. Pure — see tests.
+
+    The log means "failed and has not since succeeded". A book this run touched is re-stated
+    only if it failed again, so recovering blocked books on another engine (the documented
+    fix for Gemini's PROHIBITED_CONTENT) actually clears them. Books outside this run's scope
+    are carried through untouched — the log is library-wide, the run is not."""
+    done = {int(b) for b in processed}
+    keep = [[r.get("book_id", ""), r.get("title", ""), r.get("reason", "")]
+            for r in prev if str(r.get("book_id", "")).isdigit() and int(r["book_id"]) not in done]
+    return list(failures) + keep
+
+
 def write_failures(rows: list, path: str | None = None) -> None:
-    """rows: FAIL_COLS-ordered lists — the books an engine errored on."""
+    """rows: FAIL_COLS-ordered lists — the books an engine errored on. Always rewrites the file
+    (an empty `rows` clears it), so a clean run does not leave a stale log behind."""
     path = path or fail()
     with open(path, "w", newline="") as f:
         w = csv.writer(f); w.writerow(FAIL_COLS); w.writerows(rows)

@@ -45,6 +45,28 @@ def test_review_round_trip_and_archive():
     assert os.path.basename(arch).startswith("review_applied_") and arch.endswith(".csv")
 
 
+def test_merge_failures_drops_books_that_have_since_succeeded():
+    """The failure log means "failed and not since recovered". Gemini blocked 7 books; re-running
+    them through openai succeeded — the documented recovery — but the log still listed all 7,
+    because it was only ever written when a run HAD failures and then overwrote wholesale."""
+    prev = [{"book_id": "1", "title": "A", "reason": "blocked:PROHIBITED_CONTENT"},
+            {"book_id": "2", "title": "B", "reason": "blocked:PROHIBITED_CONTENT"},
+            {"book_id": "3", "title": "C", "reason": "timeout"}]
+    # this run processed 1 and 2; only 1 failed again. 3 was not in scope and must survive.
+    out = artifacts.merge_failures(prev, {1, 2}, [[1, "A", "timeout"]])
+    assert out == [[1, "A", "timeout"], ["3", "C", "timeout"]]
+
+
+def test_merge_failures_clean_run_clears_the_whole_log():
+    prev = [{"book_id": "1", "title": "A", "reason": "blocked:PROHIBITED_CONTENT"}]
+    assert artifacts.merge_failures(prev, {1}, []) == []
+
+
+def test_merge_failures_keeps_untouched_books_when_nothing_ran():
+    prev = [{"book_id": "1", "title": "A", "reason": "boom"}]
+    assert artifacts.merge_failures(prev, set(), []) == [["1", "A", "boom"]]
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

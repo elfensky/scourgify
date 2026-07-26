@@ -290,6 +290,30 @@ def test_decide_transport_failure_is_not_a_reject():
     assert d["tag"] == "Slow Burn" and not d["target"]
 
 
+def test_backfill_skips_tags_already_in_a_structured_column():
+    """backfill and wrangle used to fight: backfill added a tag the book already carried in
+    #genres, wrangle stripped it as redundant (backfill-before-strip), backfill re-added it —
+    forever. Observed live on 4 books. backfill must not propose what wrangle will strip."""
+    from scourgify.promote import backfill_drop_redundant
+    homes = {1: {"alternate universe", "fantasy"}, 2: set()}
+    adds = {1: {"Alternate Universe", "Time Loop"}, 2: {"Fantasy"}}
+    kept = backfill_drop_redundant(adds, homes)
+    assert kept == {1: {"Time Loop"}, 2: {"Fantasy"}}     # book 1 loses only the redundant one
+
+
+def test_backfill_drop_redundant_removes_a_book_left_with_nothing():
+    from scourgify.promote import backfill_drop_redundant
+    assert backfill_drop_redundant({1: {"Fantasy"}}, {1: {"fantasy"}}) == {}
+
+
+def test_backfill_drop_redundant_is_case_and_punctuation_insensitive():
+    """The strip wrangle performs is norm()-based, so the guard has to match on norm too or the
+    loop comes straight back for 'Sci-Fi' vs 'sci fi'."""
+    from scourgify.promote import backfill_drop_redundant
+    from scourgify.common import norm
+    assert backfill_drop_redundant({1: {"Sci-Fi"}}, {1: {norm("sci fi")}}) == {}
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

@@ -41,7 +41,12 @@ def resolve_trope_chains(raw: dict) -> dict:
             if nxt == cur or nxt not in raw: term = nxt; break
             if nxt in seen: term = min(seen | {cur, nxt}); break
             seen.add(cur); cur = nxt
-        res[start] = (term, raw[start][1])
+        # The TERMINAL's own rule decides the route when it has one: the chain ends at `term`, so
+        # where `term` belongs is `term`'s business. Keeping the start's route meant the same
+        # final value landed in different columns depending on which spelling you started from,
+        # and only reached the right one on a second pass.
+        own = raw.get(term) or raw.get(norm(term))
+        res[start] = (term, own[1] if own else raw[start][1])
     return res
 
 def load_maps(cfg: dict, defaults_dir: str | None = None, overrides_dir: str | None = None) -> dict:

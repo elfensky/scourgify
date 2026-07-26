@@ -40,6 +40,23 @@ def test_resolve_trope_chains():
     r = resolve_trope_chains({"A": ("B", "tag"), "B": ("A", "genre")})
     assert r["A"][0] == "A" and r["B"][0] == "A"                       # cycle breaks deterministically (min)
 
+
+def test_resolve_trope_chains_takes_the_terminals_route():
+    """A chain took the terminal's NAME but kept the START's route, so the same final value
+    landed in different columns depending on which spelling you started from — and needed a
+    second pass to get where it belonged. Observed live: 'House Targaryen (A Song of Ice and
+    Fire)' folded to tag 'House Targaryen' on pass 1, then moved to #fandoms on pass 2."""
+    r = resolve_trope_chains({"htaso": ("House Targaryen", "tag"),
+                              "house targaryen": ("House Targaryen", "fandom")})
+    assert r["htaso"] == ("House Targaryen", "fandom")                 # terminal's route wins
+    assert r["house targaryen"] == ("House Targaryen", "fandom")
+
+
+def test_resolve_trope_chains_keeps_its_own_route_when_the_terminal_has_no_rule():
+    """Only a terminal that has its OWN rule can override; otherwise the start's route stands."""
+    r = resolve_trope_chains({"a": ("Nowhere", "drop")})
+    assert r["a"] == ("Nowhere", "drop")
+
 def test_transform_fandom_alias():
     nd, lf, lc = transform({"fandoms": ["HP"]}, maps(fan={"HP": "Harry Potter"}), BEH)
     assert nd["fandoms"] == ["Harry Potter"] and not lf and not lc
