@@ -126,6 +126,7 @@ scourgify audit                  # detailed read-only report of every cleanup pa
 scourgify apply --apply          # wrangle from the CLI (add --step for 1-by-1)
 scourgify staleness --apply      # refresh #status
 scourgify classify --incremental # AI-tag only new/changed books
+scourgify classify --books 1,2,3 # AI-tag exactly these books (also: apply --books, staleness --books)
 scourgify classify --apply       # write the reviewed proposal (add --step for 1-by-1)
 scourgify promote                # adjudicate new-tag candidates
 scourgify promote --backfill     # tag the books that inspired promoted tags

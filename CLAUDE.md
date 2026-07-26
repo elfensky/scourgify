@@ -58,7 +58,11 @@ runs render a live dashboard (`report.Dashboard`: progress, tagged/failed/rate, 
 sparkline, rising candidates).
 
 **`select.py`** — the one owner of "which books does this run operate on"; classify's scope flags and
-the wizard header both go through it, so they can never disagree. A book is new/changed iff unstamped
+the wizard header both go through it, so they can never disagree.
+`parse_books()` owns the `--books` spec grammar (`1,2,3`, `10-20`, `@ids.txt`, or any
+comma-combination; `@file` expands one level deep) and the `ids` pick mode selects exactly those
+books — the one way `classify`, `wrangle apply` and `staleness` are pointed at a named set.
+A book is new/changed iff unstamped
 ∨ `#updated` > stamp ∨ added-date (`books.timestamp`) > stamp — the added-date clock catches re-fetches
 (FanFicFare bumps it) while staying immune to scourgify's own writes (`last_modified` is deliberately
 NOT used). All pickers return newest-added-first.
@@ -145,6 +149,11 @@ book's structured column (**backfill-before-strip**). Pass `log=` and transform 
 **decisions** (kind, where, before, after) — the audit's examples read this log, never a re-derivation
 of the rules. **`wrangle.plan(cfg, maps) → Plan`** runs the full-library transform ONCE; `preview()` /
 `guard()` / `step()` / `write()` all read that one plan (the CLI and the wizard drive the same object).
+`Plan.restrict(ids)` narrows the WRITE set (`changes`/`diffs` and the per-book SAFETY counters)
+*after* the full compute — `read_library` stays library-wide because `transform()` needs global
+context (tagcanon majority spelling, `known_chars`), so scoping the read would change the answer
+for the selected books. `apply --books` uses it; `audit` is deliberately library-wide (its report
+reads transform's decision log, whose tuples carry no book id).
 
 **The FFF→Calibre column model** (see README "FanFicFare → Calibre columns"): `category`→`#fandoms`,
 `characters`→`#characters`, `ships`→`#relationships`, `genre`→`#genres`, `status`→`#status`, real

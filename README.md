@@ -227,7 +227,8 @@ scourgify promote --apply --backfill   # 6. grow the vocab from new-tag candidat
 Or just `scourgify` — the wizard runs exactly this loop, guided. Need a specific redo instead?
 `scourgify classify --last 30` (the 30 most recently added) or `--since 2026-06-01` (added or
 site-updated since a date). Re-running wrangle is always safe — it's idempotent and won't regress
-curated genres (it uses the full `genres_allow.txt`).
+curated genres (it uses the full `genres_allow.txt`). *`--books 1,2,3` or `--books @ids.txt` when you
+know exactly which books you mean; `apply --books` and `staleness --books` take the same spec.*
 
 ---
 
@@ -254,7 +255,9 @@ scourgify classify --apply --step                   # review each book's tags 1-
 - **Scope — which books a run touches** (`select.py` owns this; newest-added-first, so `--batch`/`--limit`
   caps hit the new books first): `--all` = the whole library, every book regardless of tag count (a full
   paid pass — the wizard's classify stage offers this as an explicit "whole library" scope choice);
-  `--incremental` = only new/changed books; `--last N` = the N most recently
+  `--books SPEC` = exactly these books by id (`1,2,3`, `10-20`, `@ids.txt` one per line, or a
+  comma-combination — it wins over every other scope flag); `--incremental` = only new/changed
+  books; `--last N` = the N most recently
   added; `--since DATE` = added or site-updated on/after DATE; no scope flag = books with `< --min-tags`
   (default 2) tags. Books whose description is too thin (<40 chars) are reported, not silently dropped —
   `--text-fallback` samples the book's own prose for them. Always dry-run until `--apply`.
