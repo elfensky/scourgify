@@ -664,10 +664,7 @@ In `main()`, add after the `--dead-years` argument:
                    help="only these books: '1,2,3', '10-20', '@ids.txt' (one id per line), or a combination")
 ```
 
-and change the compute call plus the header print:
-
-```python
-Replace these two existing lines in `main()`:
+Then replace these two existing lines in `main()`:
 
 ```python
     label, rows = compute(a.stale_years, a.dead_years)
