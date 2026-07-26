@@ -9,6 +9,7 @@ Rule: <STALE yrs -> In-Progress | STALE..DEAD -> Hiatus | >=DEAD -> Abandoned. T
 Completed/Dropped/Rewritten and books without an #updated date are NEVER changed."""
 import argparse, datetime, collections
 from scourgify.common import load_config, ro_connect, read_custom_column, run_writer, op_set_field
+from scourgify import select
 
 ACTIVITY = {"In-Progress", "Hiatus", "Abandoned"}      # re-derived from activity
 # everything else (Completed, Dropped, Rewritten, blank) is left untouched
@@ -21,8 +22,11 @@ def derive(current: str, age_years: float | None, stale_years: float, dead_years
     return "In-Progress" if age_years < stale_years else "Hiatus" if age_years < dead_years else "Abandoned"
 
 
-def compute(stale_years: float = 2.0, dead_years: float = 5.0) -> tuple[str, list]:
-    """-> (status_label, [(book, old, new, age_years), ...]) for books whose status would change."""
+def compute(stale_years: float = 2.0, dead_years: float = 5.0,
+            books=None) -> tuple[str, list]:
+    """-> (status_label, [(book, old, new, age_years), ...]) for books whose status would change.
+    books: an iterable of ids to restrict to, or None for the whole library. Each book's status
+    depends only on its own #updated age, so a plain filter is the whole of the scoping."""
     con = ro_connect()
     status_label = load_config()["columns"].get("status") or "#status"
     status = read_custom_column(con, status_label)
@@ -34,8 +38,10 @@ def compute(stale_years: float = 2.0, dead_years: float = 5.0) -> tuple[str, lis
     def age(b):
         try: return (today - datetime.date.fromisoformat(str(updated.get(b))[:10])).days / 365.25
         except Exception: return None
+    want = None if books is None else set(books)
     rows = []
     for b, s in status.items():
+        if want is not None and b not in want: continue
         n = derive(s, age(b), stale_years, dead_years)
         if n != s: rows.append((b, s, n, age(b)))
     return status_label, rows
@@ -60,10 +66,14 @@ def main() -> None:
     p.add_argument("--apply", action="store_true", help="write #status (Calibre closed)")
     p.add_argument("--stale-years", type=float, default=2)
     p.add_argument("--dead-years", type=float, default=5)
+    p.add_argument("--books", default="", metavar="SPEC",
+                   help="only these books: '1,2,3', '10-20', '@ids.txt' (one id per line), or a combination")
     a = p.parse_args()
 
-    label, rows = compute(a.stale_years, a.dead_years)
-    print(f"staleness audit  (today={datetime.date.today()}, stale>={a.stale_years}y, dead>={a.dead_years}y)")
+    books = select.parse_books(a.books) if a.books else None
+    label, rows = compute(a.stale_years, a.dead_years, books)
+    print(f"staleness audit  (today={datetime.date.today()}, stale>={a.stale_years}y, dead>={a.dead_years}y"
+          + (f", scoped to {len(books)} book(s)" if books is not None else "") + ")")
     show(label, rows)
 
     if a.apply:
