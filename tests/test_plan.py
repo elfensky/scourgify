@@ -37,6 +37,44 @@ def test_transform_decision_log_kinds():
     assert ("drop", "tags", "Complete", "") in dec
 
 
+def test_trope_route_drop_is_currently_inert():
+    """Characterization, not endorsement. The route chain has no `drop` branch, so a trope routed
+    'drop' falls through to the tag fold and the tag survives. 77 real rules have this shape and
+    have never once fired. Honoring them would delete tags like ANBU/Avatar/Completed from a real
+    library, so it is a data decision for the library's owner — not a bug fix to slip in. This
+    test exists so the current behavior is deliberate and visible rather than accidental."""
+    m = maps(trope={"anbu": ("ANBU", "drop")})                      # keys are norm()'d
+    nd, _, _ = wrangle.transform({"tags": ["ANBU"]}, m, BEH)
+    assert nd["tags"] == ["ANBU"]
+
+
+def test_trope_fold_target_that_is_junk_is_dropped_in_one_pass():
+    """junk was only ever tested against the SOURCE tag, never the fold target, so a mapping
+    X -> Y with Y in junk.txt took two passes to settle. 3,862 real mappings had this shape."""
+    log = []
+    m = maps(trope={"wip": ("Work In Progress", "tag")}, junk_exact={"work in progress"})
+    nd, _, _ = wrangle.transform({"tags": ["WIP"]}, m, BEH, log=log)
+    assert nd["tags"] == []
+    assert ("drop", "tags", "WIP", "") in set(log)
+
+
+def test_redundancy_strip_and_cross_column_routes_are_explained():
+    """Every value transform removes must appear in the decision log — the audit's examples are
+    read from that log, so a silent strip is a change the user is never shown. A tag identical
+    to a value already in a structured column vanished with no decision at all."""
+    log = []
+    m = maps(trope={"house targaryen": ("House Targaryen", "fandom")})
+    d = {"fandoms": ["A Song of Ice and Fire"], "characters": ["Jon Snow"],
+         "tags": ["House Targaryen", "Jon Snow", "A Song of Ice and Fire"]}
+    wrangle.transform(d, m, BEH, known_chars={"jon snow"}, log=log)
+    dec = set(log)
+    assert ("move", "tags → fandoms", "House Targaryen", "") in dec     # routed across columns
+    assert ("move", "tags → characters", "Jon Snow", "") in dec         # known-character rescue
+    assert ("strip", "tags", "A Song of Ice and Fire", "") in dec       # redundant with #fandoms
+    # a strip is not a junk drop — the audit reports them under separate headings
+    assert ("drop", "tags", "A Song of Ice and Fire", "") not in dec
+
+
 def test_transform_without_log_is_unchanged():
     nd, lf, lc = wrangle.transform({"fandoms": ["HP"]}, maps(fan={"HP": "Harry Potter"}), BEH)
     assert nd["fandoms"] == ["Harry Potter"] and not lf and not lc

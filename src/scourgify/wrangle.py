@@ -198,17 +198,24 @@ def transform(d: dict, m: dict, beh: dict, known_chars: frozenset | set = frozen
         tv = _lookup(m["trope"], t)
         if tv:
             canon, route = tv; route = trope_route(canon, route, beh)
+            # A fold target that junk.txt deletes settles HERE. It used to fall through to the tag
+            # fold below, so the canon value was re-added and only junk.txt removed it on the NEXT
+            # run — the same end state, one pass later, which is why `apply --apply` was not a
+            # fixed point. ponytail: route == "drop" is NOT honored here on purpose — see
+            # trope_route; those rules have never fired and enabling them is a data decision.
+            if is_junk(canon, m): note(("drop", "tags", t, "")); continue
             if canon != t: note(("fold", "tags", t, canon))
             if route == "genre": (nG if genre_allowed(norm(canon), m) else nT).add(canon)   # genre only if allowlisted, else tag (keeps #genres idempotent)
-            elif route == "fandom": nF.add(m["fan"].get(canon, canon))
-            elif route == "character": nC.add(canon)
+            elif route == "fandom": nF.add(m["fan"].get(canon, canon)); note(("move", "tags → fandoms", t, ""))
+            elif route == "character": nC.add(canon); note(("move", "tags → characters", t, ""))
             elif beh.get("tropes_as") == "genre" and norm(canon) not in m["rating"]: (nG if genre_allowed(norm(canon), m) else nT).add(canon)
             else: nT.add(canon)                       # tag fold
             continue
         if norm(t) in known_chars: nC.add(t); note(("move", "tags → characters", t, "")); continue  # a known character -> #characters
         if not beh.get("keep_categories", True) and norm(t) in {"multi", "gen", "f m", "m m", "f f", "other"}: continue
         tt = ascii_fold(t) if beh["ascii_only_tags"] else t
-        if norm(tt) in homes: continue                # redundant: already in a structured column -> strip
+        if norm(tt) in homes:                         # redundant: already in a structured column
+            note(("strip", "tags", t, "")); continue  # noted, not silent: the audit reads this log
         nT.add(tt)
     if tagcanon: nT = {tagcanon.get(norm(t), t) for t in nT}      # generic normalize-merge to canonical spelling
     newd = {"fandoms": sorted(nF), "characters": sorted(nC), "genres": sorted(nG),
@@ -420,8 +427,10 @@ class Plan:
         show("genres → tags (not in allowlist)", [b for k, w, b, a in d if (k, w) == ("move", "genres → tags")])
         show("decompose", [f"{b} → {a}" for k, w, b, a in d if k == "decompose"])
         show("tags drop", [b for k, w, b, a in d if (k, w) == ("drop", "tags")])
+        show("tags strip (already in a structured column)", [b for k, w, b, a in d if (k, w) == ("strip", "tags")])
         show("tags fold/route", [f"{b}→{a}" for k, w, b, a in d if (k, w) == ("fold", "tags")])
         show("tags → characters", [b for k, w, b, a in d if (k, w) == ("move", "tags → characters")])
+        show("tags → fandoms", [b for k, w, b, a in d if (k, w) == ("move", "tags → fandoms")])
 
 
 def plan(cfg: dict, m: dict) -> Plan:
