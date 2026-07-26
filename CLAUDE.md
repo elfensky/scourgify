@@ -226,7 +226,10 @@ review-map CSVs (in `data/`). Curated cross-library knowledge (e.g. franchise un
 - **`tropes.csv` is parsed leniently** (`read_tropes` + `resolve_trope_chains` in `wrangle.py`):
   delimiter-sniffed (`,` or `;`), positional columns, unknown route → `tag` (so freeform notes don't crash),
   and variant→canonical chains/cycles are resolved to a terminal at load. Hand-editing it is expected.
-- **Gemini hard-blocks ~1% of extreme content** as `PROHIBITED_CONTENT` (non-configurable; `safetySettings`
+- **Gemini hard-blocks a material share of mature content** as `PROHIBITED_CONTENT` — measured at
+  **7 of 50 books (14%)** on a random sample of the source library (2026-07-26), not the ~1% this
+  file used to claim. Budget for routing roughly one book in seven to a second engine on a full
+  run. (Non-configurable; `safetySettings`
   only relaxes the 4 HARM categories). It's deterministic — recover those books with `--engine openai` or
   `--engine apple`. `classify.py` logs failures to `classify_failures.csv`.
 - **No `tomllib`** under `calibre-debug`'s Python — `common.py` ships a minimal TOML reader (quote-aware so

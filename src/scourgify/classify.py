@@ -258,7 +258,9 @@ def gather(a: argparse.Namespace) -> tuple:
         return (d + " " + et).strip() if et else d
     targets = [(b, text_for(b)) for b in ids]
     kept = [(b, t) for b, t in targets if t and len(t) >= 40]
-    print(f"  scope: {scope} -> {len(ids)} books")
+    # flush: the live dashboard writes straight through, so an unflushed plain print lands
+    # AFTER it when stdout is a pipe (scripting/CI) rather than a terminal
+    print(f"  scope: {scope} -> {len(ids)} books", flush=True)
     if missing: print(f"  note: {missing} requested id(s) not in the library")
     if len(kept) < len(targets):                  # no silent drops: thin descriptions are reported, not vanished
         print(f"  note: {len(targets) - len(kept)} dropped (description under 40 chars"
@@ -295,8 +297,8 @@ class Plan:
         """Execute the plan. `ask`: prompt -> (text, err) — tests inject a callable (the same
         seam promote.run has); default builds the configured engine and goes through ask_retry."""
         a, titles, proposal = self.opts, self.titles, self.proposal
-        print(f"engine={a.engine}  candidate books: {len(self.targets)}")
-        if self.done: print(f"  resuming: {len(self.done)} already in proposal (pass --fresh to restart)")
+        print(f"engine={a.engine}  candidate books: {len(self.targets)}", flush=True)
+        if self.done: print(f"  resuming: {len(self.done)} already in proposal (pass --fresh to restart)", flush=True)
         def dump():
             write_proposal([{"book_id": b, "title": titles.get(b, ""), "added_tags": vt, "proposed_new": nt}
                             for b, (vt, nt) in proposal.items()])
@@ -311,7 +313,7 @@ class Plan:
 
         failures = []
         workers = engine_workers(a.engine, a.workers)   # non-parallel engines (apple) cap at 1
-        print(f"  {len(self.todo)} to do this run, {workers} concurrent")
+        print(f"  {len(self.todo)} to do this run, {workers} concurrent", flush=True)
         ex = ThreadPoolExecutor(max_workers=workers)
         interrupted = False
         try:
@@ -335,9 +337,16 @@ class Plan:
         dump()
         if interrupted:
             print(f"\n  interrupted — {len(proposal)} results saved to the proposal; re-run to resume where you left off.")
+        # Rewrite the log every run, not just when this one failed: a book recovered on another
+        # engine has to LEAVE the list, or it reads as still-broken forever. Books outside this
+        # run's scope are carried through — the log is library-wide, the run is not.
+        from scourgify.artifacts import merge_failures, read_rows, write_failures
+        # only books this run actually got an answer for — on Ctrl+C the queued ones were never
+        # attempted, and clearing their old failure row would hide a real, still-unfixed failure
+        processed = {b for b, _ in self.todo} & (set(proposal) | {b for b, _ in failures})
+        prev = read_rows(fail()) if os.path.exists(fail()) else []
+        write_failures(merge_failures(prev, processed, [[b, titles.get(b, ""), e] for b, e in failures]))
         if failures:
-            from scourgify.artifacts import write_failures
-            write_failures([[b, titles.get(b, ""), e] for b, e in failures])
             bytype = collections.Counter(e.split(":")[0].split(" ")[0] for _, e in failures)
             print(f"failures: {len(failures)} -> {os.path.basename(fail())}  by type: {dict(bytype)}")
             print("  (recover blocked books with a no-policy engine: scourgify classify --engine apple)")

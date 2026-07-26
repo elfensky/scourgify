@@ -113,7 +113,10 @@ scourgify rollback            # restore the newest one (also reversible)
 ```
 
 - **"Calibre is running — close it first"** — that's the safety lock. Close Calibre, retry.
-- **A book failed classification ("blocked")** — Gemini refuses ~1% of mature content.
+- **A book failed classification ("blocked")** — Gemini refuses a material share of mature
+  content: 7 of 50 books (14%) on a random sample of a real fanfiction library, so expect to
+  route roughly one book in seven to another engine. Recovered books drop off
+  `classify_failures.csv` automatically once a re-run succeeds.
   Re-run with another engine: `scourgify classify --engine openai` (or `apple`).
 - **A whole apply refused** — the guards also stop anything that would mass-empty a column.
   Your data and your proposal are left untouched; nothing partial is written.

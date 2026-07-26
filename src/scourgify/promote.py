@@ -197,6 +197,31 @@ def backfill_wanted(resolution: dict, proposal_rows: list) -> dict:
     return dict(want)
 
 
+def backfill_drop_redundant(adds: dict, homes: dict) -> dict:
+    """{book: set(tags)} minus the tags that already live in that book's structured columns.
+    Pure — see tests. wrangle strips a tag whose concept is already in #fandoms/#characters/
+    #genres/#relationships/#status (backfill-before-strip), so proposing one here starts a
+    ping-pong: backfill adds it, wrangle strips it, backfill sees it missing and adds it again.
+    Matching is norm()-based because wrangle's strip is."""
+    out = {}
+    for b, tags in adds.items():
+        keep = {t for t in tags if norm(t) not in homes.get(b, set())}
+        if keep: out[b] = keep
+    return out
+
+
+def _homes(con) -> dict:
+    """{book: set(norm'd values living in its structured columns)} — the same set wrangle's
+    redundancy-strip tests against."""
+    from scourgify.common import read_custom_column, load_config
+    cols = [v for k, v in load_config()["columns"].items() if v and v != "tags"]
+    homes = collections.defaultdict(set)
+    for lab in cols:
+        for b, vs in (read_custom_column(con, lab, multi=True) or {}).items():
+            homes[b].update(norm(v) for v in vs)
+    return homes
+
+
 def _proposal_files():
     """Every file carrying the book↔proposed_new record: archived applied proposals + the current one."""
     fs = applied_proposals()                       # the archive-naming convention lives with archive()
@@ -211,11 +236,15 @@ def backfill_plan(ledger_path: str | None = None) -> tuple[dict, dict]:
     rows = [r for pf in _proposal_files() for r in read_rows(pf)]
     want = backfill_wanted(res, rows)
     if not want: return {}, {}
-    cur = current_tags(ro_connect())
-    chg, adds = {}, {}
+    con = ro_connect()
+    cur = current_tags(con)
+    adds = {}
     for b, w in want.items():
         new = w - cur.get(b, set())
-        if new: chg[b] = sorted(cur.get(b, set()) | w); adds[b] = new
+        if new: adds[b] = new
+    # never propose a tag wrangle will strip as redundant — that is an endless add/strip loop
+    adds = backfill_drop_redundant(adds, _homes(con))
+    chg = {b: sorted(cur.get(b, set()) | new) for b, new in adds.items()}
     return chg, adds
 
 
@@ -310,9 +339,16 @@ def default_opts(**overrides) -> argparse.Namespace:
 
 def main() -> None:
     a = normalize(build_parser().parse_args())
-    if a.apply:
+    if a.apply and a.backfill:
+        # --backfill --apply means "fold the verdicts in, then backfill". A missing review is
+        # not an error here: `promote --apply` archives promote_review.csv, so the natural
+        # follow-up run has none left and the backfill (which reads the ledger, not the review)
+        # must still happen. It used to abort on the review and never reach the backfill.
+        try: apply_decisions()
+        except SystemExit as e: print(f"{e}\n  (continuing to --backfill, which reads the ledger)")
+        backfill(yes=a.yes or a.apply)
+    elif a.apply:
         apply_decisions()
-        if a.backfill: backfill(yes=a.yes)
     elif a.backfill:
         backfill(yes=a.yes)
     else:
