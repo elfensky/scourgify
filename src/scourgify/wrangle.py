@@ -326,6 +326,23 @@ class Plan:
     @property
     def tagsA(self) -> int: return sum(a for _, a in self.tagn.values())
 
+    def restrict(self, ids) -> "Plan":
+        """Narrow this plan to `ids` and return self. The full-library compute STAYS — transform
+        needs global context (tagcanon majority spelling, known_chars), so scoping the read would
+        silently change the answer for the selected books. Only the write set narrows: changes,
+        diffs, and the per-book SAFETY counters, so preview/guard/step/write all see the scope and
+        the guards judge these books rather than the library. before/after/decisions are left whole
+        — they feed the library-wide audit report, which is not scopeable (see main())."""
+        keep = set(ids)
+        for lab in list(self.changes):
+            kept = {b: v for b, v in self.changes[lab].items() if b in keep}
+            if kept: self.changes[lab] = kept
+            else: del self.changes[lab]
+        self.diffs = collections.defaultdict(dict, {b: d for b, d in self.diffs.items() if b in keep})
+        self.lost = {b: v for b, v in self.lost.items() if b in keep}
+        self.tagn = {b: v for b, v in self.tagn.items() if b in keep}
+        return self
+
     def preview(self, detail: bool = True, write: bool = False) -> None:
         """Per-column changed counts (+ the mass/unique detail with detail=True) + the SAFETY line."""
         print("APPLY" if write else "PRE-APPLY (no write)")
@@ -505,6 +522,8 @@ def main() -> None:
                    help="setup: interactive health check + configure | audit: read-only dry-run | apply: write changes | (none): wizard")
     p.add_argument("--apply", action="store_true", help="with `apply`: actually write (Calibre closed)")
     p.add_argument("--step", action="store_true", help="with `apply`: review each book's unique changes 1-by-1 (interactive)")
+    p.add_argument("--books", default="", metavar="SPEC",
+                   help="with `apply`: only these books — '1,2,3', '10-20', '@ids.txt' (audit is always library-wide)")
     p.add_argument("--force", action="store_true", help="override the tag mass-deletion guardrail")
     p.add_argument("--yes", "-y", action="store_true", help="non-interactive: take the recommended default for every prompt")
     a = p.parse_args()
@@ -527,6 +546,11 @@ def main() -> None:
     elif a.command == "apply":
         do_write = a.apply or a.step
         p = plan(cfg, maps)                        # ONE compute: preview, guards, step, and write all read it
+        if a.books:
+            from scourgify import select
+            want = select.parse_books(a.books)
+            p.restrict(want)                       # narrows the WRITE set; the read stays library-wide
+            print(f"  scope: {len(want)} book(s) by id -> {p.n_books} with changes")
         p.preview(write=do_write)
         p.guard(a.force)
         if a.step: p.step()

@@ -80,6 +80,53 @@ def test_plan_keeps_loss_accounting_per_book():
         os.environ.pop("CALIBRE_LIBRARY", None) if old is None else os.environ.__setitem__("CALIBRE_LIBRARY", old)
 
 
+def test_restrict_narrows_the_write_set_and_the_guards():
+    """restrict() narrows what gets WRITTEN, not what gets READ — transform still sees the whole
+    library (tagcanon, known_chars). The guards then judge the scoped books: book 1's data loss
+    must not abort a write that only touches book 2."""
+    lib = tempfile.mkdtemp()
+    build(os.path.join(lib, "metadata.db"),
+          [dict(id=1, added="2026-01-01", tags=["Complete"]),
+           dict(id=2, added="2026-01-02", tags=["Complete", "Keeper"])],
+          custom=[("fandoms", {1: "Ghost", 2: "Real Fandom"})]).close()
+    old = os.environ.get("CALIBRE_LIBRARY"); os.environ["CALIBRE_LIBRARY"] = lib
+    try:
+        cfg = load_config(path="/nonexistent/config.toml")
+        m = maps(fan={"Ghost": ""}, junk_exact={"complete"})
+
+        full = wrangle.plan(cfg, m)
+        assert full.n_books == 2 and full.lostF == 1
+        try:
+            full.guard(); assert False, "expected the data-loss guard to abort the full plan"
+        except SystemExit:
+            pass
+
+        scoped = wrangle.plan(cfg, m).restrict([2])
+        assert scoped.n_books == 1                       # only book 2 is in the write set
+        assert set(scoped.diffs) == {2}
+        assert 1 not in scoped.changes["tags"]
+        assert (scoped.lostF, scoped.lostC) == (0, 0)    # book 1's loss is out of scope
+        assert (scoped.tagsB, scoped.tagsA) == (2, 1)
+        scoped.guard()                                   # no abort — this is the regression
+        assert scoped.tagcanon == full.tagcanon          # global context survived the narrowing
+    finally:
+        os.environ.pop("CALIBRE_LIBRARY", None) if old is None else os.environ.__setitem__("CALIBRE_LIBRARY", old)
+
+
+def test_restrict_to_nothing_is_a_clean_no_op():
+    lib = tempfile.mkdtemp()
+    build(os.path.join(lib, "metadata.db"),
+          [dict(id=1, added="2026-01-01", tags=["Complete"])]).close()
+    old = os.environ.get("CALIBRE_LIBRARY"); os.environ["CALIBRE_LIBRARY"] = lib
+    try:
+        cfg = load_config(path="/nonexistent/config.toml")
+        p = wrangle.plan(cfg, maps(junk_exact={"complete"})).restrict([999])
+        assert p.n_books == 0 and not p.diffs and (p.tagsB, p.tagsA) == (0, 0)
+        p.guard()
+    finally:
+        os.environ.pop("CALIBRE_LIBRARY", None) if old is None else os.environ.__setitem__("CALIBRE_LIBRARY", old)
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
