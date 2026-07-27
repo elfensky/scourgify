@@ -101,9 +101,16 @@ Verification: `uv run tests/test_core.py` (plain asserts, pytest-compatible, no 
 pure core — `transform`, trope-chain resolution, `parse_resp`, the TOML reader — and
 `uv run tests/test_selection.py` pins the selection semantics against a throwaway sqlite `metadata.db` built
 by `tests/fixture_db.py` (covers both custom-column storage shapes). CI runs every `tests/test_*.py`
-by glob — a new test file is in CI by existing. `uv run tests/drive_wizard.py` (NOT in CI; ~15s) drives
-the real interactive wizard in a PTY against a fixture library — the pre-release check for the TTY-only
-flow, including the skip-all-leaves-the-proposal-intact pin. `scourgify audit` remains the
+by glob — a new test file is in CI by existing. `uv run tests/test_wizard_flow.py` drives the real
+wizard stages in-process with canned answers (`common.scripted_answers`) against a fixture library —
+the interaction flows (no-write paths, classify scope-skip spending nothing, a skip-all step review
+leaving the proposal byte-identical) are pinned in CI in milliseconds. The same seam drives the wizard
+from a shell: `SCOURGIFY_SCRIPT="w,s,n,q" scourgify` answers each prompt in order — a **test hook, not
+a user feature** (no `--help` entry). A script that runs short or names a key that isn't on offer
+raises `common.ScriptError`, which is deliberately NOT a `SystemExit`: `wizard._stage_guard` absorbs
+those, and swallowing a scripting failure would hand back a green run that asserted nothing.
+`uv run tests/drive_wizard.py` (NOT in CI; a few seconds) stays the pre-release check that a real PTY
+works at all — header, landing menu, clean quit. `scourgify audit` remains the
 against-your-library check: full new state, before/after counts, and SAFETY lines asserting **no book loses its
 last fandom or character** (`apply` aborts if any book would end with an empty `#fandoms`/`#characters` it started
 with — a bad `fandoms.csv` alias→"" or an empty `decompose` payload; a blocklisted non-fandom relocated to tags is

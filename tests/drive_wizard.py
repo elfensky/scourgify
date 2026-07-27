@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""Manual PTY smoke test for the interactive wizard — drives the REAL `scourgify` TTY surface
-(menus, prompts, checklist) inside a pseudo-terminal against a throwaway fixture library, so the
-interaction FLOW is checked by a script instead of a human. Deliberately NOT named test_* — it
-shells out to `uv run` and takes ~15s, so the CI glob skips it; run it locally before a release:
+"""Manual PTY smoke test — proves the wizard starts under a REAL terminal. Deliberately NOT named
+test_* — it shells out to `uv run`, so the CI glob skips it; run it locally before a release:
 
     uv run tests/drive_wizard.py
 
-What it drives: landing menu → every task's no-write path (wrangle skip, staleness, classify
-scope-skip, review 1-by-1 with every book SKIPPED, promote/backfill/overrides empty paths) → quit.
-What it pins: the menu loop survives a full lap; scope-skip touches no engine; and the data-loss
-guarantee — a step review that only skips leaves the proposal file byte-identical (the bug class
-fixed in ff74991/05d1dbe). Rendering aesthetics stay a human's job; this checks behavior."""
+Scope is deliberately one lap: process starts, header renders, landing menu appears, `q` quits
+cleanly. That covers what an in-process test cannot — rich's Prompt against a real tty, terminal
+detection, the checklist's live redraw. The interaction FLOWS moved to tests/test_wizard_flow.py,
+which drives the same stages with canned answers in milliseconds instead of regex-matching a
+transcript for 15 seconds. Rendering aesthetics stay a human's job."""
 import os, pty, re, select, subprocess, sys, tempfile, time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -20,30 +18,14 @@ from fixture_db import build
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|[\r\x07]")
 
-# Task keys sent each time the landing menu re-appears (one lap over the toolset, then quit).
-MENU_KEYS = ["1", "2", "3", "4", "5", "6", "7", "q"]
-
-# prompt pattern (matched against NEW transcript text only) -> canned answer.
-RULES = [
-    (r"choose \[n/a/s\]", "s\n"),                       # classify scope -> skip (no engine, no cost)
-    (r"choose \[a/r/s\]", "s\n"),                       # wrangle apply menu -> skip
-    (r"choose \[a/r/k/d\]", "r\n"),                     # review menu -> 1-by-1 step review
-    (r"⏎ apply ticked", "s\n"),                         # checklist -> SKIP every book (nothing decided)
-    (r"natural next step.*\(y\)", "n\n"),               # standalone-task follow-up -> back to the menu
-    (r"re-derive .*\(True\)", "n\n"),                   # staleness confirm (empty fixture: shouldn't appear)
-    (r"remaining steps\?", "n\n"),                      # workflow guard (shouldn't appear)
-]
+# One lap: the landing menu appears, we quit. Flow coverage lives in tests/test_wizard_flow.py.
+MENU_KEYS = ["q"]
+RULES = []                                   # no mid-flow prompts to answer on a bare quit
 
 CHECKS = [
     (r"Fixture Book|2 books", "header shows the fixture library"),
-    (r"what would you like to do\?", "landing menu appeared"),
-    (r"\(skipped — nothing tagged\)", "classify scope-skip honored"),
-    (r"consistent ✓|re-derive", "staleness stage ran"),
-    (r"⏎ apply ticked", "1-by-1 checklist rendered"),
-    (r"nothing decided — proposal left untouched", "skip-all leaves the proposal alone"),
-    (r"no new-tag candidates yet|candidates to adjudicate|previously-adjudicated", "promote stage ran"),
-    (r"backfill applies vocab-promoted tags|done ✓", "backfill stage ran"),
-    (r"no rejected changes logged|no rejects logged yet|auto-suppressible", "overrides stage ran"),
+    (r"what would you like to do\?", "landing menu appeared under a real pty"),
+    (r"pick up where you left off", "quit exits through the clean-exit path"),
 ]
 
 
@@ -62,7 +44,6 @@ def main() -> int:
         prop_path = os.path.join(home, "data", "classify_proposal.csv")
         open(prop_path, "w").write("book_id,title,added_tags,proposed_new\n"
                                    "1,Fixture Book A,Time Loop,\n2,Fixture Book B,Fix-It,\n")
-        prop_before = open(prop_path).read()
 
         env = {**os.environ, "SCOURGIFY_HOME": home, "CALIBRE_LIBRARY": lib,
                "TERM": "xterm-256color", "COLUMNS": "100", "LINES": "40"}
@@ -104,9 +85,6 @@ def main() -> int:
         for rx, what in CHECKS:
             hit = bool(re.search(rx, clean)); ok &= hit
             print(f"  {'PASS' if hit else 'FAIL'}  {what}")
-        intact = open(prop_path).read() == prop_before
-        ok &= intact
-        print(f"  {'PASS' if intact else 'FAIL'}  proposal byte-identical after skip-all review (data-loss pin)")
         print("=" * 72)
         if not ok:
             print("--- clean transcript tail ---"); print(clean[-3000:])
