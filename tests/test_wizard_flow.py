@@ -183,10 +183,14 @@ def test_a_full_menu_lap_runs_every_task_without_writing():
 def test_a_short_script_raises_instead_of_exiting_zero():
     """The single most important test in this file. Unscripted, running out of input raises
     EOFError, which wizard.run() catches and turns into a clean exit 0 — a test written that way
-    stops halfway and reports success. A short script must be LOUD."""
+    stops halfway and reports success. This drives wizard.run() itself (not the inner _run()),
+    because run() is exactly the wrapper holding that except (KeyboardInterrupt, EOFError) clause —
+    testing _run() would keep passing even if run()'s handler were carelessly widened to
+    `except Exception`, which would silently swallow ScriptError and exit 0 again. A short script
+    must be LOUD, and ScriptError must actually reach the caller through run()."""
     with wizard_lib(), common.scripted_answers([]), transcript():
         try:
-            wizard._run()
+            wizard.run()
             assert False, "a script with no answers must raise, not exit cleanly"
         except common.ScriptError as e:
             assert "no answer left" in str(e)

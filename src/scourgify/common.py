@@ -91,11 +91,22 @@ class ScriptError(Exception):
     make loud, and hand back a green test that asserted nothing."""
 
 
+def _parse_script(raw: str) -> list:
+    """Parse a raw SCOURGIFY_SCRIPT value into a canned-answer queue. A blank or whitespace-only
+    value (e.g. an interpolated-but-unset shell var, `SCOURGIFY_SCRIPT="$KEYS"`) means "scripted,
+    with no answers" -> [] , so the very first prompt raises instead of silently walking every
+    prompt's default (which for the wizard's landing menu is "full maintenance run" and for its
+    apply prompts is "yes"). A non-blank value still splits on ',' exactly as before — a blank
+    ENTRY within it (e.g. the trailing "" in "4,") is a real scripted answer meaning "press enter,
+    take the default", not this empty-queue case."""
+    return [a.strip() for a in raw.split(",")] if raw.strip() else []
+
+
 # Canned answers for a scripted run: `SCOURGIFY_SCRIPT=w,s,n,q scourgify` for ad-hoc shell use,
 # or common.scripted_answers([...]) in tests. Read ONCE at import — tests use the context manager,
 # so this only constrains shell use, where the variable is set before launch anyway.
 # ponytail: split on ',', so a checklist multi-toggle in an env-var script uses spaces ("1 3").
-_script = ([a.strip() for a in os.environ["SCOURGIFY_SCRIPT"].split(",")]
+_script = (_parse_script(os.environ["SCOURGIFY_SCRIPT"])
            if "SCOURGIFY_SCRIPT" in os.environ else None)
 
 

@@ -106,9 +106,14 @@ wizard stages in-process with canned answers (`common.scripted_answers`) against
 the interaction flows (no-write paths, classify scope-skip spending nothing, a skip-all step review
 leaving the proposal byte-identical) are pinned in CI in milliseconds. The same seam drives the wizard
 from a shell: `SCOURGIFY_SCRIPT="w,s,n,q" scourgify` answers each prompt in order — a **test hook, not
-a user feature** (no `--help` entry). A script that runs short or names a key that isn't on offer
-raises `common.ScriptError`, which is deliberately NOT a `SystemExit`: `wizard._stage_guard` absorbs
-those, and swallowing a scripting failure would hand back a green run that asserted nothing.
+a user feature** (no `--help` entry). A blank answer (an empty entry, e.g. the trailing one in
+`"4,"`) means "press enter" and takes the prompt's default — and the wizard's defaults are apply /
+full maintenance run, so a blank is a real "yes" here, not a no-op. An empty or whitespace-only
+`SCOURGIFY_SCRIPT` (e.g. an interpolated-but-unset var) is instead parsed as an empty queue, so the
+very first prompt raises rather than silently walking those defaults. A script that runs short or
+names a key that isn't on offer raises `common.ScriptError`, which is deliberately NOT a
+`SystemExit`: `wizard._stage_guard` absorbs those, and swallowing a scripting failure would hand
+back a green run that asserted nothing.
 `uv run tests/drive_wizard.py` (NOT in CI; a few seconds) stays the pre-release check that a real PTY
 works at all — header, landing menu, clean quit. `scourgify audit` remains the
 against-your-library check: full new state, before/after counts, and SAFETY lines asserting **no book loses its

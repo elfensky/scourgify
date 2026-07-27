@@ -13,6 +13,54 @@ def test_unscripted_by_default():
     assert common.scripted() is False
 
 
+# ---- _parse_script: how a raw SCOURGIFY_SCRIPT value becomes the answer queue ----
+# `_script` itself is read once at import (real shell use sets the var before launch, so a live
+# re-import isn't how this is exercised) — these pin the pure parse helper the initializer calls,
+# which is what's actually testable and is the whole of the parsing logic.
+
+def test_parse_script_blank_or_whitespace_yields_empty_queue():
+    """An empty or whitespace-only value (e.g. SCOURGIFY_SCRIPT="$KEYS" with $KEYS unset) must
+    parse to [] — 'this run is scripted, and it has no answers' — not [''] (a one-element queue
+    holding a blank 'press enter' answer, which would silently walk every prompt's default: apply,
+    full maintenance run). Naive ''.split(',') gives [''], which is the bug this pins against."""
+    assert common._parse_script("") == []
+    assert common._parse_script("   ") == []
+    assert common._parse_script("\t") == []
+
+
+def test_parse_script_nonblank_parses_as_before_trailing_blank_kept():
+    """A non-empty value still splits on ',' and strips each entry; a genuine trailing blank
+    (e.g. "4,") is kept as a real answer meaning 'press enter, take the default' — that's intended,
+    interactive-equivalent behaviour, not the empty-queue case above. Do not strip it."""
+    assert common._parse_script("w,s,n,q") == ["w", "s", "n", "q"]
+    assert common._parse_script("4,") == ["4", ""]
+    assert common._parse_script(" a , b ") == ["a", "b"]
+
+
+def test_blank_script_is_scripted_with_empty_queue_raising_on_first_prompt():
+    """The reviewer's hazard, end to end: a blank/whitespace-only SCOURGIFY_SCRIPT must still mark
+    the run as scripted (scripted() True — CI/NONINTERACTIVE must not veto it either) but must
+    raise at the very FIRST prompt rather than silently walking the wizard's apply/full-run
+    defaults. scripted_answers() with the parsed (empty) queue is the equivalent of the module
+    initializer having parsed SCOURGIFY_SCRIPT="" at import."""
+    with common.scripted_answers(common._parse_script("")):
+        assert common.scripted() is True
+        try:
+            common.script_next("first prompt")
+            assert False, "a blank SCOURGIFY_SCRIPT must raise at the very first prompt"
+        except common.ScriptError:
+            pass
+
+
+def test_absent_script_env_var_is_not_scripted():
+    """No SCOURGIFY_SCRIPT at all must give None (not scripted), distinct from the blank-but-present
+    case above ([] , scripted). The initializer only calls _parse_script when the key IS present, so
+    'absent' never reaches the parser — this pins that the two cases stay distinguishable via
+    scripted(), which the whole design (script_next / interactive) keys off."""
+    assert "SCOURGIFY_SCRIPT" not in os.environ
+    assert common.scripted() is False
+
+
 def test_scripted_answers_pops_in_order_then_restores():
     with common.scripted_answers(["a", "b"]):
         assert common.scripted() is True
