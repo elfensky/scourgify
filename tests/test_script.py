@@ -70,6 +70,95 @@ def test_script_bool_rejects_garbage():
             assert "maybe" in str(e) and "apply?" in str(e)
 
 
+# ---- the prompt functions (ui.py) ----
+# ui hard-imports rich (a declared dependency), so this is importable in any install.
+from scourgify import ui
+
+
+@contextlib.contextmanager
+def transcript():
+    """Capture what the prompts render. rich resolves sys.stdout at write time, so redirecting
+    it catches ui.console without reaching into rich's internals."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        yield buf
+
+
+OPTS = [("a", "apply", "write it"), ("r", "review", "1-by-1"), ("s", "skip", "nothing")]
+
+
+def test_menu_returns_the_scripted_key_and_echoes_it():
+    with common.scripted_answers(["r"]), transcript() as buf:
+        assert ui.menu("proposal", OPTS) == "r"
+    out = buf.getvalue()
+    assert "apply" in out and "review" in out      # still rendered in full — scripting is not silencing
+    assert "r" in out.split("choose")[-1]          # and the answer is echoed, so the log reads like a session
+
+
+def test_menu_blank_answer_takes_the_default():
+    with common.scripted_answers([""]), transcript():
+        assert ui.menu("proposal", OPTS, default="s") == "s"
+    with common.scripted_answers([""]), transcript():
+        assert ui.menu("proposal", OPTS) == "a"    # no default given -> the first key, as when unscripted
+
+
+def test_menu_rejects_a_key_that_is_not_on_offer():
+    """A typo must NOT walk a stray path. Unscripted, rich re-asks and eats the next answer,
+    shifting everything after it by one — the silent-drift failure this seam removes."""
+    with common.scripted_answers(["z"]), transcript():
+        try:
+            ui.menu("proposal", OPTS)
+            assert False, "a key that isn't on offer must raise"
+        except common.ScriptError as e:
+            assert "z" in str(e) and "proposal" in str(e)
+
+
+def test_menu_accepts_an_also_key():
+    with common.scripted_answers(["q"]), transcript():
+        assert ui.menu("proposal", OPTS, also=("q",)) == "q"   # unrendered aliases still validate
+
+
+def test_confirm_routes_through_the_shared_parser():
+    with common.scripted_answers(["y", "n", ""]), transcript():
+        assert ui.confirm("apply?") is True
+        assert ui.confirm("apply?", default=True) is False
+        assert ui.confirm("apply?", default=True) is True
+
+
+def test_common_confirm_is_scriptable_too():
+    """promote.backfill() and rollback prompt through common.confirm, not ui.confirm.
+    Unscripted off a TTY it returns the default; scripted it must obey the queue."""
+    with common.scripted_answers(["y"]):
+        assert common.confirm("restore?", default=False) is True
+
+
+def test_checklist_skip_rejects_everything():
+    with common.scripted_answers(["s"]), transcript():
+        acc, rej, action = ui.checklist("#1 Book", ["Time Loop", "Fix-It"])
+    assert action == "skip" and acc == [] and rej == [0, 1]
+
+
+def test_checklist_toggles_then_applies():
+    """Two pops: one to untick item 2, one blank to apply what's left ticked."""
+    with common.scripted_answers(["2", ""]), transcript():
+        acc, rej, action = ui.checklist("#1 Book", ["Time Loop", "Fix-It", "Angst"])
+    assert action == "apply" and acc == [0, 2] and rej == [1]
+
+
+def test_checklist_empty_items_never_prompts():
+    with common.scripted_answers([]):                  # an empty queue proves nothing was popped
+        assert ui.checklist("#1 Book", []) == ([], [], "apply")
+
+
+def test_pause_and_clear_consume_nothing():
+    """Neither asks a question — pause only waits and clear only wipes the screen. Making
+    scripts carry a blank for them would be noise, and an ANSI clear mid-transcript is noise too."""
+    with common.scripted_answers([]), transcript() as buf:
+        ui.pause()
+        ui.clear()
+    assert buf.getvalue() == ""
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

@@ -150,6 +150,7 @@ def interactive() -> bool:
 def confirm(msg: str, default: bool = False) -> bool:
     """The one plain y/n prompt (ui.confirm is its rich twin for wizard surfaces).
     Off a TTY / on EOF: the default. 3 retries on garbage input."""
+    if scripted(): return script_bool(msg, default)
     if not interactive(): return default
     for _ in range(3):
         try: a = input(f"{msg} [{'Y/n' if default else 'y/N'}] ").strip().lower()
