@@ -145,6 +145,41 @@ def test_landing_menu_quits_cleanly():
     assert "pick up where you left off" in out                # the clean-exit line
 
 
+def test_a_full_menu_lap_runs_every_task_without_writing():
+    """One lap over the whole toolset — the coverage tests/drive_wizard.py used to carry before it
+    shrank to a smoke check. Every task key 1..7 in turn, each answered onto a no-write outcome,
+    then quit. Pins that the menu loop survives a full lap and that stage_staleness / stage_promote
+    / stage_backfill / stage_overrides are reached at all — the four stages no other test drives.
+    Nothing here may write to the library or reach an engine."""
+    lap = ["1", "n",                  # wrangle  (clean fixture: no apply menu) -> decline staleness
+           "2", "n",                  # staleness (already consistent)          -> decline classify
+           "3", "s", "n",             # classify -> scope skip (no engine)      -> decline review
+           "4", "r", "s", "s", "n",   # review -> 1-by-1, SKIP both books       -> decline promote
+           "5", "n",                  # promote (no candidates)                 -> decline backfill
+           "6",                       # backfill (nothing to do; no successor)
+           "7",                       # overrides (no rejects logged; not in the workflow)
+           "q"]
+    with wizard_lib(PROPOSAL) as prop:
+        with common.scripted_answers(lap), transcript() as buf:
+            wizard._run()
+        out = buf.getvalue()
+        assert out.count("what would you like to do?") == 8       # the menu loop survived all 7 tasks
+        for marker, stage in [("nothing to normalize", "wrangle"),
+                              ("already consistent", "staleness"),
+                              ("nothing tagged", "classify"),       # scope-skip honored: no engine, no spend
+                              ("nothing decided", "review"),
+                              ("no new-tag candidates yet", "promote"),
+                              ("backfill applies", "backfill"),
+                              ("no rejected changes logged", "overrides")]:
+            assert marker in out, f"{stage} stage did not run"
+        assert "pick up where you left off" in out                # quit landed on the clean-exit line
+        with open(prop) as f:
+            assert f.read() == PROPOSAL                           # skip-all review touched nothing
+        # every write funnels through run_writer, which snapshots metadata.db first — so an empty
+        # backups dir is proof no stage wrote, whatever it claimed on screen.
+        assert not os.path.isdir(common.backups_dir()) or not os.listdir(common.backups_dir())
+
+
 def test_a_short_script_raises_instead_of_exiting_zero():
     """The single most important test in this file. Unscripted, running out of input raises
     EOFError, which wizard.run() catches and turns into a clean exit 0 — a test written that way
