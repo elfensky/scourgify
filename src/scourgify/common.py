@@ -9,7 +9,7 @@ used to each carry a private copy of:
   - the single write funnel: run_writer() -> calibre-debug -e _writer.py
     (backs up metadata.db to data/backups/ before every write; refuses to run while Calibre is open)
 """
-import os, re, sys, csv, time, glob, sqlite3, collections, unicodedata
+import os, re, sys, csv, time, glob, sqlite3, contextlib, collections, unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))   # the installed package dir (read-only)
 DEFAULTS = os.path.join(HERE, "defaults")            # bundled generic maps — ship inside the package
@@ -84,9 +84,61 @@ def ro_connect() -> sqlite3.Connection:
 
 
 # ---------------- interaction policy (the ONE answer to "is a human at the terminal") ----------------
+class ScriptError(Exception):
+    """A scripted run's answers don't fit the flow (queue exhausted, or an answer that isn't on
+    offer). Deliberately NOT a SystemExit: wizard._stage_guard absorbs SystemExit — that's the
+    guardrail-skips-a-stage path — which would swallow exactly the failure this seam exists to
+    make loud, and hand back a green test that asserted nothing."""
+
+
+# Canned answers for a scripted run: `SCOURGIFY_SCRIPT=w,s,n,q scourgify` for ad-hoc shell use,
+# or common.scripted_answers([...]) in tests. Read ONCE at import — tests use the context manager,
+# so this only constrains shell use, where the variable is set before launch anyway.
+# ponytail: split on ',', so a checklist multi-toggle in an env-var script uses spaces ("1 3").
+_script = ([a.strip() for a in os.environ["SCOURGIFY_SCRIPT"].split(",")]
+           if "SCOURGIFY_SCRIPT" in os.environ else None)
+
+
+def scripted() -> bool:
+    """Is this run answering its own prompts? ([] still counts — the run IS scripted, it has
+    merely run out, and the next prompt must raise rather than fall back to a keyboard.)"""
+    return _script is not None
+
+
+def script_next(what: str) -> str:
+    """Pop the next canned answer. Exhausted = a real error: the script under-specifies the flow.
+    `what` names the prompt so the failure says which one went unanswered."""
+    if not _script:
+        raise ScriptError(f"scripted run: no answer left for {what}")
+    return _script.pop(0)
+
+
+def script_bool(msg: str, default: bool) -> bool:
+    """Pop a y/n answer ('' = the default, i.e. pressing enter). The ONE parser — ui.confirm and
+    confirm() below both route here so the two prompts can't disagree about what 'y' means."""
+    a = script_next(f"confirm {msg!r}").strip().lower()
+    if a == "": return default
+    if a in ("y", "yes"): return True
+    if a in ("n", "no"): return False
+    raise ScriptError(f"confirm {msg!r}: {a!r} is not y/n (or '' for the {default} default)")
+
+
+@contextlib.contextmanager
+def scripted_answers(answers):
+    """Drive a scripted run from Python (tests). Restores the previous queue on exit, so a test
+    that raises mid-flow can't leak its leftovers into the next one."""
+    global _script
+    prev, _script = _script, [str(a) for a in answers]
+    try:
+        yield
+    finally:
+        _script = prev
+
+
 def interactive() -> bool:
     """stdin AND stdout are real TTYs, and no CI/NONINTERACTIVE override. Every tool asks this
     function — ui.interactive re-exports it — so the tools can't disagree about interactivity."""
+    if _script is not None: return True     # a scripted run answers its own prompts; CI must not veto it
     if os.environ.get("CI") or os.environ.get("NONINTERACTIVE"):
         return False
     try:
