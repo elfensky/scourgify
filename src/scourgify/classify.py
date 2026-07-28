@@ -17,54 +17,47 @@ Engines (--engine):  apple = on-device Apple Foundation Models via ./afm (free; 
           the sparse-book default (< --min-tags) applies only when no scope flag is given. --apply auto-creates the
           #wrangled datetime column and stamps EVERY processed book, so the state lives IN the library — no external
           file. Selection semantics live in select.py (shared with the wizard header)."""
-import argparse, os, re, csv, json, subprocess, collections, time, difflib
+import argparse, os, csv, json, re, collections, difflib
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from scourgify import select
-from scourgify.common import (HERE, DATA, user_dir, ro_connect, custom_column_id, run_writer, library,
-                              current_tags, op_create_column, op_set_field, op_stamp_now,
+from scourgify import booktext, report, select
+from scourgify.booktext import strip_html                               # text extraction lives in booktext.py
+from scourgify.common import (HERE, data_dir, user_dir, ro_connect, custom_column_id, run_writer, library,
+                              current_tags, titles as book_titles, op_create_column, op_set_field, op_stamp_now,
                               interactive as _interactive, confirm as _confirm)
-from scourgify.artifacts import (PROP, RANK, FAIL, PROP_COLS,           # artifact formats live in artifacts.py;
+from scourgify.overrides import ov_path, merge_vocab, read_aliases      # overrides/ paths + format readers live there
+from scourgify.artifacts import (prop, rank, fail,                      # artifact paths + formats live in artifacts.py
                                  read_proposal, write_proposal, write_ranked, archive)
 # the engine seam lives in engines.py; re-exported here so `classify.ENGINES` / `classify.ask_retry`
 # stay valid for promote, the wizard, and existing tests
-from scourgify.engines import ENGINES, ENGINE_ENV, PRICING, ERR_TRUNC, usable_engines, ask_retry
-try:                                              # rich is optional: live dashboard/tables in system python3
-    from rich.console import Console, Group
-    from rich.live import Live
-    from rich.panel import Panel
-    from rich.progress import Progress, BarColumn, TextColumn, MofNCompleteColumn, TimeRemainingColumn
-    from rich.table import Table
-    from rich.text import Text
-    _con = Console(stderr=True); RICH = True
-except ImportError:
-    RICH = False
+from scourgify.engines import ENGINES, ENGINE_ENV, PRICING, usable_engines, ask_retry, is_free, max_workers as engine_workers
+from scourgify.report import Dashboard as _Dashboard                    # live display lives in report.py
 
-AO3_VOCAB = f"{DATA}/ao3_vocab.csv"     # per-library canonical AO3 freeforms (name,uses); absent on fresh installs
+def _ao3_vocab_path() -> str:           # per-library canonical AO3 freeforms (name,uses); absent on fresh installs
+    return os.path.join(data_dir(), "ao3_vocab.csv")
 SPEND_GATE = 200        # cloud runs above this many books require an explicit yes
 DEDUP_CUTOFF = 0.86     # difflib ratio at/above which a proposed tag counts as a variant of an existing one
 
 _VOCAB = None
+def clear_caches() -> None:
+    """Forget the memoized vocab/alias/AO3 loads (they key off user_dir(), which tests repoint
+    via $SCOURGIFY_HOME) — the supported way to reload, instead of poking module globals."""
+    global _VOCAB, _ALIASES, _AO3
+    _VOCAB = _ALIASES = _AO3 = None
+
 def _read_vocab_file(path: str) -> list:
     return [l.strip() for l in open(path) if l.strip() and not l.startswith("#")] if os.path.exists(path) else []
 
 def load_vocab() -> list:
-    """Curated core ∪ AO3 high-frequency seed, then optional CWD overrides/classify_vocab.txt (a line appends
-    a term; '-term' removes one — and can trim a seeded term too). Lazy so a packaging problem gives a real
-    error at use, not at import, and installed users can override. See build_classify_seed.py for the seed."""
+    """Curated core ∪ AO3 high-frequency seed, then the user's overrides classify_vocab.txt (a line appends
+    a term; '-term' removes one — and can trim a seeded term too; semantics in overrides.merge_vocab). Lazy so
+    a packaging problem gives a real error at use, not at import, and installed users can override."""
     global _VOCAB
     if _VOCAB is None:
         terms, have = [], set()                                                   # curated core first, then AO3 seed;
         for t in (_read_vocab_file(f"{HERE}/defaults/classify_vocab.txt")          # first spelling of a norm wins,
                   + _read_vocab_file(f"{HERE}/defaults/classify_vocab_ao3.txt")):  # so a hand-edit dup can't sneak in
             if t.lower() not in have: terms.append(t); have.add(t.lower())
-        ov = os.path.join(user_dir(), "overrides", "classify_vocab.txt")
-        if os.path.exists(ov):
-            for l in open(ov):
-                l = l.strip()
-                if not l or l.startswith("#"): continue
-                if l.startswith("-"): terms = [t for t in terms if t.lower() != l[1:].strip().lower()]
-                elif l.lower() not in {t.lower() for t in terms}: terms.append(l)
-        _VOCAB = terms
+        _VOCAB = merge_vocab(terms)                # the '-term' semantics live with the file's writer (overrides.py)
     return _VOCAB
 
 _ALIASES = None
@@ -73,12 +66,7 @@ def load_aliases() -> dict:
     so tags we've decided are synonyms stop getting re-proposed as 'new'. {} if absent."""
     global _ALIASES
     if _ALIASES is None:
-        p = os.path.join(user_dir(), "overrides", "promote_aliases.csv")
-        _ALIASES = {}
-        if os.path.exists(p):
-            for r in csv.DictReader(open(p)):
-                if r.get("candidate") and r.get("target"):
-                    _ALIASES[r["candidate"].strip().lower()] = r["target"].strip()
+        _ALIASES = read_aliases()                  # delimiter-sniffing reader lives with the writer (overrides.py)
     return _ALIASES
 
 _AO3 = None
@@ -88,7 +76,7 @@ def load_ao3_vocab() -> list:
     global _AO3
     if _AO3 is None:
         try:
-            _AO3 = [r["name"] for r in csv.DictReader(open(AO3_VOCAB)) if r.get("name", "").strip()]
+            _AO3 = [r["name"] for r in csv.DictReader(open(_ao3_vocab_path())) if r.get("name", "").strip()]
         except OSError:
             _AO3 = []
     return _AO3
@@ -166,87 +154,29 @@ def annotate_new(ranked, cutoff: float = DEDUP_CUTOFF, existing: list | None = N
     return rows
 
 
-# ---- live run display ----
-def sparkline(vals: list, width: int = 28) -> str:
-    """Unicode sparkline of a numeric series (last `width` points), scaled to its max."""
-    vals = [v for v in vals][-width:]
-    if not vals: return ""
-    blocks = "▁▂▃▄▅▆▇█"
-    hi = max(vals)
-    if hi <= 0: return blocks[0] * len(vals)
-    return "".join(blocks[min(7, int(v * 8 / hi))] for v in vals)
-
-class _Dashboard:
-    """Live display for a classify run: progress bar, running numbers (tagged / failed /
-    no-match / rate), a throughput sparkline, and the rising new-tag candidates.
-    rich renders it live; without rich it degrades to a checkpoint line every 25 books."""
-    BUCKET = 5.0                                   # seconds per throughput bucket
-
-    def __init__(self, todo_n, done_before, targets_n):
-        self.total, self.done_before, self.targets = todo_n, done_before, targets_n
-        self.n = self.tagged = self.fails = 0
-        self.newtags = collections.Counter()
-        self.t0 = time.monotonic(); self.hist = [0]
-        self.live = self.prog = self.task = None
-
-    def __enter__(self):
-        if RICH and self.total:
-            self.prog = Progress(TextColumn("[cyan]classifying"), BarColumn(bar_width=None),
-                                 MofNCompleteColumn(), TimeRemainingColumn(), console=_con)
-            self.task = self.prog.add_task("", total=self.total)
-            self.live = Live(self._render(), console=_con, refresh_per_second=4)
-            self.live.__enter__()
-        return self
-
-    def __exit__(self, *exc):
-        if self.live: self.live.__exit__(*exc)
-        return False
-
-    def update(self, vt, nt, err):
-        self.n += 1
-        if err: self.fails += 1
-        elif vt: self.tagged += 1
-        self.newtags.update(nt)
-        b = int((time.monotonic() - self.t0) // self.BUCKET)
-        while len(self.hist) <= b: self.hist.append(0)
-        self.hist[b] += 1
-        if self.live:
-            self.prog.update(self.task, advance=1)
-            self.live.update(self._render())
-        elif self.n % 25 == 0:
-            el = time.monotonic() - self.t0
-            print(f"  +{self.n}/{self.total} … {self.tagged} tagged, {self.fails} failed, {self.n / el:.1f}/s")
-
-    def _render(self):
-        el = time.monotonic() - self.t0
-        rate = self.n / el if el > 1 else 0.0
-        g = Table.grid(padding=(0, 2))
-        g.add_row("[bold]this run[/]", f"{self.n}/{self.total}",
-                  "[green]tagged[/]", str(self.tagged),
-                  "[red]failed[/]", str(self.fails),
-                  "[dim]no match[/]", str(max(0, self.n - self.tagged - self.fails)),
-                  "[bold]rate[/]", f"{rate:.1f}/s")
-        parts = [self.prog, g]
-        spark = sparkline(self.hist)
-        if spark: parts.append(Text.assemble(("throughput  ", "bold"), (spark, "cyan")))
-        if self.newtags:
-            top = " · ".join(f"{t} ×{c}" for t, c in self.newtags.most_common(5))
-            parts.append(Text.assemble(("rising candidates  ", "bold"), (top, "magenta")))
-        return Panel(Group(*parts), border_style="cyan", padding=(0, 1),
-                     title=f"classify — {self.done_before + self.n}/{self.targets} total")
-
-
 # ---- apply: 'added_tags' + stamp #wrangled — standalone, no LLM calls ----
-def apply_proposal() -> None:
-    if not os.path.exists(PROP):
-        raise SystemExit(f"no proposal to apply ({os.path.basename(PROP)} not found — run a classify pass first).")
+def apply_proposal(rows: list | None = None) -> None:
+    """rows=None (the --apply path): read the live proposal, apply + stamp it, archive it on
+    success. Explicit rows (the --step path): apply + stamp exactly those; the proposal file is
+    the CALLER's to archive/rewrite — it is never touched here, so a writer refusal loses nothing."""
+    from_file = rows is None
+    if from_file:
+        if not os.path.exists(prop()):
+            raise SystemExit(f"no proposal to apply ({os.path.basename(prop())} not found — run a classify pass first).")
+        rows = read_proposal()
     con = ro_connect()
     cur = current_tags(con)
+    known = {b for (b,) in con.execute("SELECT id FROM books")}
     have_wrangled = custom_column_id(con, "wrangled") is not None
-    chg, processed = {}, []
-    for r in read_proposal():
-        b = r["book_id"]; processed.append(b)
+    chg, processed, stale = {}, [], []
+    for r in rows:
+        b = r["book_id"]
+        if b not in known:                         # a row can outlive its book (deleted / re-imported with
+            stale.append(b); continue              # a new id) — a dead id would FK-abort the whole write
+        processed.append(b)
         if r["added_tags"]: chg[b] = sorted(cur.get(b, set()) | set(r["added_tags"]))   # union with current tags
+    if stale:
+        print(f"  note: {len(stale)} stale proposal row(s) for books no longer in the library — skipped: {stale[:10]}")
     ops = []
     if not have_wrangled:                                             # first run: create + backfill whole library as wrangled-now
         ops.append(op_create_column("wrangled", "Wrangled", "datetime"))
@@ -255,24 +185,26 @@ def apply_proposal() -> None:
     # stamp EVERY processed book, tagged or not — an unstamped no-tag book would be re-sent to the LLM forever
     ops.append(op_stamp_now("#wrangled", processed))
     run_writer(ops)
-    # archive so a later --apply can't re-add tags you've since hand-removed (stale rows never re-apply)
-    arch = archive(PROP, "applied")
-    print(f"applied tags to {len(chg)} books + stamped #wrangled on {len(processed)} processed; proposal archived -> {os.path.basename(arch)}")
+    tail = ""
+    if from_file:
+        # archive so a later --apply can't re-add tags you've since hand-removed (stale rows never re-apply)
+        tail = f"; proposal archived -> {os.path.basename(archive(prop(), 'applied'))}"
+    print(f"applied tags to {len(chg)} books + stamped #wrangled on {len(processed)} processed{tail}")
 
 
 def apply_proposal_step() -> None:
     """1-by-1 review of the proposal: each book's proposed tags as a checklist. Accepted tags are
     applied + the book stamped; rejected tags are dropped and logged (class=ai, a hallucination filter,
     NOT a rule bug). Skip/quit leave a book's row pending in the proposal for a later run."""
-    if not os.path.exists(PROP):
-        raise SystemExit(f"no proposal to apply ({os.path.basename(PROP)} not found — run a classify pass first).")
+    if not os.path.exists(prop()):
+        raise SystemExit(f"no proposal to apply ({os.path.basename(prop())} not found — run a classify pass first).")
     from scourgify import ui
     if not ui.interactive():
         raise SystemExit("--step needs an interactive terminal (omit it to apply the whole proposal).")
     from scourgify.common import log_rejects
     con = ro_connect()
     desc = {b: strip_html(t) for b, t in con.execute("SELECT book, text FROM comments")}
-    titles = {b: t for b, t in con.execute("SELECT id, title FROM books")}
+    titles = book_titles(con)
     decided, pending, rejects, quit_ = [], [], [], False
     for r in read_proposal():
         tags = r["added_tags"]
@@ -289,73 +221,157 @@ def apply_proposal_step() -> None:
     log_rejects(rejects)
     if not decided:
         print("(nothing decided — proposal left untouched.)"); return
-    write_proposal(decided); apply_proposal()                  # applies + stamps the decided rows, archives PROP
+    apply_proposal(rows=decided)                   # PROP untouched until success — a writer refusal loses nothing
+    archive(prop(), "applied")                     # the full record (decided + pending) — backfill reads it back
     if pending:
         write_proposal(pending)
-        print(f"{len(pending)} book(s) left pending for a later run -> {os.path.basename(PROP)}")
+        print(f"{len(pending)} book(s) left pending for a later run -> {os.path.basename(prop())}")
 
 
 # ---- gather books (read-only) ----
-def strip_html(s: str | None) -> str: return re.sub(r"<[^>]+>", " ", s or "").strip()
-
-def book_text(path: str | None, limit: int = 6000) -> str:
-    if not path or not os.path.exists(path): return ""
-    if path.lower().endswith(".epub"):                  # fast path: epub is a zip of XHTML
-        import zipfile
-        try:
-            z = zipfile.ZipFile(path); out = []
-            for n in z.namelist():
-                if not n.lower().endswith((".xhtml", ".html", ".htm")): continue
-                if z.getinfo(n).file_size > 2_000_000: continue        # untrusted download: skip zip-bomb members
-                t = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", z.read(n).decode("utf-8", "ignore"))).strip()
-                if len(t) > 200: out.append(t)           # skip nav/title pages
-                if sum(len(x) for x in out) > limit: break
-            return " ".join(out)[:limit]
-        except Exception: return ""
-    import tempfile                                      # other formats (MOBI/PDF/DOCX/…): let calibre extract
-    try:
-        with tempfile.TemporaryDirectory() as td:
-            o = os.path.join(td, "o.txt")
-            subprocess.run(["ebook-convert", path, o], capture_output=True, timeout=180)
-            return re.sub(r"\s+", " ", open(o, errors="ignore").read()).strip()[:limit] if os.path.exists(o) else ""
-    except Exception: return ""
-
 def gather(a: argparse.Namespace) -> tuple:
     """-> (targets [(book, text)], titles, needs). Scope comes from the flags, first match wins:
-    --incremental / --last N / --since DATE select ONLY matching books (newest-added-first);
+    --books SPEC / --incremental / --last N / --since DATE select ONLY matching books (newest-added-first);
     bare classify keeps the sparse mode (fewer than --min-tags tags). `needs(b)` is True for
-    explicitly scoped books — the resume logic uses it to re-process them even if already proposed."""
+    explicitly scoped books — the resume logic uses it to re-process them even if already proposed.
+    Text extraction (EPUB zip / ebook-convert) lives in booktext.py."""
     con = ro_connect(); c = con.cursor()
-    if a.all:         ids, scope = select.pick(con, "all"), "whole library"
+    missing = 0
+    if a.books is not None:                       # explicit ids win over every other scope flag
+        want = select.parse_books(a.books)
+        ids = select.pick(con, "ids", ids=want)
+        missing, scope = len(want) - len(ids), f"{len(want)} book(s) by id"
+    elif a.all:       ids, scope = select.pick(con, "all"), "whole library"
     elif a.incremental: ids, scope = select.pick(con, "incremental"), "new/changed since last classify"
     elif a.last:      ids, scope = select.pick(con, "last", n=a.last), f"last {a.last} added"
     elif a.since:     ids, scope = select.pick(con, "since", since=a.since), f"added/updated since {a.since}"
     else:             ids, scope = select.pick(con, "sparse", min_tags=a.min_tags), f"fewer than {a.min_tags} tags"
-    explicit = set(ids) if (a.all or a.incremental or a.last or a.since) else set()
+    explicit = set(ids) if (a.books is not None or a.all or a.incremental or a.last or a.since) else set()
     def needs(b): return b in explicit
     desc = {b: t for b, t in c.execute("SELECT book, text FROM comments")}
-    bookfile = {}
-    if a.text_fallback:                           # when the description is thin, sample the book's own text
-        bp = {b: p for b, p in c.execute("SELECT id, path FROM books")}
-        byb = {}
-        for b, fmt, name in c.execute("SELECT book, format, name FROM data"):
-            byb.setdefault(b, {})[fmt.upper()] = os.path.join(library(), bp[b], name + "." + fmt.lower())
-        for b, fm in byb.items():
-            bookfile[b] = fm.get("EPUB") or next(iter(fm.values()))   # prefer EPUB, else any available format
+    # when the description is thin, sample the book's own text instead of dropping the book
+    bookfile = booktext.paths(con) if a.text_fallback else {}
     def text_for(b):
         d = strip_html(desc.get(b, ""))
         if len(d) >= 80 or not a.text_fallback: return d
-        et = book_text(bookfile.get(b, ""))
+        et = booktext.extract(bookfile.get(b, ""))
         return (d + " " + et).strip() if et else d
     targets = [(b, text_for(b)) for b in ids]
     kept = [(b, t) for b, t in targets if t and len(t) >= 40]
-    print(f"  scope: {scope} -> {len(ids)} books")
+    # flush: the live dashboard writes straight through, so an unflushed plain print lands
+    # AFTER it when stdout is a pipe (scripting/CI) rather than a terminal
+    print(f"  scope: {scope} -> {len(ids)} books", flush=True)
+    if missing: print(f"  note: {missing} requested id(s) not in the library")
     if len(kept) < len(targets):                  # no silent drops: thin descriptions are reported, not vanished
         print(f"  note: {len(targets) - len(kept)} dropped (description under 40 chars"
               + (")" if a.text_fallback else "; --text-fallback samples the book text instead)"))
-    titles = {b: t for b, t in c.execute("SELECT id, title FROM books")}
+    titles = book_titles(con)
     if a.limit: kept = kept[:a.limit]
     return kept, titles, needs
+
+
+class Plan:
+    """ONE resolved classify run — scope → targets (gather), resume → todo — priced, confirmed,
+    and executed as the same object, so the cost the user confirms is over the exact todo set the
+    run bills and the expensive text extraction never runs twice (mirrors wrangle.Plan; the CLI
+    and the wizard drive the same object). The plan owns a COPY of the caller's options: steering
+    a resolved plan (engine choice, the spend-gate answer) goes through `p.opts`, never through
+    mutating the original namespace — that aliasing was load-bearing once, by accident."""
+
+    def __init__(self, a: argparse.Namespace):
+        import copy
+        a = normalize(copy.copy(a))
+        self.opts = a
+        self.targets, self.titles, self.needs = gather(a)
+        self.proposal, self.done = {}, set()           # book -> (vocab_tags, proposed_new_tags)
+        if not a.fresh:                                # resume: skip books already in proposal
+            for r in read_proposal():
+                bid, at = r["book_id"], r["added_tags"]
+                self.proposal[bid] = (at, r["proposed_new"])
+                if (at or not a.text_fallback) and not self.needs(bid):   # re-process books changed since last wrangle
+                    self.done.add(bid)
+        self.todo = [(b, d) for b, d in self.targets if b not in self.done]
+        if a.batch: self.todo = self.todo[:a.batch]
+
+    def run(self, ask=None) -> None:
+        """Execute the plan. `ask`: prompt -> (text, err) — tests inject a callable (the same
+        seam promote.run has); default builds the configured engine and goes through ask_retry."""
+        a, titles, proposal = self.opts, self.titles, self.proposal
+        print(f"engine={a.engine}  candidate books: {len(self.targets)}", flush=True)
+        if self.done: print(f"  resuming: {len(self.done)} already in proposal (pass --fresh to restart)", flush=True)
+        def dump():
+            write_proposal([{"book_id": b, "title": titles.get(b, ""), "added_tags": vt, "proposed_new": nt}
+                            for b, (vt, nt) in proposal.items()])
+
+        spend_gate(len(self.todo), a.engine, a.yes)    # cloud runs cost real money
+
+        if ask is None:
+            eng = ENGINES[a.engine](a.model, a.timeout)
+            ask = lambda prompt: ask_retry(eng, prompt)
+        def work(b, d):
+            out, err = ask(prompt_for(d, a.max_tags)); vt, nt = parse_resp(out, a.max_tags, a.dedup_cutoff); return b, err, vt, nt
+
+        failures = []
+        workers = engine_workers(a.engine, a.workers)   # non-parallel engines (apple) cap at 1
+        print(f"  {len(self.todo)} to do this run, {workers} concurrent", flush=True)
+        ex = ThreadPoolExecutor(max_workers=workers)
+        interrupted = False
+        try:
+            with _Dashboard(len(self.todo), len(self.done), len(self.targets)) as dash:
+                futs = [ex.submit(work, b, d) for b, d in self.todo]
+                for fut in as_completed(futs):
+                    b, err, vt, nt = fut.result()
+                    if err: failures.append((b, err))
+                    else: proposal[b] = (vt, nt)      # record EVERY non-errored book, even a no-match (vt=nt=[]):
+                                                      # --apply stamps every proposal row, so it isn't re-sent forever.
+                                                      # errors are excluded on purpose — they retry (e.g. --engine apple).
+                    dash.update(vt, nt, err)
+                    if dash.n % 50 == 0: dump()       # checkpoint regardless of UI
+        except KeyboardInterrupt:
+            # Ctrl+C: never start queued work, don't wait for in-flight requests (they're
+            # abandoned; runs are resumable so nothing is lost beyond the requests in the air)
+            interrupted = True
+            ex.shutdown(wait=False, cancel_futures=True)
+        else:
+            ex.shutdown()
+        dump()
+        if interrupted:
+            print(f"\n  interrupted — {len(proposal)} results saved to the proposal; re-run to resume where you left off.")
+        # Rewrite the log every run, not just when this one failed: a book recovered on another
+        # engine has to LEAVE the list, or it reads as still-broken forever. Books outside this
+        # run's scope are carried through — the log is library-wide, the run is not.
+        from scourgify.artifacts import merge_failures, read_rows, write_failures
+        # only books this run actually got an answer for — on Ctrl+C the queued ones were never
+        # attempted, and clearing their old failure row would hide a real, still-unfixed failure
+        processed = {b for b, _ in self.todo} & (set(proposal) | {b for b, _ in failures})
+        prev = read_rows(fail()) if os.path.exists(fail()) else []
+        write_failures(merge_failures(prev, processed, [[b, titles.get(b, ""), e] for b, e in failures]))
+        if failures:
+            bytype = collections.Counter(e.split(":")[0].split(" ")[0] for _, e in failures)
+            print(f"failures: {len(failures)} -> {os.path.basename(fail())}  by type: {dict(bytype)}")
+            print("  (recover blocked books with a no-policy engine: scourgify classify --engine apple)")
+
+        ranked = collections.Counter()
+        for vt, nt in proposal.values():
+            for t in nt: ranked[t] += 1
+        rows = annotate_new(ranked, a.dedup_cutoff)           # nearest existing tag + verdict for each candidate
+        fresh = [r for r in rows if r[4] == "new"]            # genuinely novel — the ones worth promoting
+        write_ranked(rows)
+        print(f"\nOutput 1 (apply): {sum(1 for v in proposal.values() if v[0])} books with vocab tags -> {os.path.basename(prop())} (col 'added_tags')")
+        print(f"Output 2 (grow):  {len(fresh)} new + {len(rows) - len(fresh)} near-dupes of existing tags -> {os.path.basename(rank())} (promote 'verdict=new' rows into defaults/classify_vocab.txt)")
+        if rows:
+            report.table("top new-tag candidates (verdict=new → promote; near-duplicate ≈ an existing tag)",
+                         ["count", "proposed tag", "nearest existing", "verdict"],
+                         [[(str(cnt), "cyan"), tag, (f"{nearest} ({sim})" if nearest else "", "dim"),
+                           ("new", "green") if verdict == "new" else ("≈ dupe", "yellow")]
+                          for tag, cnt, nearest, sim, verdict in rows[:25]], right=(0,))
+        print("\nApply vocab tags with: scourgify classify --apply   (Calibre closed)")
+
+
+def plan(a: argparse.Namespace) -> Plan:
+    """Resolve a classify run ONCE. The wizard prices/confirms over this plan and run() executes
+    the SAME plan — see Plan."""
+    return Plan(a)
 
 
 def bakeoff(a: argparse.Namespace, targets: list, engines: list, n: int = 5) -> dict:
@@ -375,7 +391,7 @@ def bakeoff(a: argparse.Namespace, targets: list, engines: list, n: int = 5) -> 
 def spend_gate(n_books: int, engine: str, yes: bool) -> None:
     """THE cloud-spend confirmation — the single owner of the gate. `yes` answers it up front
     (the CLI --yes flag, or the wizard's own cost-estimate confirm)."""
-    if engine == "apple" or n_books <= SPEND_GATE or yes: return
+    if is_free(engine) or n_books <= SPEND_GATE or yes: return
     msg = f"about to send {n_books} books to the {engine} API (costs money; --incremental/--batch shrink it)."
     if not _interactive():
         raise SystemExit(f"  {msg}\n  non-interactive: re-run with --yes to confirm.")
@@ -383,84 +399,10 @@ def spend_gate(n_books: int, engine: str, yes: bool) -> None:
         raise SystemExit("aborted (nothing sent).")
 
 
-def classify_run(a: argparse.Namespace) -> None:
-    a = normalize(a)                               # owns its invariants (apple → workers=1) regardless of caller
-    targets, titles, needs = gather(a)
-    print(f"engine={a.engine}  candidate books: {len(targets)}")
-
-    proposal, done = {}, set()                     # book -> (vocab_tags, proposed_new_tags)
-    if not a.fresh:                                # resume: skip books already in proposal
-        for r in read_proposal():
-            bid, at = r["book_id"], r["added_tags"]
-            proposal[bid] = (at, r["proposed_new"])
-            if (at or not a.text_fallback) and not needs(bid): done.add(bid)   # re-process books changed since last wrangle
-        if done: print(f"  resuming: {len(done)} already in proposal (pass --fresh to restart)")
-    def dump():
-        write_proposal([{"book_id": b, "title": titles.get(b, ""), "added_tags": vt, "proposed_new": nt}
-                        for b, (vt, nt) in proposal.items()])
-
-    todo = [(b, d) for b, d in targets if b not in done]
-    if a.batch: todo = todo[:a.batch]
-    spend_gate(len(todo), a.engine, a.yes)         # cloud runs cost real money
-
-    eng = ENGINES[a.engine](a.model, a.timeout)
-    def work(b, d):
-        out, err = ask_retry(eng, prompt_for(d, a.max_tags)); vt, nt = parse_resp(out, a.max_tags, a.dedup_cutoff); return b, err, vt, nt
-
-    failures = []
-    print(f"  {len(todo)} to do this run, {a.workers} concurrent")
-    ex = ThreadPoolExecutor(max_workers=a.workers)
-    interrupted = False
-    try:
-        with _Dashboard(len(todo), len(done), len(targets)) as dash:
-            futs = [ex.submit(work, b, d) for b, d in todo]
-            for fut in as_completed(futs):
-                b, err, vt, nt = fut.result()
-                if err: failures.append((b, err))
-                else: proposal[b] = (vt, nt)          # record EVERY non-errored book, even a no-match (vt=nt=[]):
-                                                      # --apply stamps every proposal row, so it isn't re-sent forever.
-                                                      # errors are excluded on purpose — they retry (e.g. --engine apple).
-                dash.update(vt, nt, err)
-                if dash.n % 50 == 0: dump()           # checkpoint regardless of UI
-    except KeyboardInterrupt:
-        # Ctrl+C: never start queued work, don't wait for in-flight requests (they're
-        # abandoned; runs are resumable so nothing is lost beyond the requests in the air)
-        interrupted = True
-        ex.shutdown(wait=False, cancel_futures=True)
-    else:
-        ex.shutdown()
-    dump()
-    if interrupted:
-        print(f"\n  interrupted — {len(proposal)} results saved to the proposal; re-run to resume where you left off.")
-    if failures:
-        with open(FAIL, "w", newline="") as f:
-            w = csv.writer(f); w.writerow(["book_id", "title", "reason"])
-            for b, e in failures: w.writerow([b, titles.get(b, ""), e])
-        bytype = collections.Counter(e.split(":")[0].split(" ")[0] for _, e in failures)
-        print(f"failures: {len(failures)} -> {os.path.basename(FAIL)}  by type: {dict(bytype)}")
-        print("  (recover blocked books with a no-policy engine: scourgify classify --engine apple)")
-
-    ranked = collections.Counter()
-    for vt, nt in proposal.values():
-        for t in nt: ranked[t] += 1
-    rows = annotate_new(ranked, a.dedup_cutoff)               # nearest existing tag + verdict for each candidate
-    fresh = [r for r in rows if r[4] == "new"]                # genuinely novel — the ones worth promoting
-    write_ranked(rows)
-    print(f"\nOutput 1 (apply): {sum(1 for v in proposal.values() if v[0])} books with vocab tags -> {os.path.basename(PROP)} (col 'added_tags')")
-    print(f"Output 2 (grow):  {len(fresh)} new + {len(rows) - len(fresh)} near-dupes of existing tags -> {os.path.basename(RANK)} (promote 'verdict=new' rows into defaults/classify_vocab.txt)")
-    if RICH and rows:
-        tbl = Table(title="top new-tag candidates (verdict=new → promote; near-duplicate ≈ an existing tag)")
-        tbl.add_column("count", justify="right", style="cyan"); tbl.add_column("proposed tag")
-        tbl.add_column("nearest existing", style="dim"); tbl.add_column("verdict")
-        for tag, cnt, nearest, sim, verdict in rows[:25]:
-            tbl.add_row(str(cnt), tag, f"{nearest} ({sim})" if nearest else "",
-                        f"[green]new[/]" if verdict == "new" else f"[yellow]≈ dupe[/]")
-        _con.print(tbl)
-    elif rows:
-        print("top new-tag candidates (verdict | count | tag | nearest existing):")
-        for tag, cnt, nearest, sim, verdict in rows[:25]:
-            print(f"  {verdict:14} {cnt:4}  {tag}" + (f"  ≈ {nearest} ({sim})" if nearest else ""))
-    print("\nApply vocab tags with: scourgify classify --apply   (Calibre closed)")
+def classify_run(run) -> None:
+    """Execute a classify run: a Plan (the wizard's path — planned, priced, and confirmed once)
+    or a bare argparse Namespace (the CLI path — planned here)."""
+    (plan(run) if isinstance(run, argparse.Namespace) else run).run()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -468,6 +410,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--engine", default="apple", choices=sorted(ENGINES), help="apple = on-device, free (default)")
     p.add_argument("--apply", action="store_true", help="apply 'added_tags' from the proposal + stamp #wrangled (Calibre closed)")
     p.add_argument("--step", action="store_true", help="with --apply: review each book's tags 1-by-1 (interactive; untick to reject)")
+    p.add_argument("--books", default=None, metavar="SPEC",
+                   help="only these books: '1,2,3', '10-20', '@ids.txt' (one id per line), or a combination")
     p.add_argument("--incremental", action="store_true", help="only new/changed books (never classified, #updated newer than their #wrangled marker, or re-fetched)")
     p.add_argument("--all", action="store_true", help="the WHOLE library — every book, regardless of tag count (a full cloud pass costs real money)")
     p.add_argument("--last", type=int, default=0, metavar="N", help="(re)process the N most recently added books")
@@ -488,11 +432,10 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 def normalize(a: argparse.Namespace) -> argparse.Namespace:
-    """Post-parse invariants (idempotent; classify_run applies them itself, so callers never
-    have to worry about ordering them around engine choice)."""
-    if a.engine == "apple": a.workers = 1        # apple = one subprocess pipe, not thread-safe
+    """Post-parse invariants (idempotent). Engine-dependent settings (apple → 1 worker) are
+    resolved at run time, so the wizard can pick an engine after planning (via p.opts)."""
     library()                                    # fail fast with a clear message
-    os.makedirs(DATA, exist_ok=True)
+    os.makedirs(data_dir(), exist_ok=True)
     return a
 
 
@@ -526,6 +469,9 @@ def bakeoff_cli(a: argparse.Namespace) -> None:
 
 def main() -> None:
     a = normalize(build_parser().parse_args())
+    if a.books is not None and a.apply:
+        raise SystemExit("--books scopes which books are CLASSIFIED, not which proposal rows are applied. "
+                         "Run `classify --books ...` first, then `classify --apply` to write the reviewed proposal.")
     if a.bakeoff: bakeoff_cli(a)
     elif a.apply: apply_proposal_step() if a.step else apply_proposal()
     else: classify_run(a)

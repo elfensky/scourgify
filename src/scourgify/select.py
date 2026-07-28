@@ -16,7 +16,7 @@ using it would mark half the library "changed" after every wrangle apply.
 Every picker returns ids newest-added-first, so --batch/--limit caps eat the new
 books first instead of decade-old sparse ones.
 """
-import collections, sqlite3
+import collections, os, sqlite3
 
 from scourgify.common import read_custom_column
 
@@ -28,6 +28,45 @@ def _key(v):
     Calibre stores everything UTC, so string comparison is order-correct; date-only values
     (like a bare #updated day) sort before any same-day timestamp, keeping > conservative."""
     return str(v)[:19] if v else ""
+
+
+def _tokens(spec: str, depth: int = 0):
+    """Comma-separated tokens, with '@file' expanded to its contents (one level deep).
+    ponytail: one level is the ceiling — a file that references another file is a loop
+    waiting to happen, and nobody needs an include graph to name fifty books."""
+    for raw in spec.split(","):
+        t = raw.strip()
+        if not t: continue
+        if not t.startswith("@"):
+            yield t; continue
+        if depth:
+            raise SystemExit(f"--books: '@file' inside a file is not supported ({t})")
+        path = os.path.expanduser(t[1:])
+        try: text = open(path).read()
+        except (OSError, UnicodeDecodeError) as e:
+            raise SystemExit(f"--books: cannot read {path}: {e}")
+        yield from _tokens(",".join(ln.split("#")[0] for ln in text.splitlines()), depth + 1)
+
+
+def parse_books(spec: str) -> list[int]:
+    """'1,2,3' | '10-20' | '@ids.txt' | any comma-combination -> de-duplicated [book_id ...],
+    order preserved. A file holds ids one per line (or comma-separated); '#' starts a comment.
+    SystemExit on anything unparseable — this is user input, not an internal invariant."""
+    out = []
+    for t in _tokens(spec):
+        if "-" in t:
+            lo, _, hi = t.partition("-")
+            try: lo, hi = int(lo), int(hi)
+            except ValueError: raise SystemExit(f"--books: bad range {t!r} (expected 'LOW-HIGH')")
+            if hi < lo: raise SystemExit(f"--books: empty range {t!r} (high is below low)")
+            out.extend(range(lo, hi + 1))
+        else:
+            try: out.append(int(t))
+            except ValueError: raise SystemExit(f"--books: {t!r} is not a book id")
+    out = list(dict.fromkeys(out))          # de-dup, first-seen order
+    if not out:
+        raise SystemExit(f"--books: {spec!r} names no book ids")
+    return out
 
 
 def changed_pure(added: dict, updated: dict, stamped: dict) -> dict:
@@ -52,11 +91,11 @@ def changed(con: sqlite3.Connection) -> dict:
 
 
 def pick(con: sqlite3.Connection, mode: str = "incremental", n: int = 0,
-         since: str = "", min_tags: int = 2) -> list[int]:
+         since: str = "", min_tags: int = 2, ids: list[int] | None = None) -> list[int]:
     """[book_id ...] newest-added-first for one scope:
       incremental — changed() books only            last   — the n most recently added
       since       — added OR site-updated >= date   sparse — fewer than min_tags tags
-      all         — everything"""
+      all         — everything                      ids    — exactly these (absent ones dropped)"""
     added, upd, stamped = _clocks(con)
     newest = sorted(added, key=lambda b: (_key(added[b]), b), reverse=True)
     if mode == "incremental":
@@ -69,6 +108,9 @@ def pick(con: sqlite3.Connection, mode: str = "incremental", n: int = 0,
     if mode == "sparse":
         tagn = collections.Counter(b for (b,) in con.execute("SELECT book FROM books_tags_link"))
         return [b for b in newest if tagn[b] < min_tags]
+    if mode == "ids":
+        want = set(ids or ())
+        return [b for b in newest if b in want]
     if mode == "all":
         return newest
     # internal invariant guard: `mode` comes from argparse choices, so an unknown value is a

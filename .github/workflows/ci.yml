@@ -38,14 +38,5 @@ jobs:
         run: uv sync --locked
 
       - name: Tests
-        run: |
-          uv run tests/test_core.py
-          uv run tests/test_selection.py
-          uv run tests/test_backup.py
-          uv run tests/test_promote.py
-          uv run tests/test_layers.py
-          uv run tests/test_cli.py
-          uv run tests/test_wizard.py
-          uv run tests/test_paths.py
-          uv run tests/test_artifacts.py
-          uv run tests/test_engines.py
+        run: |  # every test file — a new tests/test_*.py is in CI by existing (bash -e: first failure aborts)
+          for t in tests/test_*.py; do uv run "$t"; done

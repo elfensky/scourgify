@@ -7,28 +7,19 @@ writes shell out to calibre-debug automatically):
   scourgify audit            # read-only dry-run report of every pass
   scourgify apply --apply    # write changes  (Calibre must be CLOSED)
 """
-import os, sys, re, csv, time, collections
-from scourgify.common import (DEFAULTS as DEF, user_dir, norm, ascii_fold, load_config, library,
-                              ro_connect, read_custom_column, run_writer, interactive, confirm,
-                              op_set_field, op_create_column, op_set_pref)
-try:                                   # rich is optional (present in system python3 for `audit`; absent under calibre-debug)
-    from rich.console import Console
-    from rich.table import Table
-    _con = Console(); RICH = True
-except ImportError:
-    RICH = False
+import os, sys, re, csv, collections
+from scourgify import report
+from scourgify.artifacts import read_rows as read_csv     # the ONE "DictReader or []" reader
+from scourgify.common import (DEFAULTS as DEFAULTS_DIR, norm, ascii_fold, load_config, library,
+                              read_lines, ro_connect, read_custom_column, run_writer,
+                              titles as book_titles, op_set_field)
+from scourgify.overrides import overrides_dir as _overrides_dir, _delim_of   # overrides.py owns dir + formats
 
 # ---------------- defaults + overrides ----------------
-def read_csv(path: str) -> list:
-    return list(csv.DictReader(open(path))) if os.path.exists(path) else []
-def read_lines(path: str) -> list:
-    return [l.rstrip("\n") for l in open(path)] if os.path.exists(path) else []
-
 def read_tropes(path: str) -> list:
     """tropes.csv: delimiter-sniffed (','|';'), positional variant,canonical,route; unknown route (freeform note) -> 'tag'."""
     if not os.path.exists(path): return []
-    with open(path) as f: first = f.readline()
-    delim = ";" if (";" in first and first.count(";") >= first.count(",")) else ","
+    delim = _delim_of(path)                       # the one sniffer (overrides.py owns the formats)
     out = []
     with open(path) as f:
         for c in csv.reader(f, delimiter=delim):
@@ -50,11 +41,20 @@ def resolve_trope_chains(raw: dict) -> dict:
             if nxt == cur or nxt not in raw: term = nxt; break
             if nxt in seen: term = min(seen | {cur, nxt}); break
             seen.add(cur); cur = nxt
-        res[start] = (term, raw[start][1])
+        # The TERMINAL's own rule decides the route when it has one: the chain ends at `term`, so
+        # where `term` belongs is `term`'s business. Keeping the start's route meant the same
+        # final value landed in different columns depending on which spelling you started from,
+        # and only reached the right one on a second pass.
+        own = raw.get(term) or raw.get(norm(term))
+        res[start] = (term, own[1] if own else raw[start][1])
     return res
 
-def load_maps(cfg: dict) -> dict:
-    odir = os.path.join(user_dir(), cfg["overrides"].get("dir", "overrides"))
+def load_maps(cfg: dict, defaults_dir: str | None = None, overrides_dir: str | None = None) -> dict:
+    """Build the in-memory fold maps from the data layers (ao3 ← defaults ← overrides, later wins).
+    The dirs are parameters with production defaults so tests pass temp layers instead of
+    reassigning module globals."""
+    DEF = defaults_dir or DEFAULTS_DIR
+    odir = overrides_dir or _overrides_dir(cfg)   # the one dir resolution (overrides.py owns it)
     ao3 = os.path.join(DEF, "ao3")               # generated AO3 layer (build_ao3_layer.py) — loaded FIRST, everything overrides it
     def ao3_pairs(fn):                           # master,name,rel pair rows -> {name: master}; {} if the layer is absent
         return {r["name"]: r["master"] for r in read_csv(os.path.join(ao3, fn))}
@@ -128,12 +128,21 @@ def trope_route(canon: str, route: str, beh: dict) -> str:
     if key: return beh.get(key, route)
     return route
 
+def genre_allowed(na: str, m: dict) -> bool:
+    """Is this normalized value an allowlisted genre — or a subtype of one, like
+    'AU - Canon Divergence'? The ONE predicate; transform and every report share it."""
+    return na in m["gallow"] or any(na.startswith(x + " ") for x in m["gallow"] if len(x) >= 4)
+
 # ---------------- the transform (per book) ----------------
 def transform(d: dict, m: dict, beh: dict, known_chars: frozenset | set = frozenset(),
-              tagcanon: dict | None = None) -> tuple[dict, bool, bool]:
+              tagcanon: dict | None = None, log: list | None = None) -> tuple[dict, bool, bool]:
     """d: dict col_key -> list[str] for configured columns. Returns (newd, lost_fandom, lost_char).
     known_chars: normalized set of character names in the library (to rescue chars misfiled in #genres).
-    tagcanon: norm -> canonical spelling map for generic normalize-merge of tag variants."""
+    tagcanon: norm -> canonical spelling map for generic normalize-merge of tag variants.
+    log: optional list — transform APPENDS its per-value decisions (kind, where, before, after)
+    so reports can explain what changed from the engine's OWN choices instead of re-deriving
+    (and silently desyncing from) the rules. Kinds: canon/fold/split/move/drop/decompose."""
+    note = log.append if log is not None else (lambda e: None)
     F = set(d.get("fandoms", [])); C = set(d.get("characters", [])); G0 = list(d.get("genres", []))
     R = set(d.get("relationships", [])); T = list(d.get("tags", [])); st = d.get("status", [])
     had_F, had_C = bool(F), bool(C)
@@ -144,7 +153,9 @@ def transform(d: dict, m: dict, beh: dict, known_chars: frozenset | set = frozen
             keep = []
             for v in vals:
                 p = m["decompose"].get(norm(v))
-                if p: seedF.update(p["fandoms"]); seedC.update(p["characters"]); seedG.update(p["genres"]); seedT.update(p["tags"])
+                if p:
+                    seedF.update(p["fandoms"]); seedC.update(p["characters"]); seedG.update(p["genres"]); seedT.update(p["tags"])
+                    note(("decompose", "", v, ", ".join(c + "=" + "/".join(p[c]) for c in ("fandoms", "characters", "tags", "genres") if p[c])))
                 else: keep.append(v)
             return keep
         F = set(_dec(F)); G0 = _dec(G0); T = _dec(T)
@@ -152,50 +163,66 @@ def transform(d: dict, m: dict, beh: dict, known_chars: frozenset | set = frozen
     nF = set(); relocatedF = False
     for f in F:
         tgt = m["fan"].get(f, f)
-        if not tgt: continue                                  # alias -> empty: drop
+        if not tgt: note(("drop", "fandoms", f, "")); continue      # alias -> empty: drop
         if norm(tgt) in m["fan_block"]:                       # a curated non-fandom (kink/rating/status/meta) -> tag pipeline routes it
-            T.append(tgt); relocatedF = True; continue        # value preserved in tags -> not a fandom loss
+            T.append(tgt); relocatedF = True                  # value preserved in tags -> not a fandom loss
+            note(("move", "fandoms → tags", tgt, "")); continue
         nF.add(tgt)
+        if tgt != f: note(("canon", "fandoms", f, tgt))
     nF |= {m["fan"].get(f, f) for f in seedF if m["fan"].get(f, f)}   # decomposed fandoms (skip alias->empty)
     # characters: fold abbrev/case -> full (global, then fandom-scoped)
     nC = set()
     for ch in C:
         if beh["fold_characters"]:
-            ch = _lookup(m["char"], ch) or next(
+            folded = _lookup(m["char"], ch) or next(
                 (m["char_fd"][k] for fd in nF for k in ((ch, fd), (norm(ch), norm(fd))) if k in m["char_fd"]), ch)
+            if folded != ch: note(("fold", "characters", ch, folded))
+            ch = folded
         nC.add(ch)
     nC |= seedC                                                # decomposed characters
     # genres: split -> canon -> allowlist(keep) else move to tags
     nG = set(); routed = set()
-    ga = lambda na: na in m["gallow"] or any(na.startswith(x + " ") for x in m["gallow"] if len(x) >= 4)  # allowed genre?
     for g in G0:
-        for atom in (m["gsplit"].get(g, [g])):
+        atoms = m["gsplit"].get(g, [g])
+        if g in m["gsplit"]: note(("split", "genres", g, "|".join(atoms)))
+        for atom in atoms:
             a = m["gcanon"].get(atom, atom); na = norm(a)
-            if ga(na):
+            if a != atom: note(("canon", "genres", atom, a))
+            if genre_allowed(na, m):
                 nG.add(a)                                       # allowlisted genre or a subtype of one (AU - Canon Divergence)
-            elif na in m["fanvals"]: nF.add(a)                  # misfiled fandom
-            elif na in known_chars: nC.add(a)                   # misfiled character (e.g. Akeno Himejima in #genres)
-            else: routed.add(a)                                 # freeform -> through the tag pipeline below
+            elif na in m["fanvals"]: nF.add(a); note(("move", "genres → fandoms", a, ""))    # misfiled fandom
+            elif na in known_chars: nC.add(a); note(("move", "genres → characters", a, ""))  # misfiled character
+            else: routed.add(a); note(("move", "genres → tags", a, ""))   # freeform -> through the tag pipeline below
     nG |= seedG                                                 # decomposed genres
     # tags: junk drop / trope route / surface-fold / ascii / redundancy-strip
     # (routed ex-genres go through the same pipeline, so they trope-fold/dedupe like any tag)
     nT = set(seedT)                                             # decomposed tags
     homes = {norm(x) for x in nF | nC | nG | R | (set(st) if isinstance(st, list) else {st} if st else set())}
     for t in sorted(set(T) | routed):
-        if is_junk(t, m): continue
+        if is_junk(t, m): note(("drop", "tags", t, "")); continue
         tv = _lookup(m["trope"], t)
         if tv:
             canon, route = tv; route = trope_route(canon, route, beh)
-            if route == "genre": (nG if ga(norm(canon)) else nT).add(canon)   # genre only if allowlisted, else tag (keeps #genres idempotent)
-            elif route == "fandom": nF.add(m["fan"].get(canon, canon))
-            elif route == "character": nC.add(canon)
-            elif beh.get("tropes_as") == "genre" and norm(canon) not in m["rating"]: (nG if ga(norm(canon)) else nT).add(canon)
+            # Both settle HERE rather than falling through to the tag fold below, which re-added
+            # the value and left junk.txt to remove it on the NEXT run — the same end state one
+            # pass later, which is why `apply --apply` was not a fixed point.
+            #   route == "drop": read_tropes allowlists it, so it is a real route; the chain
+            #     simply never had a branch for it. It beats its own canonical — a
+            #     `variant,canonical,drop` row drops the variant instead of renaming it.
+            #   is_junk(canon): a fold target the user's own junk list deletes.
+            if route == "drop" or is_junk(canon, m): note(("drop", "tags", t, "")); continue
+            if canon != t: note(("fold", "tags", t, canon))
+            if route == "genre": (nG if genre_allowed(norm(canon), m) else nT).add(canon)   # genre only if allowlisted, else tag (keeps #genres idempotent)
+            elif route == "fandom": nF.add(m["fan"].get(canon, canon)); note(("move", "tags → fandoms", t, ""))
+            elif route == "character": nC.add(canon); note(("move", "tags → characters", t, ""))
+            elif beh.get("tropes_as") == "genre" and norm(canon) not in m["rating"]: (nG if genre_allowed(norm(canon), m) else nT).add(canon)
             else: nT.add(canon)                       # tag fold
             continue
-        if norm(t) in known_chars: nC.add(t); continue   # tag is actually a known character -> #characters
+        if norm(t) in known_chars: nC.add(t); note(("move", "tags → characters", t, "")); continue  # a known character -> #characters
         if not beh.get("keep_categories", True) and norm(t) in {"multi", "gen", "f m", "m m", "f f", "other"}: continue
         tt = ascii_fold(t) if beh["ascii_only_tags"] else t
-        if norm(tt) in homes: continue                # redundant: already in a structured column -> strip
+        if norm(tt) in homes:                         # redundant: already in a structured column
+            note(("strip", "tags", t, "")); continue  # noted, not silent: the audit reads this log
         nT.add(tt)
     if tagcanon: nT = {tagcanon.get(norm(t), t) for t in nT}      # generic normalize-merge to canonical spelling
     newd = {"fandoms": sorted(nF), "characters": sorted(nC), "genres": sorted(nG),
@@ -232,74 +259,9 @@ def read_library(cfg: dict) -> tuple:
     return cols, perbook, present, nb, allb
 
 def audit(cfg: dict, m: dict) -> None:
-    beh = cfg["behavior"]
-    cols, perbook, present, nb, allb = read_library(cfg)
-    before = {k: set() for k in cols}; after = {k: set() for k in cols}
-    lostF = lostC = tagsB = tagsA = 0
-    known_chars = {norm(v) for bb in perbook for v in perbook[bb].get("characters", [])}
-    tagcanon = build_tagcanon((t for bb in perbook for t in perbook[bb].get("tags", [])), m)
-    for b in allb:
-        d = {k: perbook[b].get(k, []) for k in cols}
-        for k in cols: before[k].update(d.get(k, []))
-        nd, lf, lc = transform(d, m, beh, known_chars, tagcanon); lostF += lf; lostC += lc
-        tagsB += len(d.get("tags", [])); tagsA += len(nd.get("tags", []))
-        for k in cols:
-            if k in nd: after[k].update(nd[k])
-    print("=" * 60); print("scourgify AUDIT (read-only, no changes)"); print("=" * 60)
-    print(f"books: {nb}   columns active: {', '.join(f'{k}->{v}' for k, v in cols.items() if present.get(k))}")
-    miss = [k for k in cols if not present.get(k)]
-    if miss: print(f"MISSING columns (run `setup`): {miss}")
-    rows = [(k, len(before[k]), len(after[k]), len(after[k]) - len(before[k])) for k in cols if present.get(k)]
-    if RICH:
-        t = Table(title="proposed changes (distinct values per column)")
-        t.add_column("column"); t.add_column("before", justify="right"); t.add_column("after", justify="right"); t.add_column("delta", justify="right")
-        for k, b, a, d in rows:
-            t.add_row(k, str(b), str(a), f"[red]{d}[/red]" if d < 0 else f"[green]+{d}[/green]" if d > 0 else "0")
-        _con.print(t)
-    else:
-        print(f"\n{'column':14}{'before':>9}{'after':>9}{'delta':>8}")
-        for k, b, a, d in rows: print(f"{k:14}{b:>9}{a:>9}{d:>8}")
-    safe_ok = lostF == lostC == 0
-    tagline = f"tag assignments: {tagsB} -> {tagsA}"
-    if RICH:
-        _con.print(f"\n[bold]SAFETY[/bold]  losing last fandom: {lostF}   losing last character: {lostC}   {tagline}   " + ("[green]✓ no data loss[/green]" if safe_ok else "[red]⚠ review losses[/red]"))
-    else:
-        print(f"\nSAFETY  books losing last fandom: {lostF}   losing last character: {lostC}   {tagline}")
-        print("OK — no data loss." if safe_ok else "WARNING: review the losses above before apply.")
-    # concrete examples — which rules actually fire on THIS library's values
-    def ex(items, n=10): return "  " + (", ".join(items[:n]) + (f"  …(+{len(items)-n} more)" if len(items) > n else "")) if items else ""
-    print("\n--- examples of what would change (sampled from your values) ---")
-    if "characters" in before:
-        fc = [f"{v}→{c}" for v in sorted(before["characters"]) if (c := _lookup(m['char'], v)) and c != v]
-        if fc: print(f"characters fold ({len(fc)}):{ex(fc)}")
-    if "fandoms" in before:
-        ff = [f"{v}→{m['fan'][v] or 'DROP'}" for v in sorted(before["fandoms"]) if v in m["fan"] and m["fan"][v] != v]
-        if ff: print(f"fandoms canon ({len(ff)}):{ex(ff)}")
-    if "genres" in before:
-        dkey = lambda v: norm(v) in m["decompose"]
-        gm = [f"{v}→{'|'.join(m['gsplit'][v]) if v in m['gsplit'] else m['gcanon'].get(v, v)}" for v in sorted(before["genres"]) if (v in m["gsplit"] or v in m["gcanon"]) and not dkey(v)]
-        def _kept(v):
-            na = norm(m["gcanon"].get(v, v))
-            return na in m["gallow"] or any(na.startswith(x + " ") for x in m["gallow"] if len(x) >= 4)
-        gch = [v for v in sorted(before["genres"]) if v not in m["gsplit"] and not _kept(v) and norm(v) not in m["fanvals"] and norm(v) in known_chars and not dkey(v)]
-        gmv = [v for v in sorted(before["genres"]) if v not in m["gsplit"] and not _kept(v) and norm(v) not in m["fanvals"] and norm(v) not in known_chars and not dkey(v)]
-        if gm: print(f"genres split/canon ({len(gm)}):{ex(gm)}")
-        if gch: print(f"genres → characters ({len(gch)}):{ex(gch)}")
-        if gmv: print(f"genres → tags (not in allowlist) ({len(gmv)}):{ex(gmv)}")
-    if m.get("decompose"):
-        de = []
-        for k in ("fandoms", "genres", "tags"):
-            for v in sorted(before.get(k, set())):
-                p = m["decompose"].get(norm(v))
-                if not p: continue
-                bits = [c + "=" + "/".join(p[c]) for c in ("fandoms", "characters", "tags", "genres") if p[c]]
-                de.append(v + " → " + ", ".join(bits))
-        if de: print(f"decompose ({len(de)}):{ex(de)}")
-    if "tags" in before:
-        drops = [v for v in sorted(before["tags"]) if is_junk(v, m)]
-        folds = [f"{v}→{tv[0]}" for v in sorted(before["tags"]) if (tv := _lookup(m['trope'], v)) and tv[0] != v]
-        if drops: print(f"tags drop ({len(drops)}):{ex(drops)}")
-        if folds: print(f"tags fold/route ({len(folds)}):{ex(folds)}")
+    """Read-only dry-run report of every pass. Plans once, then reports from the plan —
+    the examples come from transform's OWN decision log, never a re-derivation of the rules."""
+    plan(cfg, m).audit_report()
 
 # ---------------- APPLY (standalone: compute via sqlite, write via calibre-debug helper) ----------------
 DETAIL_BOOKS = 10           # per-book diff lines shown in the apply preview before deferring to `audit`
@@ -323,68 +285,183 @@ def data_loss_guard(lost_fandom: int, lost_char: int, force: bool) -> None:
                          "character. Check your fandoms.csv aliases / decompose overrides for a rule that "
                          "empties a book, or re-run with --force if the deletion is intentional.")
 
-def apply_changes(cfg: dict, m: dict, do_write: bool, force: bool = False,
-                  cli_hint: bool = True, detail: bool = True, step: bool = False) -> int:
-    """-> number of distinct books that would change (the wizard uses it to auto-skip a clean library).
-    detail=True prints per-book -removed/+added values for the first DETAIL_BOOKS changed books.
-    step=True walks the per-book UNIQUE edits through ui.checklist() (rich+interactive only) and
-    writes only the accepted subset; rejected edits are logged for `scourgify overrides`."""
-    beh = cfg["behavior"]
-    cols, perbook, present, nb, allb = read_library(cfg)
-    known_chars = {norm(v) for bb in perbook for v in perbook[bb].get("characters", [])}
-    tagcanon = build_tagcanon((t for bb in perbook for t in perbook[bb].get("tags", [])), m)
-    changes = collections.defaultdict(dict); diffs = collections.defaultdict(dict)
-    lostF = lostC = tagsB = tagsA = 0
-    for b in allb:
-        d = {k: perbook[b].get(k, []) for k in cols}
-        nd, lf, lc = transform(d, m, beh, known_chars, tagcanon); lostF += lf; lostC += lc
-        tagsB += len(d.get("tags", [])); tagsA += len(nd.get("tags", []))
-        booknorms = None
-        for k, lab in cols.items():
-            if k in nd and tuple(sorted(nd[k])) != tuple(sorted(d.get(k, []))):
-                changes[lab][b] = sorted(nd[k])
-                old, new = set(d.get(k, [])), set(nd[k])
-                if booknorms is None:   # after-state of every column, for "where did it go" annotations
-                    booknorms = {l2: {norm(x) for x in nd.get(k2, d.get(k2, []))} for k2, l2 in cols.items()}
-                gone = [(v, next((l2 for l2, ns in booknorms.items() if l2 != lab and norm(v) in ns), None))
-                        for v in sorted(old - new)]
-                diffs[b][lab] = (gone, sorted(new - old))
-    print("APPLY" if do_write else "PRE-APPLY (no write)")
-    for lab, ch in changes.items(): print(f"  {lab:14} books changed: {len(ch)}")
-    if detail and diffs:
-        _preview_report(m, diffs)
-    print(f"  SAFETY losing last fandom: {lostF} | character: {lostC} | tag assignments: {tagsB} -> {tagsA}")
-    data_loss_guard(lostF, lostC, force)
-    tag_loss_guard(tagsB, tagsA, force)
-    if step and diffs:
+class Plan:
+    """ONE full-library transform pass, computed once — the deep module behind wrangle's whole
+    write path. The audit report, the apply preview, the SAFETY guards, the 1-by-1 step review,
+    and the write itself all read this object; nothing recomputes. Drive it as:
+        p = plan(cfg, maps); p.preview(); p.guard(); [p.step()]; p.write()
+    """
+
+    def __init__(self, cfg: dict, m: dict):
+        self.cfg, self.m, self.beh = cfg, m, cfg["behavior"]
+        self.cols, self.perbook, self.present, self.nb, allb = read_library(cfg)
+        self.known_chars = {norm(v) for bb in self.perbook for v in self.perbook[bb].get("characters", [])}
+        self.tagcanon = build_tagcanon((t for bb in self.perbook for t in self.perbook[bb].get("tags", [])), self.m)
+        self.changes = collections.defaultdict(dict)   # {label: {book: new sorted values}} — what write() sends
+        self.diffs = collections.defaultdict(dict)     # {book: {label: (gone, added)}} — what previews show
+        self.before = {k: set() for k in self.cols}; self.after = {k: set() for k in self.cols}
+        self.decisions = []                            # transform's own (kind, where, before, after) log
+        self.lost = {}       # book -> (lost_fandom, lost_char), only for books with a loss
+        self.tagn = {}       # book -> (tags_before, tags_after) — per-book so restrict() can re-derive
+        for b in allb:
+            d = {k: self.perbook[b].get(k, []) for k in self.cols}
+            for k in self.cols: self.before[k].update(d.get(k, []))
+            nd, lf, lc = transform(d, self.m, self.beh, self.known_chars, self.tagcanon, log=self.decisions)
+            if lf or lc: self.lost[b] = (lf, lc)
+            self.tagn[b] = (len(d.get("tags", [])), len(nd.get("tags", [])))
+            booknorms = None
+            for k, lab in self.cols.items():
+                if k in nd: self.after[k].update(nd[k])
+                if k in nd and tuple(sorted(nd[k])) != tuple(sorted(d.get(k, []))):
+                    self.changes[lab][b] = sorted(nd[k])
+                    old, new = set(d.get(k, [])), set(nd[k])
+                    if booknorms is None:   # after-state of every column, for "where did it go" annotations
+                        booknorms = {l2: {norm(x) for x in nd.get(k2, d.get(k2, []))} for k2, l2 in self.cols.items()}
+                    gone = [(v, next((l2 for l2, ns in booknorms.items() if l2 != lab and norm(v) in ns), None))
+                            for v in sorted(old - new)]
+                    self.diffs[b][lab] = (gone, sorted(new - old))
+
+    @property
+    def n_books(self) -> int:
+        """Distinct books that would change (the wizard auto-skips a clean library on 0)."""
+        return len({b for ch in self.changes.values() for b in ch})
+
+    # The SAFETY aggregates the guards and reports read. Derived, not accumulated, so narrowing
+    # the plan (restrict) narrows these too instead of judging a scoped write on library totals.
+    @property
+    def lostF(self) -> int: return sum(1 for lf, _ in self.lost.values() if lf)
+
+    @property
+    def lostC(self) -> int: return sum(1 for _, lc in self.lost.values() if lc)
+
+    @property
+    def tagsB(self) -> int: return sum(b for b, _ in self.tagn.values())
+
+    @property
+    def tagsA(self) -> int: return sum(a for _, a in self.tagn.values())
+
+    def restrict(self, ids) -> "Plan":
+        """Narrow this plan to `ids` and return self. The full-library compute STAYS — transform
+        needs global context (tagcanon majority spelling, known_chars), so scoping the read would
+        silently change the answer for the selected books. Only the write set narrows: changes,
+        diffs, and the per-book SAFETY counters, so preview/guard/step/write all see the scope and
+        the guards judge these books rather than the library. before/after/decisions are left whole
+        — they feed the library-wide audit report, which is not scopeable (see main())."""
+        keep = set(ids)
+        for lab in list(self.changes):
+            kept = {b: v for b, v in self.changes[lab].items() if b in keep}
+            if kept: self.changes[lab] = kept
+            else: del self.changes[lab]
+        self.diffs = collections.defaultdict(dict, {b: d for b, d in self.diffs.items() if b in keep})
+        self.lost = {b: v for b, v in self.lost.items() if b in keep}
+        self.tagn = {b: v for b, v in self.tagn.items() if b in keep}
+        return self
+
+    def preview(self, detail: bool = True, write: bool = False) -> None:
+        """Per-column changed counts (+ the mass/unique detail with detail=True) + the SAFETY line."""
+        print("APPLY" if write else "PRE-APPLY (no write)")
+        for lab, ch in self.changes.items(): print(f"  {lab:14} books changed: {len(ch)}")
+        if detail and self.diffs:
+            _preview_report(self.m, self.diffs)
+        print(f"  SAFETY losing last fandom: {self.lostF} | character: {self.lostC} | "
+              f"tag assignments: {self.tagsB} -> {self.tagsA}")
+
+    def guard(self, force: bool = False) -> None:
+        """The semantic SAFETY guards (SystemExit on a data-loss shaped change-set)."""
+        data_loss_guard(self.lostF, self.lostC, force)
+        tag_loss_guard(self.tagsB, self.tagsA, force)
+
+    def step(self) -> None:
+        """1-by-1 review of the per-book UNIQUE edits (ui.checklist); rejected edits are removed
+        from this plan's changes and logged for `scourgify overrides`."""
         from scourgify import ui
         if not ui.interactive():
             raise SystemExit("--step needs an interactive terminal (omit it for a bulk apply).")
-        _, unique = _classify_edits(m, diffs)
-        if unique:
-            from scourgify.overrides import _step_walk   # lazy: breaks the wrangle<->overrides import cycle
-            rejects = _step_walk(m, beh, cols, perbook, changes, unique, known_chars, tagcanon)
-            if rejects:
-                from scourgify.common import log_rejects, REJECTS
-                log_rejects(rejects)
-                nauto = sum(1 for r in rejects if r["class"] == "auto")
-                print(f"  logged {len(rejects)} reject(s) -> {os.path.basename(REJECTS)}"
-                      + (f"  ({nauto} → run `scourgify overrides` to stop them recurring)" if nauto else ""))
-    if do_write:
-        # pass force through: wrangle's own data_loss/tag_loss guards already ran, so a deliberately
+        _, unique = _classify_edits(self.m, self.diffs)
+        if not unique: return
+        from scourgify.overrides import _step_walk   # lazy: breaks the wrangle<->overrides import cycle
+        rejects = _step_walk(self.m, self.beh, self.cols, self.perbook, self.changes, unique,
+                             self.known_chars, self.tagcanon)
+        if rejects:
+            from scourgify.common import log_rejects, rejects_path
+            log_rejects(rejects)
+            nauto = sum(1 for r in rejects if r["class"] == "auto")
+            print(f"  logged {len(rejects)} reject(s) -> {os.path.basename(rejects_path())}"
+                  + (f"  ({nauto} → run `scourgify overrides` to stop them recurring)" if nauto else ""))
+
+    def write(self, force: bool = False) -> None:
+        # pass force through: the plan's own data_loss/tag_loss guards already ran, so a deliberately
         # --forced deletion here must not be second-guessed by run_writer's coarse last-line wipe guard.
-        run_writer([op_set_field(lab, ch) for lab, ch in changes.items()], force=force)
-    elif cli_hint:
-        print("Re-run: scourgify apply --apply   (Calibre closed; writes shell out to calibre-debug)")
-    return len({b for ch in changes.values() for b in ch})
+        run_writer([op_set_field(lab, ch) for lab, ch in self.changes.items()], force=force)
+
+    def audit_report(self) -> None:
+        """The full `scourgify audit` output: distinct-value deltas, SAFETY, and per-rule examples
+        read straight from transform's decision log."""
+        print("=" * 60); print("scourgify AUDIT (read-only, no changes)"); print("=" * 60)
+        print(f"books: {self.nb}   columns active: "
+              f"{', '.join(f'{k}->{v}' for k, v in self.cols.items() if self.present.get(k))}")
+        miss = [k for k in self.cols if not self.present.get(k)]
+        if miss: print(f"MISSING columns (run `setup`): {miss}")
+        rows = []
+        for k in self.cols:
+            if not self.present.get(k): continue
+            b, a = len(self.before[k]), len(self.after[k]); delta = a - b
+            rows.append([k, str(b), str(a),
+                         (str(delta), "red") if delta < 0 else (f"+{delta}", "green") if delta > 0 else "0"])
+        report.table("proposed changes (distinct values per column)",
+                     ["column", "before", "after", "delta"], rows, right=(1, 2, 3))
+        safe_ok = self.lostF == self.lostC == 0
+        report.say(f"\nSAFETY  losing last fandom: {self.lostF}   losing last character: {self.lostC}   "
+                   f"tag assignments: {self.tagsB} -> {self.tagsA}   "
+                   + ("✓ no data loss" if safe_ok else "⚠ review the losses above before apply"),
+                   "green" if safe_ok else "red")
+        # concrete examples — which rules actually fired on THIS library's values, from the
+        # transform's own decision log (one mechanism; a rule change can't desync this report)
+        def ex(items, n=10):
+            return "  " + (", ".join(items[:n]) + (f"  …(+{len(items) - n} more)" if len(items) > n else "")) if items else ""
+        def show(label, items):
+            items = sorted(items)
+            if items: print(f"{label} ({len(items)}):{ex(items)}")
+        d = set(self.decisions)
+        print("\n--- examples of what would change (from the engine's own decisions) ---")
+        show("characters fold", [f"{b}→{a}" for k, w, b, a in d if (k, w) == ("fold", "characters")])
+        show("fandoms canon", [f"{b}→{a}" for k, w, b, a in d if (k, w) == ("canon", "fandoms")]
+             + [f"{b}→DROP" for k, w, b, a in d if (k, w) == ("drop", "fandoms")])
+        show("fandoms → tags (blocklisted non-fandoms)", [b for k, w, b, a in d if (k, w) == ("move", "fandoms → tags")])
+        show("genres split/canon", [f"{b}→{a}" for k, w, b, a in d if k in ("split", "canon") and w == "genres"])
+        show("genres → fandoms", [b for k, w, b, a in d if (k, w) == ("move", "genres → fandoms")])
+        show("genres → characters", [b for k, w, b, a in d if (k, w) == ("move", "genres → characters")])
+        show("genres → tags (not in allowlist)", [b for k, w, b, a in d if (k, w) == ("move", "genres → tags")])
+        show("decompose", [f"{b} → {a}" for k, w, b, a in d if k == "decompose"])
+        show("tags drop", [b for k, w, b, a in d if (k, w) == ("drop", "tags")])
+        show("tags strip (already in a structured column)", [b for k, w, b, a in d if (k, w) == ("strip", "tags")])
+        show("tags fold/route", [f"{b}→{a}" for k, w, b, a in d if (k, w) == ("fold", "tags")])
+        show("tags → characters", [b for k, w, b, a in d if (k, w) == ("move", "tags → characters")])
+        show("tags → fandoms", [b for k, w, b, a in d if (k, w) == ("move", "tags → fandoms")])
+
+
+def plan(cfg: dict, m: dict) -> Plan:
+    """Compute the full-library Plan once; report/step/write all read it (see Plan)."""
+    return Plan(cfg, m)
 
 MASS_MIN = 3             # a change on this many books is "mass" — aggregated, not listed per book
 
-def _colmap(m: dict, lab: str, v: str) -> str | None:
-    """Where would this column's engine fold v? (for pairing a removal with its rename target)"""
-    if lab == "tags": return (_lookup(m["trope"], v) or (None,))[0]
+def _char_fd(m: dict, v: str, cands: dict) -> str | None:
+    """Fandom-scoped character fold. The diff doesn't carry the book's fandoms, so match on the variant
+    alone and prefer a target the book actually gained (ambiguous only if two fandoms fold v differently)."""
+    hits = [c for (vk, _), c in m["char_fd"].items() if vk == v or vk == norm(v)]
+    return next((c for c in hits if norm(c) in cands), hits[0] if hits else None)
+
+
+def _colmap(m: dict, lab: str, v: str, cands: dict | None = None) -> str | None:
+    """Where would this column's engine fold v? (for pairing a removal with its rename target)
+    Mirrors transform's order — junk is dropped BEFORE the trope lookup, characters fall back to
+    the fandom-scoped map — so the checklist labels an edit the same way the engine performed it."""
+    if lab == "tags":
+        if is_junk(v, m): return None
+        return (_lookup(m["trope"], v) or (None,))[0]
     if "fandom" in lab: return m["fan"].get(v)
-    if "character" in lab: return _lookup(m["char"], v)
+    if "character" in lab: return _lookup(m["char"], v) or _char_fd(m, v, cands or {})
     if "genre" in lab: return m["gcanon"].get(v)
     return None
 
@@ -402,7 +479,7 @@ def _classify_edits(m: dict, diffs: dict) -> tuple:
             for v, dest in rm:
                 if dest:
                     edits.append(("move", f"{lab} → {dest}", v, "")); continue
-                w = _colmap(m, lab, v) or bynorm.get(norm(v))   # engine fold, else a same-norm respelling
+                w = _colmap(m, lab, v, bynorm) or bynorm.get(norm(v))   # engine fold, else a same-norm respelling
                 if w:
                     edits.append(("rename", lab, v, w)); added.discard(w)
                 else:
@@ -420,7 +497,7 @@ def _classify_edits(m: dict, diffs: dict) -> tuple:
 
 def _preview_report(m: dict, diffs: dict, top: int = 15, books: int = DETAIL_BOOKS) -> None:
     """The human-readable change report: aggregated mass folds + per-book unique changes.
-    rich tables/tree when available; aligned plain text otherwise."""
+    Rendering (rich-or-plain) is report.py's problem, not this module's."""
     mass, unique = _classify_edits(m, diffs)
     def fmt(kind, where, before, after):
         return {"rename": (where, f"{before} → {after}"), "move": (where, before),
@@ -428,8 +505,7 @@ def _preview_report(m: dict, diffs: dict, top: int = 15, books: int = DETAIL_BOO
     top_mass = sorted(mass.items(), key=lambda kv: -kv[1])[:top]
     rest = len(mass) - len(top_mass)
     ids = sorted(unique)[-books:]                               # highest ids = newest books
-    con = ro_connect()
-    titles = dict(con.execute(f"SELECT id, title FROM books WHERE id IN ({','.join('?' * len(ids))})", ids)) if ids else {}
+    titles = book_titles(ro_connect(), ids) if ids else {}
     def grouped(edits):
         """[(kind, where, joined-values)] — one line per relation, values joined."""
         g = {}
@@ -439,146 +515,18 @@ def _preview_report(m: dict, diffs: dict, top: int = 15, books: int = DETAIL_BOO
         label = {"rename": "", "move": "", "drop": "dropped: ", "add": "added: "}
         return [(where if kind in ("rename", "move") else f"{label[kind]}{where}", " · ".join(vals))
                 for (kind, where), vals in g.items()]
-    if RICH:
-        from rich.tree import Tree
-        t = Table(title=f"mass folds — same change on {MASS_MIN}+ books", title_justify="left")
-        t.add_column("books", justify="right", style="cyan"); t.add_column("where", style="dim"); t.add_column("change")
-        for (kind, where, before, after), n in top_mass:
-            w, c = fmt(kind, where, before, after); t.add_row(f"{n:,}", w, c)
-        if rest > 0: t.add_row("…", "", f"+{rest} more mass folds (scourgify audit shows every value)")
-        _con.print(t)
-        if unique:
-            tree = Tree(f"[bold]unique changes[/] — newest {len(ids)} of {len(unique):,} books")
-            for b in reversed(ids):
-                node = tree.add(f"[bold]#{b}[/]  {str(titles.get(b, ''))[:64]}")
-                for w, vals in grouped(unique[b]):
-                    node.add(f"[dim]{w:22}[/] {vals}")
-            _con.print(tree)
-    else:
-        print(f"  mass folds (same change on {MASS_MIN}+ books):")
-        for (kind, where, before, after), n in top_mass:
-            w, c = fmt(kind, where, before, after); print(f"  {n:6,}x  {w:22} {c}")
-        if rest > 0: print(f"          … +{rest} more mass folds")
-        if unique:
-            print(f"  unique changes (newest {len(ids)} of {len(unique):,} books):")
-            for b in reversed(ids):
-                print(f"  #{b}  {str(titles.get(b, ''))[:64]}")
-                for w, vals in grouped(unique[b]):
-                    print(f"      {w:22} {vals}")
+    rows = []
+    for (kind, where, before, after), n in top_mass:
+        w, c = fmt(kind, where, before, after)
+        rows.append([(f"{n:,}", "cyan"), (w, "dim"), c])
+    if rest > 0: rows.append(["…", "", f"+{rest} more mass folds (scourgify audit shows every value)"])
+    report.table(f"mass folds — same change on {MASS_MIN}+ books", ["books", "where", "change"], rows, right=(0,))
+    if unique:
+        nodes = [(f"#{b}  {str(titles.get(b, ''))[:64]}",
+                  [(f"{w:22} {vals}") for w, vals in grouped(unique[b])])
+                 for b in reversed(ids)]
+        report.tree(f"unique changes — newest {len(ids)} of {len(unique):,} books", nodes)
 
-
-def write_config(colmap: dict, beh: dict | None = None) -> None:
-    b = beh or {}                                     # preserve existing toggles on re-run; defaults on first run
-    bo = lambda k, d: "true" if b.get(k, d) else "false"
-    sv = lambda k, d: b.get(k, d)
-    L = ["# scourgify configuration (generated by `setup`; edit anytime).", "", "[columns]",
-         '# FanFicFare field -> Calibre column LABEL. "" disables that field\'s passes.']
-    L += [f'{k:<13} = "{colmap.get(k, "")}"' for k in ("fandoms", "characters", "relationships", "genres", "status", "tags")]
-    L += ["", "# behavior toggles — opinionated defaults; flip to taste", "[behavior]",
-          f"fold_characters  = {bo('fold_characters', True)}     # abbreviation -> full-name defaults (Harry P. -> Harry Potter)",
-          f"ascii_only_tags  = {bo('ascii_only_tags', True)}     # transliterate non-ASCII tags to plain ASCII",
-          f'au_as            = "{sv("au_as", "genre")}"  # where Alternate Universe lands: "genre" or "tag"',
-          f'crossover_as     = "{sv("crossover_as", "genre")}"',
-          f'reincarnation_as = "{sv("reincarnation_as", "genre")}"',
-          f'time_travel_as   = "{sv("time_travel_as", "genre")}"',
-          f"fold_ratings     = {bo('fold_ratings', False)}    # Erotica->Smut, Adult->Mature",
-          f"keep_categories  = {bo('keep_categories', True)}     # keep Multi/Gen/F-M tags (false drops them)",
-          f'tropes_as        = "{sv("tropes_as", "tag")}"    # fold recognized tropes (SI/OC, Fix-It…) into #genres? "genre" or "tag"',
-          "", "[overrides]",
-          "# folder of user files (same formats as defaults/) that extend & win over the defaults",
-          'dir = "overrides"', ""]
-    os.makedirs(user_dir(), exist_ok=True)
-    open(os.path.join(user_dir(), "config.toml"), "w").write("\n".join(L))
-
-OK, WARN, BAD = "✓", "⚠", "✗"     # status glyphs (plain; no color dependency)
-def _interactive() -> bool:
-    """setup's interactivity: the shared common.interactive() policy, plus honoring `--yes`."""
-    return interactive() and "--yes" not in sys.argv and "-y" not in sys.argv
-def _ask(prompt: str, default: bool = True) -> bool:
-    """y/n prompt; off a TTY (pipe / CI / --yes) take the recommended default instead of blocking."""
-    return confirm(prompt, default) if _interactive() else default
-
-def setup(cfg: dict) -> None:
-    import subprocess, shutil, json as _json
-    print("=" * 64); print("  scourgify — setup & health check"); print("=" * 64)
-    if not _interactive(): print("(non-interactive — taking recommended defaults; run in a terminal to choose per item)")
-    ops = []                                          # column/pref writes queued here, applied via calibre-debug at the end
-    con = ro_connect()
-
-    # [1] library
-    print("\n[1] Library");  print(f"  {OK} metadata.db  ({library()})")
-
-    # [2] FanFicFare: installed? configured? known gotchas?
-    print("\n[2] FanFicFare")
-    try:
-        out = subprocess.run(["calibre-customize", "-l"], capture_output=True, text=True, timeout=30).stdout if shutil.which("calibre-customize") else ""
-        installed = ("fanficfare" in out.lower()) if out else None
-    except Exception: installed = None
-    print(f"  {OK} plugin installed" if installed else
-          f"  {BAD} plugin NOT installed (Calibre → Preferences → Plugins → Get new plugins → FanFicFare)" if installed is False else
-          f"  {WARN} couldn't query plugins (continuing)")
-    row = con.execute("SELECT val FROM preferences WHERE key='namespaced:FanFicFarePlugin:settings'").fetchone()
-    settings = _json.loads(row[0]) if row else {}
-    fff = settings.get("custom_cols") or {}
-    if not settings:
-        print(f"  {WARN} no FanFicFare config for this library yet — configure FFF + import a story, then re-run setup")
-    else:
-        print(f"  {OK} configured — Calibre column ← FFF field:")
-        for col, fld in sorted(fff.items()): print(f"        {col:16} ← {fld}")
-        ini = settings.get("personal.ini", ""); no = settings.get("custom_cols_newonly", {}) or {}
-        issues = []
-        if fff.get("#fandoms") == "series": issues.append("#fandoms ← series  (fandom-vs-series gotcha: fandoms land in the numbered Series field)")
-        if any(l.strip().lower() == "include_in_series:category" for l in ini.splitlines()): issues.append("personal.ini: include_in_series:category  (stuffs the fandom into Series)")
-        if no.get("#genres") is not True: issues.append("#genres not newonly-protected  (a metadata re-fetch would re-pollute your cleaned genres)")
-        for i in issues: print(f"  {WARN} {i}")
-        if not issues: print(f"  {OK} config looks correct (no known gotchas)")
-        elif _ask("  → Fix these now (map #fandoms←category, drop include_in_series, protect #genres)?"):
-            import copy; s = copy.deepcopy(settings)
-            s["personal.ini"] = "\n".join(l for l in s.get("personal.ini", "").splitlines() if l.strip().lower() != "include_in_series:category")
-            if fff.get("#fandoms") == "series": s.setdefault("custom_cols", {})["#fandoms"] = "category"
-            s.setdefault("custom_cols_newonly", {})["#genres"] = True
-            ops.append(op_set_pref("namespaced:FanFicFarePlugin:settings", s)); print(f"  {OK} queued FanFicFare config fix")
-
-    # [3] columns: the engine's 5 + the datetime markers staleness/classify need
-    print("\n[3] Columns")
-    have = {"#" + l for (l,) in con.execute("SELECT label FROM custom_columns")} | {"tags"}
-    REC = [("#fandoms", "Fandoms", "text", True), ("#characters", "Characters", "text", True),
-           ("#relationships", "Relationships", "text", True), ("#genres", "Genres", "text", True),
-           ("#status", "Status", "text", False), ("#updated", "Updated", "datetime", False),
-           ("#wrangled", "Wrangled", "datetime", False)]
-    for label, name, dt, mult in REC:
-        if label in have: print(f"  {OK} {label}"); continue
-        why = "  (staleness + classify --incremental need this)" if label in ("#updated", "#wrangled") else ""
-        if _ask(f"  {BAD} {label} missing — create '{name}' ({dt}{', multiple' if mult else ''}){why}?"):
-            ops.append(op_create_column(label.lstrip("#"), name, dt, mult)); have.add(label); print(f"      queued {label}")
-        else: print(f"      skipped {label}")
-
-    # [4] config.toml column map (FFF field -> our key, else adopt existing labels)
-    print("\n[4] config.toml")
-    FFF2KEY = {"category": "fandoms", "characters": "characters", "ships": "relationships", "genre": "genres", "status": "status"}
-    colmap = {"tags": "tags"}
-    for col, fld in fff.items():
-        k = FFF2KEY.get(fld)
-        if k and col in have: colmap[k] = col
-    for label, key in (("#fandoms", "fandoms"), ("#characters", "characters"), ("#relationships", "relationships"), ("#genres", "genres"), ("#status", "status")):
-        if not colmap.get(key) and label in have: colmap[key] = label
-    write_config(colmap, cfg["behavior"])
-    print(f"  {OK} wrote config.toml (behavior toggles preserved):")
-    for k in ("fandoms", "characters", "relationships", "genres", "status", "tags"):
-        lab = colmap.get(k, ""); print(f"        {k:13} → {lab or '(unset — pass not run for this column)'}")
-
-    # [5] overrides
-    odir = os.path.join(user_dir(), cfg["overrides"].get("dir", "overrides"))
-    print("\n[5] Overrides");  print(f"  {OK} {odir}" if os.path.isdir(odir) else f"  {WARN} no overrides/ dir (optional — add your own maps here; they win over defaults/)")
-
-    if ops:
-        print(f"\n[6] Applying {len(ops)} change(s) to Calibre (via calibre-debug)")
-        run_writer(ops)
-    print("\n" + "-" * 64)
-    print("Setup complete. Next:")
-    print("  scourgify audit          # read-only dry-run of all passes")
-    print("  scourgify apply --apply  # write changes (Calibre closed; backs up first)")
-    print("  scourgify classify --incremental # content-tag new/updated books (cheap)")
 
 # ---------------- main ----------------
 def main() -> None:
@@ -590,10 +538,16 @@ def main() -> None:
                    help="setup: interactive health check + configure | audit: read-only dry-run | apply: write changes | (none): wizard")
     p.add_argument("--apply", action="store_true", help="with `apply`: actually write (Calibre closed)")
     p.add_argument("--step", action="store_true", help="with `apply`: review each book's unique changes 1-by-1 (interactive)")
+    p.add_argument("--books", default=None, metavar="SPEC",
+                   help="with `apply`: only these books — '1,2,3', '10-20', '@ids.txt' (audit is always library-wide)")
     p.add_argument("--force", action="store_true", help="override the tag mass-deletion guardrail")
     p.add_argument("--yes", "-y", action="store_true", help="non-interactive: take the recommended default for every prompt")
     a = p.parse_args()
+    if a.books is not None and a.command != "apply":
+        raise SystemExit("--books applies to `apply` only (audit is always library-wide: its report "
+                         "reads the transform's decision log, which carries no book ids).")
     if a.command is None:
+        from scourgify.common import interactive
         if interactive():
             from scourgify import wizard   # lazy: keeps rich fully optional for the plain subcommands
             wizard.run()
@@ -601,10 +555,28 @@ def main() -> None:
             p.print_help()
         sys.exit(0)
     library()                      # fail fast with a clear message before doing any work
+    if a.command == "setup":
+        from scourgify import setup as setup_mod   # setup lives in its own module (no normalization concepts)
+        setup_mod.setup(load_config(), yes=a.yes)
+        return
     cfg = load_config(); maps = load_maps(cfg)
-    if a.command == "audit": audit(cfg, maps)
-    elif a.command == "apply": apply_changes(cfg, maps, a.apply or a.step, a.force, step=a.step)
-    elif a.command == "setup": setup(cfg)
+    if a.command == "audit":
+        audit(cfg, maps)
+    elif a.command == "apply":
+        do_write = a.apply or a.step
+        p = plan(cfg, maps)                        # ONE compute: preview, guards, step, and write all read it
+        if a.books is not None:
+            from scourgify import select
+            want = select.parse_books(a.books)
+            p.restrict(want)                       # narrows the WRITE set; the read stays library-wide
+            print(f"  scope: {len(want)} book(s) by id -> {p.n_books} with changes")
+            absent = sum(1 for b in want if b not in p.tagn)
+            if absent: print(f"  note: {absent} requested id(s) not in the library")
+        p.preview(write=do_write)
+        p.guard(a.force)
+        if a.step: p.step()
+        if do_write: p.write(a.force)
+        else: print("Re-run: scourgify apply --apply   (Calibre closed; writes shell out to calibre-debug)")
 
 
 if __name__ == "__main__":

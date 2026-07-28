@@ -23,24 +23,23 @@ def test_is_calibre_gui_ignores_cli_tools_and_our_own_helpers():
 
 
 def test_backup_path_never_collides_within_a_second():
-    common.BACKUPS = tempfile.mkdtemp()
+    d = tempfile.mkdtemp()                   # passed as a parameter — module globals stay untouched
     seen = set()
     for _ in range(6):                       # all in the same wall-clock second
-        p = common._backup_path()
+        p = common._backup_path(d)
         open(p, "w").close()                 # occupy it, as a real snapshot would
         assert p not in seen, "backup path collided — a snapshot would have been overwritten"
         seen.add(p)
 
 
 def test_prune_keeps_only_the_newest():
-    common.BACKUPS = tempfile.mkdtemp()
-    common.BACKUP_KEEP = 3
+    d = tempfile.mkdtemp()
     for name in ("ff_20260101T000001.db", "ff_20260101T000002.db",
                  "ff_20260101T000003.db", "ff_20260101T000004.db", "ff_20260101T000005.db"):
-        open(os.path.join(common.BACKUPS, name), "w").close()
-    common._prune_backups()
+        open(os.path.join(d, name), "w").close()
+    common._prune_backups(d, keep=3)
     left = sorted(os.path.basename(p) for p in
-                  __import__("glob").glob(os.path.join(common.BACKUPS, "ff_*.db")))
+                  __import__("glob").glob(os.path.join(d, "ff_*.db")))
     assert left == ["ff_20260101T000003.db", "ff_20260101T000004.db", "ff_20260101T000005.db"], left
 
 

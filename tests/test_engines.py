@@ -92,6 +92,20 @@ def test_engine_tables_agree():
     assert set(engines.PRICING) == set(engines.ENGINES)                  # ... and a price row
 
 
+def test_traits_free_workers_judge():
+    """Engine traits are data, not name string-tests: free-ness derives from PRICING (one source
+    of truth), parallelism caps workers, judge-capability drives promote's default/warning."""
+    assert engines.is_free("apple") is True
+    assert engines.is_free("claude") is False
+    assert engines.is_free("nonexistent") is False        # unknown engine: assume it costs
+    assert engines.max_workers("apple", 8) == 1           # one subprocess pipe, not thread-safe
+    assert engines.max_workers("claude", 8) == 8
+    assert engines.trait("apple", "judge") is False
+    assert engines.trait("claude", "judge") is True
+    for e in engines.ENGINES:                             # every engine has both hint halves
+        assert engines.trait(e, "hint") and engines.trait(e, "unusable")
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

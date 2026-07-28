@@ -10,7 +10,8 @@ from scourgify.common import norm, ascii_fold, load_config
 from scourgify.wrangle import (transform, resolve_trope_chains, build_tagcanon, is_junk,
                                tag_loss_guard, data_loss_guard,
                                TAG_SHRINK_FLOOR, TAG_SHRINK_FRACTION)
-from scourgify.classify import parse_resp, sparkline, load_vocab
+from scourgify.classify import parse_resp, load_vocab
+from scourgify.report import sparkline
 VOCAB = load_vocab()
 from scourgify.staleness import derive
 
@@ -38,6 +39,23 @@ def test_resolve_trope_chains():
     assert r["A"] == ("C", "tag") and r["B"] == ("C", "tag")          # chain follows to terminal
     r = resolve_trope_chains({"A": ("B", "tag"), "B": ("A", "genre")})
     assert r["A"][0] == "A" and r["B"][0] == "A"                       # cycle breaks deterministically (min)
+
+
+def test_resolve_trope_chains_takes_the_terminals_route():
+    """A chain took the terminal's NAME but kept the START's route, so the same final value
+    landed in different columns depending on which spelling you started from — and needed a
+    second pass to get where it belonged. Observed live: 'House Targaryen (A Song of Ice and
+    Fire)' folded to tag 'House Targaryen' on pass 1, then moved to #fandoms on pass 2."""
+    r = resolve_trope_chains({"htaso": ("House Targaryen", "tag"),
+                              "house targaryen": ("House Targaryen", "fandom")})
+    assert r["htaso"] == ("House Targaryen", "fandom")                 # terminal's route wins
+    assert r["house targaryen"] == ("House Targaryen", "fandom")
+
+
+def test_resolve_trope_chains_keeps_its_own_route_when_the_terminal_has_no_rule():
+    """Only a terminal that has its OWN rule can override; otherwise the start's route stands."""
+    r = resolve_trope_chains({"a": ("Nowhere", "drop")})
+    assert r["a"] == ("Nowhere", "drop")
 
 def test_transform_fandom_alias():
     nd, lf, lc = transform({"fandoms": ["HP"]}, maps(fan={"HP": "Harry Potter"}), BEH)
@@ -172,19 +190,10 @@ def test_vocab_merges_ao3_seed_without_dups():
     assert len(VOCAB) > 200                                         # the seed meaningfully broadens the tiny core
 
 def test_usable_engines_reflects_env_keys():
-    from scourgify.classify import usable_engines, ENGINE_ENV
-    saved = {k: os.environ.get(k) for keys in ENGINE_ENV.values() for k in keys}
-    try:
-        for keys in ENGINE_ENV.values():
-            for k in keys: os.environ.pop(k, None)
-        assert "claude" not in usable_engines()                        # no key -> engine not offered
-        os.environ["ANTHROPIC_API_KEY"] = "sk-test"
-        assert "claude" in usable_engines()                            # key present -> offered
-    finally:
-        for keys in ENGINE_ENV.values():
-            for k in keys: os.environ.pop(k, None)
-        for k, v in saved.items():
-            if v is not None: os.environ[k] = v
+    from scourgify.engines import usable_engines
+    assert "claude" not in usable_engines(env={})                          # no key -> engine not offered
+    assert "claude" in usable_engines(env={"ANTHROPIC_API_KEY": "sk-t"})   # key present -> offered
+    assert "gemini" in usable_engines(env={"GOOGLE_API_KEY": "g-t"})       # either gemini key works
 
 def test_sparkline():
     assert sparkline([]) == ""
@@ -218,14 +227,14 @@ def test_vocab_overrides_merge():
         with open(os.path.join(td, "overrides", "classify_vocab.txt"), "w") as f:
             f.write("# my terms\nSentient Toaster Romance\n-Time Travel\n")
         old = os.environ.get("SCOURGIFY_HOME")
-        os.environ["SCOURGIFY_HOME"] = td; classify._VOCAB = None      # overrides resolve under user_dir()
+        os.environ["SCOURGIFY_HOME"] = td; classify.clear_caches()     # overrides resolve under user_dir()
         try:
             v = classify.load_vocab()
             assert "Sentient Toaster Romance" in v                     # appended
             assert "Time Travel" not in v                              # '-term' removed a bundled term
         finally:
             os.environ.pop("SCOURGIFY_HOME", None) if old is None else os.environ.__setitem__("SCOURGIFY_HOME", old)
-            classify._VOCAB = None
+            classify.clear_caches()
 
 def test_est_cost():
     from scourgify.classify import est_cost
@@ -353,6 +362,87 @@ def test_transform_does_not_flag_relocation_or_normal_routing():
     # a book with no fandom to begin with can't lose one
     _, lf, _ = transform({"tags": ["WIP"]}, maps(), BEH)
     assert lf is False
+
+
+def test_classify_edits_labels_match_the_engine():
+    """The 1-by-1 checklist must describe an edit the way transform actually performed it.
+    A fandom-scoped character fold is ONE rename: shown as drop+add, unticking only the drop
+    re-adds the old name and the book ends up carrying both. And a junk value that also has a
+    trope row is a drop, because transform checks is_junk before the trope lookup."""
+    from scourgify.wrangle import _classify_edits
+    m = maps(char_fd={("Akeno", "DxD"): "Akeno Himejima"},
+             trope={"WIP": ("Work In Progress", "tag")}, junk_exact={"wip"})
+    _, uniq = _classify_edits(m, {1: {"characters": ([("Akeno", "")], ["Akeno Himejima"]),
+                                      "tags": ([("WIP", "")], [])}})
+    edits = uniq[1]
+    assert ("rename", "characters", "Akeno", "Akeno Himejima") in edits
+    assert ("add", "characters", "", "Akeno Himejima") not in edits      # one row, not two
+    assert ("drop", "tags", "WIP", "") in edits
+    assert ("rename", "tags", "WIP", "Work In Progress") not in edits
+
+
+def test_step_apply_preserves_pending_rows_when_writer_refuses():
+    """apply_proposal_step truncates the proposal to the decided rows before the write step; if
+    run_writer then refuses (Calibre open, wipe guard, missing calibre-debug), the skipped/pending
+    rows — paid LLM results — must still be on disk afterwards, not silently destroyed."""
+    from scourgify import classify, ui
+    rows = [{"book_id": 1, "title": "A", "added_tags": ["X"], "proposed_new": []},
+            {"book_id": 2, "title": "B", "added_tags": ["Y"], "proposed_new": []}]
+    store = {"rows": list(rows)}                       # stands in for the proposal file on disk
+    calls = {"n": 0}
+
+    def fake_checklist(title, items, subtitle=""):
+        calls["n"] += 1                                # book 1: accept all; book 2: skip (→ pending)
+        return ([0], [], "apply") if calls["n"] == 1 else ([], [0], "skip")
+
+    def refuse(rows=None):
+        raise SystemExit("Calibre is running — close it first.")
+
+    class FakeCon:
+        def execute(self, *a): return []
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
+    tmp.write(b"book_id,title,added_tags,proposed_new\n"); tmp.close()
+    saved = (classify.read_proposal, classify.write_proposal, classify.apply_proposal,
+             classify.ro_connect, classify.book_titles, classify.prop,
+             ui.interactive, ui.checklist, common.log_rejects)
+    try:
+        classify.read_proposal = lambda path=None: [dict(r) for r in store["rows"]]
+        classify.write_proposal = lambda rs, path=None: store.update(rows=list(rs))
+        classify.apply_proposal = refuse
+        classify.ro_connect = lambda: FakeCon()
+        classify.book_titles = lambda con: {}
+        classify.prop = lambda: tmp.name          # the module-attribute seam (paths are functions now)
+        ui.interactive = lambda: True
+        ui.checklist = fake_checklist
+        common.log_rejects = lambda rejects: None
+        raised = False
+        try:
+            classify.apply_proposal_step()
+        except SystemExit:
+            raised = True
+        assert raised                                   # the refusal still surfaces
+        assert store["rows"] == rows, "the on-disk proposal must be untouched when the writer refuses"
+    finally:
+        (classify.read_proposal, classify.write_proposal, classify.apply_proposal,
+         classify.ro_connect, classify.book_titles, classify.prop,
+         ui.interactive, ui.checklist, common.log_rejects) = saved
+        os.unlink(tmp.name)
+
+
+def test_spend_gate_keys_off_free_pricing_not_engine_name():
+    """A free engine (list price 0,0) never hits the cloud-spend gate — free-ness is a PRICING
+    fact, not an 'is it apple' string test."""
+    from scourgify import classify, engines
+    saved_pricing = dict(engines.PRICING)
+    saved_inter = classify._interactive
+    engines.PRICING["zerocost"] = (0.0, 0.0)
+    classify._interactive = lambda: False          # deterministic: a prompt would raise, not block
+    try:
+        classify.spend_gate(10_000, "zerocost", yes=False)     # must return silently
+    finally:
+        engines.PRICING.clear(); engines.PRICING.update(saved_pricing)
+        classify._interactive = saved_inter
 
 
 if __name__ == "__main__":

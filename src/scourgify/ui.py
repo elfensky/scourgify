@@ -6,6 +6,7 @@ The core tools (wrangle/classify/staleness) keep their try/except rich fallbacks
 from them. Pattern follows lintle's term.py: one shared Console, prompt helpers that
 validate input, and interactivity detection that requires real TTYs."""
 import re
+from scourgify import common
 from scourgify.common import interactive    # re-export: the ONE tty policy lives in common
 try:
     from rich import box
@@ -14,12 +15,15 @@ try:
     from rich.prompt import Prompt, Confirm
     from rich.table import Table
 except ImportError:
-    raise SystemExit("the wizard needs the `rich` package:  python3 -m pip install rich")
+    raise SystemExit("the wizard needs the `rich` package (a declared dependency, so this means a "
+                     "partial install):\n  uv tool install --force scourgify   "
+                     "— or from a checkout:  uv run scourgify")
 
 console = Console()
 
 
 def clear():
+    if common.scripted(): return          # an ANSI screen-wipe mid-transcript is noise
     console.clear()
 
 def say(msg, style=""):
@@ -41,14 +45,27 @@ def menu(title, options, default=None, also=()):
         t.add_row(k, label, hint)
     panel(t, title=title)
     keys = [k for k, _, _ in options] + list(also)
-    return Prompt.ask("choose", choices=keys, default=default or keys[0], console=console)
+    default = default or keys[0]
+    if common.scripted():
+        ans = common.script_next(f"menu {title!r} (choices: {'/'.join(keys)})").strip()
+        if ans == "": ans = default                    # '' = pressing enter = take the default
+        if ans not in keys:
+            raise common.ScriptError(f"menu {title!r}: {ans!r} is not one of {'/'.join(keys)}")
+        say(f"[dim]choose:[/] {ans}")                  # echo, so a captured run reads like a session
+        return ans
+    return Prompt.ask("choose", choices=keys, default=default, console=console)
 
 
 def confirm(msg, default=False):
+    if common.scripted():
+        ans = common.script_bool(msg, default)
+        say(f"[dim]{msg}[/] {'y' if ans else 'n'}")
+        return ans
     return Confirm.ask(msg, default=default, console=console)
 
 
 def pause():
+    if common.scripted(): return           # it asks nothing, it only waits
     try:
         Prompt.ask("[dim]enter to return to the menu[/]", default="", show_default=False, console=console)
     except (EOFError, KeyboardInterrupt):
@@ -72,7 +89,15 @@ def checklist(title, items, subtitle=""):
         if subtitle: say(f"[dim]{subtitle}[/]")
         panel(t, title=title)
         say("[dim]toggle #s to reject · ⏎ apply ticked · a all · s skip · q quit (leave rest)[/]")
-        raw = Prompt.ask("choose", default="", show_default=False, console=console).strip().lower()
+        if common.scripted():
+            # ponytail: no key validation here — the toggle loop below already ignores anything
+            # that isn't an in-range digit, and a script of pure garbage self-limits by exhausting
+            # the queue into a ScriptError rather than spinning.
+            raw = common.script_next(f"checklist {title!r}")
+            say(f"[dim]choose:[/] {raw or '⏎'}")
+        else:
+            raw = Prompt.ask("choose", default="", show_default=False, console=console)
+        raw = raw.strip().lower()
         if raw in ("q", "quit"): return [], list(range(len(items))), "quit"
         if raw in ("s", "skip"): return [], list(range(len(items))), "skip"
         if raw in ("a", "all"): return list(range(len(items))), [], "apply"

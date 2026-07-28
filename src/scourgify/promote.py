@@ -8,18 +8,18 @@ proposed_new list should be promoted to the vocab, aliased to an existing tag, o
 
 Reasons each candidate against a difflib shortlist of the master tag list (curated vocab ∪ ao3_vocab)
 plus the example books that proposed it. Audit-first: verdicts are a reviewed artifact you apply."""
-import argparse, csv, glob, json, os, re, collections
+import argparse, glob, json, os, re, collections
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import difflib
 
-from scourgify.artifacts import (RANK, PROP, LEDGER, REVIEW, REVIEW_COLS,
-                                 read_rows, split_tags, write_review, archive)
+from scourgify.artifacts import (prop, rank, ledger, review, applied_proposals,
+                                 append_ledger, read_rows, split_tags, write_review, archive)
 from scourgify.classify import existing_terms
-from scourgify.engines import ENGINES, ask_retry
-from scourgify.common import (DATA, user_dir, library, norm, ro_connect, run_writer,
-                              current_tags, op_set_field, interactive, confirm)
+from scourgify.engines import ENGINES, ask_retry, max_workers as engine_workers
+from scourgify.common import (data_dir, library, norm, ro_connect, run_writer,
+                              current_tags, titles as book_titles, op_set_field, interactive, confirm)
+from scourgify.overrides import ov_path, append_lines, append_rows   # overrides/ formats live there
 
-ALIASES = os.path.join(user_dir(), "overrides", "promote_aliases.csv")
 VERDICTS = ("promote", "alias", "reject")
 
 
@@ -80,7 +80,8 @@ def _ledger_tags(path):
     return {r["tag"] for r in read_rows(path)}
 
 
-def candidates(ranked_path: str = RANK, proposal_path: str = PROP, ledger_path: str = LEDGER) -> list:
+def candidates(ranked_path: str | None = None, proposal_path: str | None = None, ledger_path: str | None = None) -> list:
+    ranked_path, proposal_path, ledger_path = ranked_path or rank(), proposal_path or prop(), ledger_path or ledger()
     if not os.path.exists(ranked_path):
         raise SystemExit(f"no candidates ({os.path.basename(ranked_path)} not found — run a classify pass first).")
     decided = _ledger_tags(ledger_path)
@@ -120,8 +121,11 @@ def decide(cand: dict, ask, verify_ask=None, existing: list | None = None) -> di
     base = {"tag": cand["tag"], "count": cand.get("count", 0)}
     adv = parse_decision(ask(advocate_prompt(cand, near)))
     if adv is None:
-        return {**base, "verdict": "reject", "target": "", "contested": False,
-                "reason": "advocate response unparseable", "confidence": "low"}
+        # NOT a reject: ask_retry returns ("", err) on a transport failure, so a network hiccup would
+        # otherwise become a durable verdict in the ledger and the tag would never be adjudicated again.
+        # "error" isn't in VERDICTS, so apply_decisions skips it and the candidate re-runs next time.
+        return {**base, "verdict": "error", "target": "", "contested": False,
+                "reason": "no usable response (transport failure or unparseable)", "confidence": "low"}
     if adv["verdict"] != "promote":
         return _finalize(base, {**adv, "contested": False}, existing)   # alias/reject (alias target validated)
     sk = parse_decision((verify_ask or ask)(skeptic_prompt(cand, adv, near)))
@@ -133,43 +137,32 @@ def decide(cand: dict, ask, verify_ask=None, existing: list | None = None) -> di
     return {**base, **adv, "contested": False}                     # promote stands
 
 
-def _append_line(path, line):
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "a") as f: f.write(line + "\n")
-
-
-def _append_row(path, header, row, delim=","):
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    new = not os.path.exists(path)
-    with open(path, "a", newline="") as f:
-        w = csv.writer(f, delimiter=delim)
-        if new: w.writerow(header)
-        w.writerow(row)
-
-
-def apply_decisions(review_path: str = REVIEW, vocab_path: str | None = None, tropes_path: str | None = None,
-                    aliases_path: str = ALIASES, ledger_path: str = LEDGER) -> dict:
-    vocab_path = vocab_path or os.path.join(user_dir(), "overrides", "classify_vocab.txt")
-    tropes_path = tropes_path or os.path.join(user_dir(), "overrides", "tropes.csv")
+def apply_decisions(review_path: str | None = None, vocab_path: str | None = None, tropes_path: str | None = None,
+                    aliases_path: str | None = None, ledger_path: str | None = None) -> dict:
+    review_path = review_path or review()
+    aliases_path = aliases_path or ov_path("promote_aliases.csv")
+    ledger_path = ledger_path or ledger()
+    vocab_path = vocab_path or ov_path("classify_vocab.txt")
+    tropes_path = tropes_path or ov_path("tropes.csv")
     if not os.path.exists(review_path):
         raise SystemExit(f"no review to apply ({os.path.basename(review_path)} not found — run promote first).")
     n = {"promote": 0, "alias": 0, "reject": 0}
-    for r in csv.DictReader(open(review_path)):
+    for r in read_rows(review_path):
         tag, target = r["tag"], r.get("target", "")
         v = r["verdict"].strip().lower()
         if v not in VERDICTS:
             print(f"  skipped {tag}: unknown verdict {r['verdict']!r}")
             continue
         if v == "promote":
-            _append_line(vocab_path, tag)
+            append_lines(vocab_path, [tag])
         elif v == "alias":
             if not target.strip() or norm(target) == norm(tag):    # hand-edited self/empty alias: never write a junk fold
                 print(f"  skipped {tag}: alias needs a distinct target (got {target!r})")
                 continue
-            _append_row(tropes_path, ["variant", "canonical", "route"], [tag, target, "tag"], delim=";")
-            _append_row(aliases_path, ["candidate", "target"], [tag, target])
+            append_rows(tropes_path, ["variant", "canonical", "route"], [[tag, target, "tag"]])
+            append_rows(aliases_path, ["candidate", "target"], [[tag, target]])
         n[v] = n.get(v, 0) + 1
-        _append_row(ledger_path, ["tag", "verdict", "target"], [tag, v, target])
+        append_ledger(tag, v, target, ledger_path)
     arch = archive(review_path, "applied")
     print(f"applied: {n['promote']} promoted, {n['alias']} aliased, {n['reject']} rejected; "
           f"review archived -> {os.path.basename(arch)}")
@@ -204,25 +197,54 @@ def backfill_wanted(resolution: dict, proposal_rows: list) -> dict:
     return dict(want)
 
 
+def backfill_drop_redundant(adds: dict, homes: dict) -> dict:
+    """{book: set(tags)} minus the tags that already live in that book's structured columns.
+    Pure — see tests. wrangle strips a tag whose concept is already in #fandoms/#characters/
+    #genres/#relationships/#status (backfill-before-strip), so proposing one here starts a
+    ping-pong: backfill adds it, wrangle strips it, backfill sees it missing and adds it again.
+    Matching is norm()-based because wrangle's strip is."""
+    out = {}
+    for b, tags in adds.items():
+        keep = {t for t in tags if norm(t) not in homes.get(b, set())}
+        if keep: out[b] = keep
+    return out
+
+
+def _homes(con) -> dict:
+    """{book: set(norm'd values living in its structured columns)} — the same set wrangle's
+    redundancy-strip tests against."""
+    from scourgify.common import read_custom_column, load_config
+    cols = [v for k, v in load_config()["columns"].items() if v and v != "tags"]
+    homes = collections.defaultdict(set)
+    for lab in cols:
+        for b, vs in (read_custom_column(con, lab, multi=True) or {}).items():
+            homes[b].update(norm(v) for v in vs)
+    return homes
+
+
 def _proposal_files():
     """Every file carrying the book↔proposed_new record: archived applied proposals + the current one."""
-    fs = sorted(glob.glob(f"{DATA}/classify_proposal_applied_*.csv"))
-    if os.path.exists(PROP): fs.append(PROP)
+    fs = applied_proposals()                       # the archive-naming convention lives with archive()
+    if os.path.exists(prop()): fs.append(prop())
     return fs
 
 
-def backfill_plan(ledger_path: str = LEDGER) -> tuple[dict, dict]:
+def backfill_plan(ledger_path: str | None = None) -> tuple[dict, dict]:
     """-> (chg {book: sorted full tag set}, adds {book: set(new tags)}) for books that
     should carry a promoted/aliased tag but don't yet. Reads the ledger + all proposals + live tags."""
-    res = resolve_ledger(read_rows(ledger_path))
+    res = resolve_ledger(read_rows(ledger_path or ledger()))
     rows = [r for pf in _proposal_files() for r in read_rows(pf)]
     want = backfill_wanted(res, rows)
     if not want: return {}, {}
-    cur = current_tags(ro_connect())
-    chg, adds = {}, {}
+    con = ro_connect()
+    cur = current_tags(con)
+    adds = {}
     for b, w in want.items():
         new = w - cur.get(b, set())
-        if new: chg[b] = sorted(cur.get(b, set()) | w); adds[b] = new
+        if new: adds[b] = new
+    # never propose a tag wrangle will strip as redundant — that is an endless add/strip loop
+    adds = backfill_drop_redundant(adds, _homes(con))
+    chg = {b: sorted(cur.get(b, set()) | new) for b, new in adds.items()}
     return chg, adds
 
 
@@ -235,7 +257,7 @@ def backfill(yes: bool = False) -> int:
     print(f"backfill: {len(chg)} book(s) gain {total} promoted/aliased tag-assignment(s), e.g.:")
     preview = list(adds)[:8]
     con = ro_connect()
-    titles = dict(con.execute(f"SELECT id, title FROM books WHERE id IN ({','.join('?' * len(preview))})", preview)) if preview else {}
+    titles = book_titles(con, preview)
     con.close()
     for b in preview: print(f"  #{b} {str(titles.get(b, ''))[:50]}: + {', '.join(sorted(adds[b]))}")
     if len(adds) > 8: print(f"  … +{len(adds) - 8} more books")
@@ -249,8 +271,12 @@ def backfill(yes: bool = False) -> int:
     return len(chg)
 
 
-def run(a: argparse.Namespace, ranked_path: str = RANK, proposal_path: str = PROP,
-        review_path: str = REVIEW, existing: list | None = None) -> None:
+def run(a: argparse.Namespace, ranked_path: str | None = None, proposal_path: str | None = None,
+        review_path: str | None = None, existing: list | None = None,
+        ask=None, verify_ask=None) -> None:
+    """ask/verify_ask: prompt -> response text. Default to the configured engines; tests pass
+    callables directly (the same seam decide() already has) instead of faking the registry."""
+    review_path = review_path or review()
     if os.path.exists(review_path) and not getattr(a, "yes", False):
         raise SystemExit(f"a pending review exists at {review_path} — apply it (scourgify promote --apply), "
                          f"delete it, or re-run with --yes to overwrite.")
@@ -259,20 +285,24 @@ def run(a: argparse.Namespace, ranked_path: str = RANK, proposal_path: str = PRO
     if a.batch: cands = cands[:a.batch]
     if not cands:
         print("no undecided candidates — nothing to do."); return
-    eng = ENGINES[a.engine](a.model, a.timeout)
-    veng = ENGINES[a.verify_with]("", a.timeout) if a.verify_with else None
-    ask = lambda p: ask_retry(eng, p)[0]
-    verify_ask = (lambda p: ask_retry(veng, p)[0]) if veng else None
-    print(f"engine={a.engine}{'  verify-with='+a.verify_with if veng else ''}  candidates: {len(cands)}")
+    if ask is None:
+        eng = ENGINES[a.engine](a.model, a.timeout)
+        ask = lambda p: ask_retry(eng, p)[0]
+    if verify_ask is None and a.verify_with:
+        veng = ENGINES[a.verify_with]("", a.timeout)
+        verify_ask = lambda p: ask_retry(veng, p)[0]
+    print(f"engine={a.engine}{'  verify-with=' + a.verify_with if a.verify_with else ''}  candidates: {len(cands)}")
     rows = []
-    with ThreadPoolExecutor(max_workers=1 if a.engine == "apple" else a.workers) as ex:
+    with ThreadPoolExecutor(max_workers=engine_workers(a.engine, a.workers)) as ex:
         futs = [ex.submit(decide, c, ask, verify_ask, existing) for c in cands]
         for fut in as_completed(futs): rows.append(fut.result())
     rows.sort(key=lambda r: (r["verdict"] != "promote", -r["count"]))   # promotes first, by count
-    os.makedirs(DATA, exist_ok=True)
+    os.makedirs(data_dir(), exist_ok=True)
     write_review(rows, review_path)
     tally = {v: sum(1 for r in rows if r["verdict"] == v) for v in VERDICTS}
-    print(f"  {tally['promote']} promote, {tally['alias']} alias, {tally['reject']} reject "
+    nerr = sum(1 for r in rows if r["verdict"] == "error")
+    print(f"  {tally['promote']} promote, {tally['alias']} alias, {tally['reject']} reject"
+          f"{f', {nerr} error (undecided — they re-run)' if nerr else ''} "
           f"-> {os.path.basename(review_path)} (review, then `scourgify promote --apply`)")
 
 
@@ -295,7 +325,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def normalize(a: argparse.Namespace) -> argparse.Namespace:
     library()                                       # fail fast with the clear CALIBRE_LIBRARY message
-    os.makedirs(DATA, exist_ok=True)
+    os.makedirs(data_dir(), exist_ok=True)
     return a
 
 
@@ -309,9 +339,16 @@ def default_opts(**overrides) -> argparse.Namespace:
 
 def main() -> None:
     a = normalize(build_parser().parse_args())
-    if a.apply:
+    if a.apply and a.backfill:
+        # --backfill --apply means "fold the verdicts in, then backfill". A missing review is
+        # not an error here: `promote --apply` archives promote_review.csv, so the natural
+        # follow-up run has none left and the backfill (which reads the ledger, not the review)
+        # must still happen. It used to abort on the review and never reach the backfill.
+        try: apply_decisions()
+        except SystemExit as e: print(f"{e}\n  (continuing to --backfill, which reads the ledger)")
+        backfill(yes=a.yes or a.apply)
+    elif a.apply:
         apply_decisions()
-        if a.backfill: backfill(yes=a.yes)
     elif a.backfill:
         backfill(yes=a.yes)
     else:

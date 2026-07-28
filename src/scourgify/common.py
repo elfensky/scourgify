@@ -9,7 +9,7 @@ used to each carry a private copy of:
   - the single write funnel: run_writer() -> calibre-debug -e _writer.py
     (backs up metadata.db to data/backups/ before every write; refuses to run while Calibre is open)
 """
-import os, re, sys, csv, time, glob, sqlite3, collections, unicodedata
+import os, re, sys, csv, time, glob, sqlite3, contextlib, collections, unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))   # the installed package dir (read-only)
 DEFAULTS = os.path.join(HERE, "defaults")            # bundled generic maps — ship inside the package
@@ -26,17 +26,31 @@ def user_dir() -> str:
 # Per-run + per-user files live under user_dir(), not site-packages nor the invoking CWD:
 # config.toml, overrides/, and data/ (proposals/intermediates + backups) all resolve there,
 # so an installed copy has a stable home instead of writing relative to wherever it's launched.
-DATA = os.path.join(user_dir(), "data")              # personal review maps, proposals, intermediates (gitignored)
-BACKUPS = os.path.join(DATA, "backups")              # metadata.db snapshots taken before every write (was /tmp)
+# Paths are FUNCTIONS, never import-time constants — $SCOURGIFY_HOME set after import (tests)
+# must still redirect the whole tree.
 BACKUP_KEEP = 20                                      # keep this many newest snapshots; older ones are pruned
 BACKUP_WARN = 500 * 1024 * 1024                       # wizard nudges to trim past this many bytes of snapshots
-REJECTS = os.path.join(DATA, "rejects.csv")          # per-item rejects from `--step` review (see wrangle.overrides)
 REJECT_COLS = ["ts", "stage", "book", "title", "kind", "column", "before", "after", "class"]
 
 
+def data_dir() -> str:
+    """data/ under user_dir() — personal review maps, proposals, intermediates (gitignored)."""
+    return os.path.join(user_dir(), "data")
+
+
+def backups_dir() -> str:
+    """metadata.db snapshots taken before every write."""
+    return os.path.join(data_dir(), "backups")
+
+
+def rejects_path() -> str:
+    """Per-item rejects from `--step` review (see overrides.py)."""
+    return os.path.join(data_dir(), "rejects.csv")
+
+
 def backups_size() -> tuple[int, int]:
-    """(count, total_bytes) of the metadata.db snapshots in BACKUPS; (0, 0) if none."""
-    files = glob.glob(os.path.join(BACKUPS, "*.db"))
+    """(count, total_bytes) of the metadata.db snapshots in backups_dir(); (0, 0) if none."""
+    files = glob.glob(os.path.join(backups_dir(), "*.db"))
     return len(files), sum(os.path.getsize(f) for f in files)
 
 
@@ -45,10 +59,10 @@ def log_rejects(rows: list[dict]) -> int:
     the header on first write. The "separate list" that `scourgify overrides` reads back."""
     rows = [r for r in rows if r]
     if not rows: return 0
-    os.makedirs(DATA, exist_ok=True)
+    os.makedirs(data_dir(), exist_ok=True)
     ts = time.strftime("%Y-%m-%dT%H:%M:%S")
-    new = not os.path.exists(REJECTS)
-    with open(REJECTS, "a", newline="") as f:
+    new = not os.path.exists(rejects_path())
+    with open(rejects_path(), "a", newline="") as f:
         w = csv.DictWriter(f, fieldnames=REJECT_COLS, extrasaction="ignore")
         if new: w.writeheader()
         for r in rows: w.writerow({"ts": ts, **r})
@@ -70,9 +84,72 @@ def ro_connect() -> sqlite3.Connection:
 
 
 # ---------------- interaction policy (the ONE answer to "is a human at the terminal") ----------------
+class ScriptError(Exception):
+    """A scripted run's answers don't fit the flow (queue exhausted, or an answer that isn't on
+    offer). Deliberately NOT a SystemExit: wizard._stage_guard absorbs SystemExit — that's the
+    guardrail-skips-a-stage path — which would swallow exactly the failure this seam exists to
+    make loud, and hand back a green test that asserted nothing."""
+
+
+def _parse_script(raw: str) -> list:
+    """Parse a raw SCOURGIFY_SCRIPT value into a canned-answer queue. A blank or whitespace-only
+    value (e.g. an interpolated-but-unset shell var, `SCOURGIFY_SCRIPT="$KEYS"`) means "scripted,
+    with no answers" -> [] , so the very first prompt raises instead of silently walking every
+    prompt's default (which for the wizard's landing menu is "full maintenance run" and for its
+    apply prompts is "yes"). A non-blank value still splits on ',' exactly as before — a blank
+    ENTRY within it (e.g. the trailing "" in "4,") is a real scripted answer meaning "press enter,
+    take the default", not this empty-queue case."""
+    return [a.strip() for a in raw.split(",")] if raw.strip() else []
+
+
+# Canned answers for a scripted run: `SCOURGIFY_SCRIPT=w,s,n,q scourgify` for ad-hoc shell use,
+# or common.scripted_answers([...]) in tests. Read ONCE at import — tests use the context manager,
+# so this only constrains shell use, where the variable is set before launch anyway.
+# ponytail: split on ',', so a checklist multi-toggle in an env-var script uses spaces ("1 3").
+_script = (_parse_script(os.environ["SCOURGIFY_SCRIPT"])
+           if "SCOURGIFY_SCRIPT" in os.environ else None)
+
+
+def scripted() -> bool:
+    """Is this run answering its own prompts? ([] still counts — the run IS scripted, it has
+    merely run out, and the next prompt must raise rather than fall back to a keyboard.)"""
+    return _script is not None
+
+
+def script_next(what: str) -> str:
+    """Pop the next canned answer. Exhausted = a real error: the script under-specifies the flow.
+    `what` names the prompt so the failure says which one went unanswered."""
+    if not _script:
+        raise ScriptError(f"scripted run: no answer left for {what}")
+    return _script.pop(0)
+
+
+def script_bool(msg: str, default: bool) -> bool:
+    """Pop a y/n answer ('' = the default, i.e. pressing enter). The ONE parser — ui.confirm and
+    confirm() below both route here so the two prompts can't disagree about what 'y' means."""
+    a = script_next(f"confirm {msg!r}").strip().lower()
+    if a == "": return default
+    if a in ("y", "yes"): return True
+    if a in ("n", "no"): return False
+    raise ScriptError(f"confirm {msg!r}: {a!r} is not y/n (or '' for the {default} default)")
+
+
+@contextlib.contextmanager
+def scripted_answers(answers):
+    """Drive a scripted run from Python (tests). Restores the previous queue on exit, so a test
+    that raises mid-flow can't leak its leftovers into the next one."""
+    global _script
+    prev, _script = _script, [str(a) for a in answers]
+    try:
+        yield
+    finally:
+        _script = prev
+
+
 def interactive() -> bool:
     """stdin AND stdout are real TTYs, and no CI/NONINTERACTIVE override. Every tool asks this
     function — ui.interactive re-exports it — so the tools can't disagree about interactivity."""
+    if _script is not None: return True     # a scripted run answers its own prompts; CI must not veto it
     if os.environ.get("CI") or os.environ.get("NONINTERACTIVE"):
         return False
     try:
@@ -84,6 +161,7 @@ def interactive() -> bool:
 def confirm(msg: str, default: bool = False) -> bool:
     """The one plain y/n prompt (ui.confirm is its rich twin for wizard surfaces).
     Off a TTY / on EOF: the default. 3 retries on garbage input."""
+    if scripted(): return script_bool(msg, default)
     if not interactive(): return default
     for _ in range(3):
         try: a = input(f"{msg} [{'Y/n' if default else 'y/N'}] ").strip().lower()
@@ -93,6 +171,12 @@ def confirm(msg: str, default: bool = False) -> bool:
         if a in ("n", "no"): return False
         print("  please answer y or n.")
     return default
+
+
+def read_lines(path: str) -> list:
+    """Lines of a text file without trailing newlines; [] if missing — the shared list-file
+    reader (allow/block/junk lists). The CSV twin is artifacts.read_rows."""
+    return [l.rstrip("\n") for l in open(path)] if os.path.exists(path) else []
 
 
 # ---------------- normalization ----------------
@@ -124,6 +208,22 @@ def read_custom_column(con: sqlite3.Connection, label: str, multi: bool = False)
         if multi: out[b].append(v)
         else: out[b] = v
     return dict(out)
+
+
+IN_CAP = 500   # above this many ids, fetch all titles instead of building an IN() list (SQLite variable cap)
+
+def titles(con: sqlite3.Connection, ids=None) -> dict:
+    """{book_id: title}. ids=None (or a large set — see IN_CAP) fetches the whole table;
+    the ONE owner of the title lookup every preview/report used to hand-roll."""
+    ids = list(ids) if ids is not None else None
+    if ids is not None and not ids: return {}
+    if ids is None or len(ids) > IN_CAP:
+        return dict(con.execute("SELECT id, title FROM books"))
+    return dict(con.execute(f"SELECT id, title FROM books WHERE id IN ({','.join('?' * len(ids))})", ids))
+
+
+def book_count(con: sqlite3.Connection) -> int:
+    return con.execute("SELECT count(*) FROM books").fetchone()[0]
 
 
 def current_tags(con: sqlite3.Connection) -> dict:
@@ -204,20 +304,24 @@ def calibre_open() -> bool:
         return any(_is_calibre_gui(l) for l in out.splitlines())
     return True   # ponytail: no pgrep/ps → undetectable → assume open; never fail open on the safety guard
 
-def _backup_path():
-    """A fresh, collision-proof snapshot path in BACKUPS: ff_<timestamp>[_N].db. The old /tmp path
-    used whole-second granularity, so two writes in the same second (a guided wizard run fires
-    several) silently overwrote one snapshot — the _N suffix guarantees each write keeps its own."""
-    os.makedirs(BACKUPS, exist_ok=True)
+def _backup_path(dirpath: str | None = None):
+    """A fresh, collision-proof snapshot path (default backups_dir()): ff_<timestamp>[_N].db. The old
+    /tmp path used whole-second granularity, so two writes in the same second (a guided wizard run
+    fires several) silently overwrote one snapshot — the _N suffix guarantees each write keeps its
+    own. `dirpath` is a parameter so tests point at a temp dir instead of mutating the global."""
+    dirpath = dirpath or backups_dir()
+    os.makedirs(dirpath, exist_ok=True)
     base = time.strftime("ff_%Y%m%dT%H%M%S")
-    p = os.path.join(BACKUPS, base + ".db"); n = 2
+    p = os.path.join(dirpath, base + ".db"); n = 2
     while os.path.exists(p):
-        p = os.path.join(BACKUPS, f"{base}_{n}.db"); n += 1
+        p = os.path.join(dirpath, f"{base}_{n}.db"); n += 1
     return p
 
-def _prune_backups():
-    """Keep only the BACKUP_KEEP newest snapshots (the timestamp name sorts chronologically)."""
-    for p in sorted(glob.glob(os.path.join(BACKUPS, "ff_*.db")))[:-BACKUP_KEEP]:
+def _prune_backups(dirpath: str | None = None, keep: int | None = None):
+    """Keep only the `keep` (default BACKUP_KEEP) newest snapshots (the timestamp name sorts
+    chronologically)."""
+    dirpath, keep = dirpath or backups_dir(), keep or BACKUP_KEEP
+    for p in sorted(glob.glob(os.path.join(dirpath, "ff_*.db")))[:-keep]:
         try: os.remove(p)
         except OSError: pass
 
@@ -302,14 +406,14 @@ def rollback_cmd(argv: list[str]) -> None:
     ap.add_argument("--list", action="store_true", help="list available backups and exit")
     ap.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     a = ap.parse_args(argv)
-    baks = sorted(glob.glob(os.path.join(BACKUPS, "ff_*.db")), reverse=True)   # newest first
+    baks = sorted(glob.glob(os.path.join(backups_dir(), "ff_*.db")), reverse=True)   # newest first
     if not baks:
-        raise SystemExit(f"no backups in {BACKUPS} — nothing to roll back to.")
+        raise SystemExit(f"no backups in {backups_dir()} — nothing to roll back to.")
     if a.list:
-        print(f"backups in {BACKUPS} (newest first):")
+        print(f"backups in {backups_dir()} (newest first):")
         for b in baks: print(f"  {os.path.basename(b)}   ({os.path.getsize(b) // 1024} KiB)")
         return
-    target = baks[0] if not a.file else (a.file if os.path.exists(a.file) else os.path.join(BACKUPS, a.file))
+    target = baks[0] if not a.file else (a.file if os.path.exists(a.file) else os.path.join(backups_dir(), a.file))
     if not os.path.exists(target): raise SystemExit(f"no such backup: {a.file}")
     if calibre_open():
         raise SystemExit("Calibre is running — close it first (it locks metadata.db), then roll back.")

@@ -9,6 +9,7 @@ Rule: <STALE yrs -> In-Progress | STALE..DEAD -> Hiatus | >=DEAD -> Abandoned. T
 Completed/Dropped/Rewritten and books without an #updated date are NEVER changed."""
 import argparse, datetime, collections
 from scourgify.common import load_config, ro_connect, read_custom_column, run_writer, op_set_field
+from scourgify import select
 
 ACTIVITY = {"In-Progress", "Hiatus", "Abandoned"}      # re-derived from activity
 # everything else (Completed, Dropped, Rewritten, blank) is left untouched
@@ -21,8 +22,11 @@ def derive(current: str, age_years: float | None, stale_years: float, dead_years
     return "In-Progress" if age_years < stale_years else "Hiatus" if age_years < dead_years else "Abandoned"
 
 
-def compute(stale_years: float = 2.0, dead_years: float = 5.0) -> tuple[str, list]:
-    """-> (status_label, [(book, old, new, age_years), ...]) for books whose status would change."""
+def compute(stale_years: float = 2.0, dead_years: float = 5.0,
+            books=None) -> tuple[str, list]:
+    """-> (status_label, [(book, old, new, age_years), ...]) for books whose status would change.
+    books: an iterable of ids to restrict to, or None for the whole library. Each book's status
+    depends only on its own #updated age, so a plain filter is the whole of the scoping."""
     con = ro_connect()
     status_label = load_config()["columns"].get("status") or "#status"
     status = read_custom_column(con, status_label)
@@ -34,8 +38,17 @@ def compute(stale_years: float = 2.0, dead_years: float = 5.0) -> tuple[str, lis
     def age(b):
         try: return (today - datetime.date.fromisoformat(str(updated.get(b))[:10])).days / 365.25
         except Exception: return None
+    want = None if books is None else set(books)
+    if want is not None:
+        # membership is the BOOKS table, not the #status column: a book with no status set is
+        # still in the library (about a fifth of a real FanFicFare library), and counting it as
+        # absent turned an informational note into a lie about the user's own ids.
+        known = {r[0] for r in con.execute("SELECT id FROM books")}
+        absent = [b for b in want if b not in known]
+        if absent: print(f"  note: {len(absent)} requested id(s) not in the library")
     rows = []
     for b, s in status.items():
+        if want is not None and b not in want: continue
         n = derive(s, age(b), stale_years, dead_years)
         if n != s: rows.append((b, s, n, age(b)))
     return status_label, rows
@@ -45,21 +58,30 @@ def write(status_label: str, rows: list) -> None:
     run_writer([op_set_field(status_label, {b: n for b, o, n, _ in rows})])
 
 
+def show(label: str, rows: list) -> None:
+    """The ONE dry-run renderer (CLI + wizard): transition counts + examples, rich-or-plain."""
+    from scourgify import report
+    trans = collections.Counter(f"{o} → {n}" for _, o, n, _ in rows)
+    report.table(f"{label} re-derivations — {len(rows)} book(s)", ["transition", "books"],
+                 [[k, str(c)] for k, c in trans.most_common()], right=(1,))
+    if rows:
+        report.say("examples: " + ", ".join(f"#{b} {o}→{n} ({yrs:.1f}y)" for b, o, n, yrs in rows[:5]), "dim")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Re-derive #status from #updated age (activity family only).")
     p.add_argument("--apply", action="store_true", help="write #status (Calibre closed)")
     p.add_argument("--stale-years", type=float, default=2)
     p.add_argument("--dead-years", type=float, default=5)
+    p.add_argument("--books", default=None, metavar="SPEC",
+                   help="only these books: '1,2,3', '10-20', '@ids.txt' (one id per line), or a combination")
     a = p.parse_args()
 
-    label, rows = compute(a.stale_years, a.dead_years)
-    trans = collections.Counter(f"{o} -> {n}" for _, o, n, _ in rows)
-    print(f"staleness audit  (today={datetime.date.today()}, stale>={a.stale_years}y, dead>={a.dead_years}y)")
-    print(f"  books reclassified: {len(rows)}")
-    for k, c in trans.most_common(): print(f"    {k:24} {c}")
-    print("  examples:")
-    for b, o, n, yrs in rows[:10]:
-        print(f"    {o:12}->{n:12} ({yrs:.1f}y) #{b}")
+    books = select.parse_books(a.books) if a.books is not None else None
+    label, rows = compute(a.stale_years, a.dead_years, books)
+    print(f"staleness audit  (today={datetime.date.today()}, stale>={a.stale_years}y, dead>={a.dead_years}y"
+          + (f", scoped to {len(books)} book(s)" if books is not None else "") + ")")
+    show(label, rows)
 
     if a.apply:
         write(label, rows)

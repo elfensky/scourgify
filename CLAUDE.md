@@ -8,9 +8,11 @@ genres, and status. It is data-driven (bundled `defaults/` + per-user `overrides
 audit-first, and reversible. Python stdlib + Calibre's own CLI + `rich`; tests in `tests/` (plain asserts,
 no framework needed). **rich dependency rules by surface:** `wizard.py`/`ui.py` may hard-import rich (the
 wizard is rich-first; `ui.py` raises a friendly install hint if missing). The core tools
-(`wrangle`/`classify`/`staleness`) import rich under `try/except` and every rich use there needs a plain
-fallback (scripting/CI without rich must keep working). `_writer.py` runs under `calibre-debug` (Calibre's
-bundled Python has empty site-packages) — never import rich (or `ui`/`wizard`) there.
+(`wrangle`/`classify`/`staleness`) render through **`report.py`** — the ONE owner of the rich-or-plain
+policy (`table`/`tree`/`say` + the live classify `Dashboard`); tools describe WHAT to show, report.py
+decides HOW, so no call site ever hand-writes a second plain renderer (scripting/CI without rich must
+keep working). `_writer.py` runs under `calibre-debug` (Calibre's bundled Python has empty
+site-packages) — never import rich (or `ui`/`wizard`/`report`) there.
 
 ## Running it
 
@@ -24,7 +26,8 @@ uv run scourgify audit                               # read-only dry-run of ever
 uv run scourgify apply --apply                       # write changes (Calibre CLOSED for the write step)
 ```
 
-(`uv run scourgify` from a checkout; an installed copy — `pipx install scourgify` — drops the `uv run`.)
+(`uv run scourgify` from a checkout; an installed copy — `uv tool install scourgify` — drops the `uv run`.
+**uv is the only supported installer** — never `pip`/`pipx`, in docs or in advice to the user.)
 
 **`wizard.py`** (launched by bare `scourgify`) is a **guided lifecycle behind a landing menu**: header
 (books, column health, new/changed count via `select.changed`, pending proposal, Calibre-open
@@ -35,12 +38,15 @@ new-tag candidates, `--step` rejects, backfillable promotions). The menu loops (
 task) until quit. The guided run is the stages in order — **wrangle → staleness → classify → review →
 promote → backfill** — each dry-running first, showing its report, and asking before writing (a clean
 stage auto-skips). There is no separate audit step — the wrangle stage's dry run IS the audit;
-`scourgify audit` stays for the full per-value detail. The classify stage opens with a **scope
-menu** — new/changed (the cheap default) or **whole library** (a full pass; still offered when
-nothing's changed) — shows per-engine cost estimates for the chosen scope (`classify.est_cost`,
-list prices in `classify.PRICING`), offers an engine **bake-off** (`classify.bakeoff`: the same ~5 sample books
-through every usable engine, display-only), and enables `--text-fallback` so thin descriptions get
-sampled rather than dropped. The review stage offers apply / keep / discard (discard archives to
+`scourgify audit` stays for the full per-value detail. The wrangle stage drives one
+**`wrangle.plan()`** object (preview → guard → optional step → write; never a recompute). The
+classify stage opens with a **scope menu** — new/changed (the cheap default) or **whole library**
+(a full pass; still offered when nothing's changed) — resolves the run ONCE via
+**`classify.plan()`** (so the € the user confirms is over the exact `todo` set the run bills, and
+the expensive text extraction never runs twice), shows per-engine cost estimates
+(`classify.est_cost`, list prices in `classify.PRICING`), offers an engine **bake-off**
+(`classify.bakeoff`: the same ~5 sample books through every usable engine, display-only), and
+enables `--text-fallback` so thin descriptions get sampled rather than dropped. The review stage offers apply / keep / discard (discard archives to
 `*_discarded_*.csv`). The wrangle and review stages also offer a **1-by-1 review** (`ui.checklist`,
 CLI `apply --step` / `classify --apply --step`): walk each book's changes, untick to reject
 individual items. Rejects land in `data/rejects.csv` (see `docs/superpowers/specs/2026-07-06-…`);
@@ -49,11 +55,15 @@ change never recurs (dry-run default, `--apply` writes, `--master` targets `defa
 classify rejects are log-only (an AI hallucination, not a rule bug). Stages call the same engine functions the subcommands do (previews → confirm →
 write), so guardrails and auto-backup apply identically; guardrail `SystemExit`s skip the stage, not
 the run. `ui.py` holds the shared rich Console + prompt helpers (lintle `term.py` pattern). classify
-runs render a live dashboard (`classify._Dashboard`: progress, tagged/failed/rate, throughput
+runs render a live dashboard (`report.Dashboard`: progress, tagged/failed/rate, throughput
 sparkline, rising candidates).
 
 **`select.py`** — the one owner of "which books does this run operate on"; classify's scope flags and
-the wizard header both go through it, so they can never disagree. A book is new/changed iff unstamped
+the wizard header both go through it, so they can never disagree.
+`parse_books()` owns the `--books` spec grammar (`1,2,3`, `10-20`, `@ids.txt`, or any
+comma-combination; `@file` expands one level deep) and the `ids` pick mode selects exactly those
+books — the one way `classify`, `wrangle apply` and `staleness` are pointed at a named set.
+A book is new/changed iff unstamped
 ∨ `#updated` > stamp ∨ added-date (`books.timestamp`) > stamp — the added-date clock catches re-fetches
 (FanFicFare bumps it) while staying immune to scourgify's own writes (`last_modified` is deliberately
 NOT used). All pickers return newest-added-first.
@@ -91,7 +101,22 @@ reach for `os.getcwd()`). `$SCOURGIFY_HOME` also lets tests point the whole tree
 Verification: `uv run tests/test_core.py` (plain asserts, pytest-compatible, no library/network needed) pins the
 pure core — `transform`, trope-chain resolution, `parse_resp`, the TOML reader — and
 `uv run tests/test_selection.py` pins the selection semantics against a throwaway sqlite `metadata.db` built
-by `tests/fixture_db.py` (covers both custom-column storage shapes). CI runs both. `scourgify audit` remains the
+by `tests/fixture_db.py` (covers both custom-column storage shapes). CI runs every `tests/test_*.py`
+by glob — a new test file is in CI by existing. `uv run tests/test_wizard_flow.py` drives the real
+wizard stages in-process with canned answers (`common.scripted_answers`) against a fixture library —
+the interaction flows (no-write paths, classify scope-skip spending nothing, a skip-all step review
+leaving the proposal byte-identical) are pinned in CI in milliseconds. The same seam drives the wizard
+from a shell: `SCOURGIFY_SCRIPT="w,s,n,q" scourgify` answers each prompt in order — a **test hook, not
+a user feature** (no `--help` entry). A blank answer (an empty entry, e.g. the trailing one in
+`"4,"`) means "press enter" and takes the prompt's default — and the wizard's defaults are apply /
+full maintenance run, so a blank is a real "yes" here, not a no-op. An empty or whitespace-only
+`SCOURGIFY_SCRIPT` (e.g. an interpolated-but-unset var) is instead parsed as an empty queue, so the
+very first prompt raises rather than silently walking those defaults. A script that runs short or
+names a key that isn't on offer raises `common.ScriptError`, which is deliberately NOT a
+`SystemExit`: `wizard._stage_guard` absorbs those, and swallowing a scripting failure would hand
+back a green run that asserted nothing.
+`uv run tests/drive_wizard.py` (NOT in CI; a few seconds) stays the pre-release check that a real PTY
+works at all — header, landing menu, clean quit. `scourgify audit` remains the
 against-your-library check: full new state, before/after counts, and SAFETY lines asserting **no book loses its
 last fandom or character** (`apply` aborts if any book would end with an empty `#fandoms`/`#characters` it started
 with — a bad `fandoms.csv` alias→"" or an empty `decompose` payload; a blocklisted non-fandom relocated to tags is
@@ -124,15 +149,24 @@ confirmation / `--yes`). **Do NOT bulk re-fetch FFF metadata** — it re-pollute
 
 ## Architecture
 
-**`wrangle.py` — the unified engine.** Subcommands `audit` / `apply` / `setup`. Loads the data layers
-(first to last, later wins): **`defaults/ao3/`** (generated master lists — see below) ← `defaults/`
-(curated generic taste) ← `config.toml` (column map + behavior toggles) ← `overrides/` (per-user,
-**gitignored**, same file formats, survives pip upgrades). `load_maps()` builds the in-memory maps
-(fandom and trope chains are flattened, so a curated re-point of a generated master cascades);
-`transform()`
-is the per-book core: fandom alias→canonical, character folding (global + fandom-scoped), genre
-split→canon→route, tag junk-drop / trope-route / redundancy-strip. Strips a redundant tag only when the
-concept already lives in that book's structured column (**backfill-before-strip**).
+**`wrangle.py` — the unified engine.** Subcommands `audit` / `apply` (the `setup` subcommand lives in
+**`setup.py`** — the FanFicFare health check + config writer share nothing with normalization). Loads
+the data layers (first to last, later wins): **`defaults/ao3/`** (generated master lists — see below)
+← `defaults/` (curated generic taste) ← `config.toml` (column map + behavior toggles) ← `overrides/`
+(per-user, **gitignored**, same file formats, survives upgrades). `load_maps()` builds the
+in-memory maps (fandom and trope chains are flattened, so a curated re-point of a generated master
+cascades; dirs are injectable params for tests); `transform()` is the per-book core: fandom
+alias→canonical, character folding (global + fandom-scoped), genre split→canon→route, tag junk-drop /
+trope-route / redundancy-strip. Strips a redundant tag only when the concept already lives in that
+book's structured column (**backfill-before-strip**). Pass `log=` and transform appends its per-value
+**decisions** (kind, where, before, after) — the audit's examples read this log, never a re-derivation
+of the rules. **`wrangle.plan(cfg, maps) → Plan`** runs the full-library transform ONCE; `preview()` /
+`guard()` / `step()` / `write()` all read that one plan (the CLI and the wizard drive the same object).
+`Plan.restrict(ids)` narrows the WRITE set (`changes`/`diffs` and the per-book SAFETY counters)
+*after* the full compute — `read_library` stays library-wide because `transform()` needs global
+context (tagcanon majority spelling, `known_chars`), so scoping the read would change the answer
+for the selected books. `apply --books` uses it; `audit` is deliberately library-wide (its report
+reads transform's decision log, whose tuples carry no book id).
 
 **The FFF→Calibre column model** (see README "FanFicFare → Calibre columns"): `category`→`#fandoms`,
 `characters`→`#characters`, `ships`→`#relationships`, `genre`→`#genres`, `status`→`#status`, real
@@ -141,10 +175,17 @@ into the numbered Series field, and aggressive franchise unification (e.g. all F
 
 **`classify.py` — content-based tagging** (separate from the deterministic engine; uses an LLM).
 The LLM engine adapters + retry + availability live in **`engines.py`** (one seam: `_post_json` is the
-HTTP transport tests monkeypatch; `ENGINES`/`ENGINE_ENV`/`PRICING`/`usable_engines`/`ask_retry` are the
-single source the tools and the wizard derive from). The cross-tool CSV formats (proposal / ranked /
-review / ledger, the `"; "` delimiter, timestamped archiving) live in **`artifacts.py`** — never
-hand-read/write those files elsewhere. Two outputs
+HTTP transport tests monkeypatch; `ENGINES`/`ENGINE_ENV`/`PRICING`/`TRAITS`/`usable_engines(env=…)`/
+`ask_retry` are the single source the tools and the wizard derive from — traits (`is_free`/
+`max_workers`/`trait`) replace name string-tests, so adding an engine is one row). The cross-tool CSV formats (proposal /
+ranked / review / ledger / failures, the `"; "` delimiter, timestamped archiving) live in
+**`artifacts.py`** — never hand-read/write those files elsewhere. The user's overrides dir (config
+`[overrides] dir`) and its file formats (headers, delimiter sniffing, append-if-absent, the vocab
+`-term` removal) live in **`overrides.py`** (`overrides_dir`/`ov_path`/`append_lines`/`append_rows`/
+`merge_vocab`/`read_aliases`) — promote's folds and the rejects→overrides flow write through it,
+wrangle/classify/setup read through it; never re-derive the dir or hand-read those files. Book-text
+sampling for `--text-fallback` lives in **`booktext.py`** (`paths(con)` + `extract(path)`: EPUB-as-zip
+with a zip-bomb guard, else `ebook-convert` with a timeout — testable against a fixture EPUB). Two outputs
 per book: `added_tags` (chosen from the controlled vocab — hand-curated `defaults/classify_vocab.txt` ∪ the
 frequency-gated AO3 seed `defaults/classify_vocab_ao3.txt` (the ~120 highest-use AO3 freeform tropes,
 generated by `build_classify_seed.py` from `data/ao3_vocab.csv` so the classifier isn't under-tagging out of
@@ -198,7 +239,10 @@ review-map CSVs (in `data/`). Curated cross-library knowledge (e.g. franchise un
 - **`tropes.csv` is parsed leniently** (`read_tropes` + `resolve_trope_chains` in `wrangle.py`):
   delimiter-sniffed (`,` or `;`), positional columns, unknown route → `tag` (so freeform notes don't crash),
   and variant→canonical chains/cycles are resolved to a terminal at load. Hand-editing it is expected.
-- **Gemini hard-blocks ~1% of extreme content** as `PROHIBITED_CONTENT` (non-configurable; `safetySettings`
+- **Gemini hard-blocks a material share of mature content** as `PROHIBITED_CONTENT` — measured at
+  **7 of 50 books (14%)** on a random sample of the source library (2026-07-26), not the ~1% this
+  file used to claim. Budget for routing roughly one book in seven to a second engine on a full
+  run. (Non-configurable; `safetySettings`
   only relaxes the 4 HARM categories). It's deterministic — recover those books with `--engine openai` or
   `--engine apple`. `classify.py` logs failures to `classify_failures.csv`.
 - **No `tomllib`** under `calibre-debug`'s Python — `common.py` ships a minimal TOML reader (quote-aware so

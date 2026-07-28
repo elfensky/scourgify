@@ -1,13 +1,94 @@
 #!/usr/bin/env python3
-"""The `--step` reject → overrides subsystem, split out of wrangle.py (issue #11).
+"""The ONE owner of the user's overrides/ files — their location (cfg[overrides].dir), headers,
+delimiters, the append-if-absent rule, and the format-semantic readers — plus the `--step`
+reject → overrides subsystem (issue #11).
+
+Writers go through append_lines/append_rows (promote's vocab/trope/alias folds, the
+rejects→overrides flow below) and the format readers live next to them (merge_vocab's '-term'
+removal, read_aliases' delimiter sniff), so a format decided here can't be mis-read elsewhere.
+Appends honor an existing file's delimiter (sniffed like wrangle.read_tropes), so mixed-writer
+files can't corrupt.
 
 `apply --step` walks each book's unique edits and lets you untick individual changes; the rejected
 ones are logged to data/rejects.csv. `scourgify overrides` then turns the deterministic (wrangle)
-rejects into identity-override lines so the same wrong change never recurs. Pure move — no logic
-changes; imports the core engine helpers (read_csv/read_lines/transform) from wrangle."""
+rejects into identity-override lines so the same wrong change never recurs."""
 import os, csv, time, collections
-from scourgify.common import DEFAULTS as DEF, user_dir, norm, ro_connect
-from scourgify.wrangle import read_csv, read_lines, transform
+from scourgify.artifacts import read_rows as read_csv
+from scourgify.common import DEFAULTS as DEF, load_config, user_dir, norm, read_lines, ro_connect
+
+
+def overrides_dir(cfg: dict | None = None) -> str:
+    """The user's overrides dir — cfg[overrides].dir under user_dir(). The ONE resolution:
+    wrangle.load_maps, setup's health check, and every reader/writer here go through it,
+    so a relocated dir can never split writers from readers."""
+    cfg = cfg or load_config()
+    return os.path.join(user_dir(), cfg.get("overrides", {}).get("dir", "overrides"))
+
+
+def ov_path(name: str) -> str:
+    """A file inside the user's overrides dir (config-resolved)."""
+    return os.path.join(overrides_dir(), name)
+
+
+def _delim_of(path: str, default: str = ",") -> str:
+    """The delimiter an existing override CSV already uses (sniffed like wrangle.read_tropes);
+    `default` for a new file."""
+    if os.path.exists(path):
+        first = open(path).readline()
+        if ";" in first and first.count(";") >= first.count(","): return ";"
+        if "," in first: return ","
+    return default
+
+
+def append_lines(path: str, lines: list) -> list:
+    """Append plain lines to a list file (vocab / allowlists), skipping ones already present.
+    -> the lines actually added."""
+    return _append_override(path, lines)
+
+
+def merge_vocab(terms: list, path: str | None = None) -> list:
+    """Apply the overrides vocab file to a base term list: a plain line appends (case-insensitive
+    dedup), '-term' removes (later lines win — a promote append at the end beats an old removal),
+    comments/blanks ignored. The reader half of append_lines' format, owned next to it."""
+    path = path or ov_path("classify_vocab.txt")
+    terms = list(terms)
+    if os.path.exists(path):
+        for l in open(path):
+            l = l.strip()
+            if not l or l.startswith("#"): continue
+            if l.startswith("-"): terms = [t for t in terms if t.lower() != l[1:].strip().lower()]
+            elif l.lower() not in {t.lower() for t in terms}: terms.append(l)
+    return terms
+
+
+def read_aliases(path: str | None = None) -> dict:
+    """candidate(lower) -> target from promote_aliases.csv, sniffing the delimiter the same way
+    append_rows preserves it — a ';' file round-trips instead of parsing as one column. {} if absent."""
+    path = path or ov_path("promote_aliases.csv")
+    out = {}
+    if os.path.exists(path):
+        for r in csv.DictReader(open(path), delimiter=_delim_of(path)):
+            if r.get("candidate") and r.get("target"):
+                out[r["candidate"].strip().lower()] = r["target"].strip()
+    return out
+
+
+def append_rows(path: str, header: list, rows: list) -> int:
+    """Append CSV rows, honoring the file's existing delimiter (default ','), writing the header
+    on first write, skipping rows already present. -> how many were added."""
+    delim = _delim_of(path)
+    new = not os.path.exists(path)
+    existing = set() if new else {tuple(r) for r in csv.reader(open(path), delimiter=delim)}
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    added = 0
+    with open(path, "a", newline="") as f:
+        w = csv.writer(f, delimiter=delim)
+        if new: w.writerow(header)
+        for r in rows:
+            key = tuple(str(x) for x in r)
+            if key in existing: continue
+            w.writerow(r); existing.add(key); added += 1
+    return added
 
 
 # ---------------- 1-by-1 review (`--step`): reconstruct + rejects → overrides ----------------
@@ -87,10 +168,11 @@ def _step_walk(m: dict, beh: dict, cols: dict, perbook: dict, changes: dict,
     `changes` and never shown. Mutates `changes` in place (revert-rejected-from-full-result) and
     returns the rejects to log. rich-only — the caller guards with ui.interactive()."""
     from scourgify import ui
+    from scourgify.common import titles as book_titles
+    from scourgify.wrangle import transform            # lazy: wrangle imports this module at top
     lab2key = {v: k for k, v in cols.items()}
     ids = sorted(unique, reverse=True)                         # newest ids first
-    con = ro_connect()
-    titles = dict(con.execute("SELECT id, title FROM books")) if ids else {}   # fetch all: --step's id set is unbounded, so an IN(?) list could exceed SQLite's variable cap
+    titles = book_titles(ro_connect(), ids) if ids else {}     # large sets fetch all (IN() cap lives in common)
     rejects = []
     for pos, b in enumerate(ids):
         edits = unique[b]
@@ -140,10 +222,10 @@ def _append_override(path: str, lines: list) -> list:
 def build_overrides(do_apply: bool = False, master: bool = False) -> None:
     """Read data/rejects.csv, turn the auto-suppressible wrangle rejects into identity-override lines
     (grouped by target file), and list the manual ones for hand-editing. Dry-run unless do_apply."""
-    from scourgify.common import REJECTS
-    if not os.path.exists(REJECTS):
-        print(f"no rejects logged yet ({os.path.basename(REJECTS)} not found — reject something in `apply --step` first)."); return
-    rows = [r for r in read_csv(REJECTS) if r.get("stage") == "wrangle"]
+    from scourgify.common import rejects_path
+    if not os.path.exists(rejects_path()):
+        print(f"no rejects logged yet ({os.path.basename(rejects_path())} not found — reject something in `apply --step` first)."); return
+    rows = [r for r in read_csv(rejects_path()) if r.get("stage") == "wrangle"]
     if not rows:
         print("no wrangle rejects to act on (classify rejects are AI hallucinations — log-only)."); return
     seen, auto, manual = set(), collections.defaultdict(list), []
@@ -158,7 +240,7 @@ def build_overrides(do_apply: bool = False, master: bool = False) -> None:
             for fn, line in actions: auto[fn].append(line)
         else:
             manual.append((r["kind"], col, r["before"], r["after"], reason))
-    tgt = DEF if master else os.path.join(user_dir(), "overrides")
+    tgt = DEF if master else overrides_dir()
     where = "defaults/ (MASTER — checkout only; installed defaults are read-only)" if master else "overrides/"
     print(f"{'APPLY' if do_apply else 'DRY-RUN'} — {sum(len(v) for v in auto.values())} auto-suppressible line(s) → {where}")
     total_added = 0
@@ -188,15 +270,15 @@ def build_overrides(do_apply: bool = False, master: bool = False) -> None:
 def _archive_consumed_rejects() -> None:
     """Move the auto (now-suppressed) wrangle rejects out of rejects.csv into a timestamped archive;
     keep manual wrangle rows and all classify rows (still actionable / informational)."""
-    from scourgify.common import REJECTS, REJECT_COLS
-    rows = read_csv(REJECTS)
+    from scourgify.common import rejects_path, REJECT_COLS
+    rows = read_csv(rejects_path())
     keep = [r for r in rows if not (r.get("stage") == "wrangle" and r.get("class") == "auto")]
     gone = [r for r in rows if r.get("stage") == "wrangle" and r.get("class") == "auto"]
     if gone:
-        arch = REJECTS.replace(".csv", f"_applied_{time.strftime('%Y%m%d-%H%M%S')}.csv")
+        arch = rejects_path().replace(".csv", f"_applied_{time.strftime('%Y%m%d-%H%M%S')}.csv")
         with open(arch, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=REJECT_COLS, extrasaction="ignore"); w.writeheader(); w.writerows(gone)
-    with open(REJECTS, "w", newline="") as f:
+    with open(rejects_path(), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=REJECT_COLS, extrasaction="ignore"); w.writeheader(); w.writerows(keep)
 
 
