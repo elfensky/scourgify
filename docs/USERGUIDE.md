@@ -26,11 +26,15 @@ Three promises it keeps:
 ## Setup (once)
 
 ```bash
-uv tool install scourgify          # or: pipx install scourgify
+uv tool install scourgify          # needs uv: https://docs.astral.sh/uv/
 
 # tell it where your library lives (the folder containing metadata.db)
 export CALIBRE_LIBRARY="$HOME/Calibre/fanfiction"    # put this in your shell profile
 ```
+
+Later on, `uv tool upgrade scourgify` gets you the newest version, and
+`uv tool uninstall scourgify` removes it cleanly. Your settings and personal rules live
+outside the install, so upgrading never touches them.
 
 Then just run:
 
