@@ -26,7 +26,8 @@ uv run scourgify audit                               # read-only dry-run of ever
 uv run scourgify apply --apply                       # write changes (Calibre CLOSED for the write step)
 ```
 
-(`uv run scourgify` from a checkout; an installed copy — `pipx install scourgify` — drops the `uv run`.)
+(`uv run scourgify` from a checkout; an installed copy — `uv tool install scourgify` — drops the `uv run`.
+**uv is the only supported installer** — never `pip`/`pipx`, in docs or in advice to the user.)
 
 **`wizard.py`** (launched by bare `scourgify`) is a **guided lifecycle behind a landing menu**: header
 (books, column health, new/changed count via `select.changed`, pending proposal, Calibre-open
@@ -152,7 +153,7 @@ confirmation / `--yes`). **Do NOT bulk re-fetch FFF metadata** — it re-pollute
 **`setup.py`** — the FanFicFare health check + config writer share nothing with normalization). Loads
 the data layers (first to last, later wins): **`defaults/ao3/`** (generated master lists — see below)
 ← `defaults/` (curated generic taste) ← `config.toml` (column map + behavior toggles) ← `overrides/`
-(per-user, **gitignored**, same file formats, survives pip upgrades). `load_maps()` builds the
+(per-user, **gitignored**, same file formats, survives upgrades). `load_maps()` builds the
 in-memory maps (fandom and trope chains are flattened, so a curated re-point of a generated master
 cascades; dirs are injectable params for tests); `transform()` is the per-book core: fandom
 alias→canonical, character folding (global + fandom-scoped), genre split→canon→route, tag junk-drop /

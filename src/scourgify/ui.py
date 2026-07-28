@@ -15,7 +15,9 @@ try:
     from rich.prompt import Prompt, Confirm
     from rich.table import Table
 except ImportError:
-    raise SystemExit("the wizard needs the `rich` package:  python3 -m pip install rich")
+    raise SystemExit("the wizard needs the `rich` package (a declared dependency, so this means a "
+                     "partial install):\n  uv tool install --force scourgify   "
+                     "— or from a checkout:  uv run scourgify")
 
 console = Console()
 
