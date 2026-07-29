@@ -75,6 +75,17 @@ def test_default_engine_key_judge_prefers_first_judge_capable():
     assert wizard._default_engine_key([("1", "apple", "h")], judge=True) == "1"   # nothing capable: first
 
 
+def test_default_engine_key_never_defaults_to_an_unusable_engine():
+    """⏎ on the promote picker used to land on claude with no ANTHROPIC_API_KEY set — the picker
+    rejected its own default and re-asked. The default must be usable."""
+    opts = [("1", "apple", "h"), ("2", "claude", "h"), ("3", "openai", "h"), ("c", "compare", "h")]
+    usable = {"apple", "openai"}                                  # no claude key in env
+    assert wizard._default_engine_key(opts, judge=True, usable=usable) == "3"
+    assert wizard._default_engine_key(opts, judge=False, usable=usable) == "1"
+    assert wizard._default_engine_key(opts, judge=False, usable={"openai"}) == "3"   # skips unusable apple
+    assert wizard._default_engine_key(opts, judge=True, usable=set()) == "1"         # nothing usable: first
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
