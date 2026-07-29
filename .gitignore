@@ -32,4 +32,5 @@ classify_state.json
 # tool state (desloppify scan/plan state + scorecard; octopus scratch)
 .desloppify/
 .claude-octopus/
+.claude/
 scorecard.png
