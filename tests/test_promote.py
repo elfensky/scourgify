@@ -116,7 +116,7 @@ def test_apply_decisions_routing():
         w.writerow(["Amoral Deity", "1", "alias", "Morality", "same", "med", "True"])
         w.writerow(["Chapter 3 Spoiler", "1", "reject", "", "plot", "high", "False"])
     n = apply_decisions(review, vocab, tropes, aliases, ledger)
-    assert n == {"promote": 1, "alias": 1, "reject": 1}
+    assert n == {"promote": 1, "alias": 1, "reject": 1, "skipped": 0}
     assert "Gacha Mechanic" in open(vocab).read()
     # fresh override files are comma-delimited (the overrides.py owner's default; appends to a
     # legacy ';' file would sniff and keep ';' — see test_overrides_append_honors_delimiter)
@@ -181,7 +181,7 @@ def test_apply_decisions_normalizes_verdict():
     ledger_tags = {r["tag"] for r in csv.DictReader(open(ledger))}
     assert "Soul Bond" in ledger_tags
     assert "Chapter 7 Reveal" not in ledger_tags
-    assert n == {"promote": 1, "alias": 0, "reject": 0}
+    assert n == {"promote": 1, "alias": 0, "reject": 0, "skipped": 1}   # the bogus row is COUNTED, not silent
 
 
 def test_parse_decision_strips_formula_chars():
@@ -304,6 +304,53 @@ def test_backfill_skips_tags_already_in_a_structured_column():
 def test_backfill_drop_redundant_removes_a_book_left_with_nothing():
     from scourgify.promote import backfill_drop_redundant
     assert backfill_drop_redundant({1: {"Fantasy"}}, {1: {"fantasy"}}) == {}
+
+
+def test_backfill_drops_a_tag_wrangle_renames_or_junk_drops():
+    """The other half of the same fight: a trope rename (X -> Y) or a junk-drop leaves the tag in
+    NO column, so `homes` can't see it and backfill re-added X forever — the wizard's 'N books to
+    backfill' hint outliving every backfill. Observed live 2026-07-28."""
+    from scourgify.promote import backfill_drop_unstable
+    adds = {1: {"Soul Bonded", "Time Loop"}, 2: {"Soul Bonded"}}
+    assert backfill_drop_unstable(adds, {"Time Loop"}) == {1: {"Time Loop"}}   # book 2 drops out entirely
+
+
+def test_wrangle_stable_rejects_a_renamed_tag(tmp=None):
+    """wrangle_stable goes through the real transform(), so it can't desync from the maps."""
+    import tempfile, os
+    from scourgify.promote import wrangle_stable
+    with tempfile.TemporaryDirectory() as d:
+        old = os.environ.get("SCOURGIFY_HOME"); os.environ["SCOURGIFY_HOME"] = d
+        try:
+            os.makedirs(os.path.join(d, "overrides"))
+            with open(os.path.join(d, "overrides", "tropes.csv"), "w") as f:
+                f.write("variant,canonical,route\nSoul Bonded,Soul Bond,tag\n")
+            keep = wrangle_stable({"Soul Bonded", "Soul Bond"})
+            assert "Soul Bonded" not in keep, keep      # wrangle renames it -> never a backfill target
+            assert "Soul Bond" in keep, keep            # the terminal survives
+        finally:
+            os.environ.pop("SCOURGIFY_HOME", None) if old is None else os.environ.__setitem__("SCOURGIFY_HOME", old)
+
+
+def test_apply_decisions_counts_rows_it_could_not_decide():
+    """An 'error' verdict / empty alias target writes no ledger row on purpose, so the candidate
+    stays pending. apply must SAY so — else it reports success and the wizard's hint survives the
+    apply with nothing on screen explaining why."""
+    import tempfile, os
+    from scourgify import promote, artifacts, common
+    with tempfile.TemporaryDirectory() as d:
+        old = os.environ.get("SCOURGIFY_HOME"); os.environ["SCOURGIFY_HOME"] = d
+        try:
+            os.makedirs(common.data_dir()); os.makedirs(os.path.join(d, "overrides"))
+            with open(artifacts.review(), "w") as f:
+                f.write("tag,count,verdict,target,reason,confidence,contested\n"
+                        "Good,3,promote,,ok,high,False\n"
+                        "Flaky,2,error,,transport failure,low,False\n"
+                        "Bad,1,alias,,empty target,low,False\n")
+            n = promote.apply_decisions()
+            assert n["promote"] == 1 and n["skipped"] == 2, n
+        finally:
+            os.environ.pop("SCOURGIFY_HOME", None) if old is None else os.environ.__setitem__("SCOURGIFY_HOME", old)
 
 
 def test_backfill_drop_redundant_is_case_and_punctuation_insensitive():

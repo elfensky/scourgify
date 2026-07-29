@@ -314,7 +314,11 @@ def _promote_review_menu():
         ("d", "discard", "set aside without applying (archived; nothing written)"),
     ], default="a" if (npro or nal) else "d")
     if choice == "a":
-        promote.apply_decisions(); ui.say("done ✓  (run the backfill step to tag the source books)", "green")
+        res = promote.apply_decisions()
+        ui.say("done ✓  (run the backfill step to tag the source books)", "green")
+        if res.get("skipped"):                    # else the candidates hint outlives the apply, unexplained
+            ui.say(f"{res['skipped']} candidate(s) could not be decided (engine error / bad alias target) — "
+                   "still listed; re-run promote to retry them.", "yellow")
     elif choice == "d":
         arch = artifacts.archive(artifacts.review(), "discarded")
         ui.say(f"set aside -> {os.path.basename(arch)}", "dim")
