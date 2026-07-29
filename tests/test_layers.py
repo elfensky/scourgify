@@ -65,6 +65,26 @@ def test_shipped_ao3_layer_well_formed():
         assert all(r["name"] != r["master"] for r in rows), f"self-row in {fn}"
 
 
+def test_no_vocab_term_is_rewritten_by_wrangle():
+    """The two engines must agree on spelling. A vocab term wrangle RENAMES ('Found Family' ->
+    'Families of Choice') or JUNK-DROPS ('Multi') means the paid classifier is told to pick a word
+    the deterministic pass immediately overwrites or bins — the proposal CSV then disagrees with
+    the library. Measured live 2026-07-28: 20 renames + 1 junk-drop out of 233 terms.
+
+    A term wrangle MOVES into a structured column (Angst -> #genres, OC -> #characters) is fine
+    and deliberate — that's the classifier feeding the columns, and the user's own overrides file
+    documents relying on it — so this only pins renames and drops."""
+    from scourgify import classify, wrangle, common
+    cfg = common.load_config(); m = wrangle.load_maps(cfg); beh = cfg.get("behavior", {})
+    bad = []
+    for t in classify.load_vocab():
+        tags = wrangle.transform({"tags": [t]}, m, beh)[0].get("tags")
+        if tags and tags != [t]: bad.append(f"{t!r} renamed to {tags[0]!r}")
+        elif not tags and not any(v for k, v in wrangle.transform({"tags": [t]}, m, beh)[0].items()
+                                  if k != "tags"): bad.append(f"{t!r} junk-dropped")
+    assert not bad, "classify vocab fights wrangle:\n  " + "\n  ".join(bad)
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
