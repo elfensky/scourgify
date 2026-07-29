@@ -146,26 +146,32 @@ def apply_decisions(review_path: str | None = None, vocab_path: str | None = Non
     tropes_path = tropes_path or ov_path("tropes.csv")
     if not os.path.exists(review_path):
         raise SystemExit(f"no review to apply ({os.path.basename(review_path)} not found — run promote first).")
-    n = {"promote": 0, "alias": 0, "reject": 0}
+    n = {"promote": 0, "alias": 0, "reject": 0, "skipped": 0}
     for r in read_rows(review_path):
         tag, target = r["tag"], r.get("target", "")
         v = r["verdict"].strip().lower()
         if v not in VERDICTS:
             print(f"  skipped {tag}: unknown verdict {r['verdict']!r}")
+            n["skipped"] += 1
             continue
         if v == "promote":
             append_lines(vocab_path, [tag])
         elif v == "alias":
             if not target.strip() or norm(target) == norm(tag):    # hand-edited self/empty alias: never write a junk fold
                 print(f"  skipped {tag}: alias needs a distinct target (got {target!r})")
+                n["skipped"] += 1
                 continue
             append_rows(tropes_path, ["variant", "canonical", "route"], [[tag, target, "tag"]])
             append_rows(aliases_path, ["candidate", "target"], [[tag, target]])
         n[v] = n.get(v, 0) + 1
         append_ledger(tag, v, target, ledger_path)
     arch = archive(review_path, "applied")
-    print(f"applied: {n['promote']} promoted, {n['alias']} aliased, {n['reject']} rejected; "
-          f"review archived -> {os.path.basename(arch)}")
+    # a skipped row gets no ledger entry ON PURPOSE (an 'error' verdict is a transport failure, not
+    # a decision) — so it stays a candidate. Say so: otherwise apply reports success and the wizard's
+    # "N candidates" hint survives the apply with nothing on screen explaining why.
+    print(f"applied: {n['promote']} promoted, {n['alias']} aliased, {n['reject']} rejected"
+          + (f", {n['skipped']} left UNDECIDED (offered again next run)" if n["skipped"] else "")
+          + f"; review archived -> {os.path.basename(arch)}")
     return n
 
 
@@ -210,6 +216,29 @@ def backfill_drop_redundant(adds: dict, homes: dict) -> dict:
     return out
 
 
+def backfill_drop_unstable(adds: dict, stable) -> dict:
+    """{book: set(tags)} minus the tags `stable` rejects. Pure — see tests."""
+    out = {}
+    for b, tags in adds.items():
+        keep = {t for t in tags if t in stable}
+        if keep: out[b] = keep
+    return out
+
+
+def wrangle_stable(tags) -> set:
+    """The subset of `tags` wrangle leaves alone AS TAGS. backfill_drop_redundant settles the
+    fight for a tag wrangle MOVES into a structured column; this settles it for the other rule
+    kinds — a trope rename (`X → Y`) or a junk-drop leaves the tag in no column at all, so the
+    per-book `homes` check can't see it and backfill re-adds X forever. Rendered through the
+    real transform() rather than by re-reading the maps, so it can't desync from the rules.
+    ponytail: silent — a tag wrangle rewrites is simply never a valid backfill target, and the
+    caller runs on every wizard menu refresh, so a note here would nag once per redraw."""
+    from scourgify import wrangle
+    from scourgify.common import load_config
+    cfg = load_config(); m = wrangle.load_maps(cfg); beh = cfg.get("behavior", {})
+    return {t for t in tags if wrangle.transform({"tags": [t]}, m, beh)[0].get("tags") == [t]}
+
+
 def _homes(con) -> dict:
     """{book: set(norm'd values living in its structured columns)} — the same set wrangle's
     redundancy-strip tests against."""
@@ -244,6 +273,9 @@ def backfill_plan(ledger_path: str | None = None) -> tuple[dict, dict]:
         if new: adds[b] = new
     # never propose a tag wrangle will strip as redundant — that is an endless add/strip loop
     adds = backfill_drop_redundant(adds, _homes(con))
+    # …nor one it renames or junk-drops, which loops the same way with nothing in `homes` to catch it.
+    # Last, and only over the handful of tags the cheap filters left: it loads the wrangle maps.
+    if adds: adds = backfill_drop_unstable(adds, wrangle_stable({t for v in adds.values() for t in v}))
     chg = {b: sorted(cur.get(b, set()) | new) for b, new in adds.items()}
     return chg, adds
 

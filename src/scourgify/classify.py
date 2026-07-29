@@ -45,7 +45,11 @@ def clear_caches() -> None:
     _VOCAB = _ALIASES = _AO3 = None
 
 def _read_vocab_file(path: str) -> list:
-    return [l.strip() for l in open(path) if l.strip() and not l.startswith("#")] if os.path.exists(path) else []
+    """The plain terms in a vocab file. '-term' lines are removal DIRECTIVES (merge_vocab applies
+    them) — reading one as a literal term would put '-Foo' in the prompt's controlled vocabulary."""
+    if not os.path.exists(path): return []
+    return [l.strip() for l in open(path)
+            if l.strip() and not l.startswith("#") and not l.strip().startswith("-")]
 
 def load_vocab() -> list:
     """Curated core ∪ AO3 high-frequency seed, then the user's overrides classify_vocab.txt (a line appends
@@ -53,11 +57,15 @@ def load_vocab() -> list:
     a packaging problem gives a real error at use, not at import, and installed users can override."""
     global _VOCAB
     if _VOCAB is None:
+        curated = f"{HERE}/defaults/classify_vocab.txt"
         terms, have = [], set()                                                   # curated core first, then AO3 seed;
-        for t in (_read_vocab_file(f"{HERE}/defaults/classify_vocab.txt")          # first spelling of a norm wins,
+        for t in (_read_vocab_file(curated)                                        # first spelling of a norm wins,
                   + _read_vocab_file(f"{HERE}/defaults/classify_vocab_ao3.txt")):  # so a hand-edit dup can't sneak in
             if t.lower() not in have: terms.append(t); have.add(t.lower())
-        _VOCAB = merge_vocab(terms)                # the '-term' semantics live with the file's writer (overrides.py)
+        # the curated layer runs through merge_vocab too, so its '-term' lines can trim a term from the
+        # GENERATED ao3 seed (which must never be hand-edited — regeneration overwrites it). Its plain
+        # lines are already in `terms`, so that pass is a no-op for everything but the removals.
+        _VOCAB = merge_vocab(merge_vocab(terms, curated))   # '-term' semantics live with the writer (overrides.py)
     return _VOCAB
 
 _ALIASES = None

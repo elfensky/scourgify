@@ -134,11 +134,15 @@ def _engines(env=None):
     return [(e, e in ok, engines.trait(e, "hint" if e in ok else "unusable")) for e in engines.ENGINES]
 
 
-def _default_engine_key(opts: list, judge: bool = False) -> str:
+def _default_engine_key(opts: list, judge: bool = False, usable=None) -> str:
     """PURE half of the menu default: the first option normally; for judge work (promote's
-    adversarial refereeing) the first judge-capable engine."""
-    if not judge: return opts[0][0]
-    return next((k for k, lbl, _ in opts if engines.trait(lbl, "judge")), opts[0][0])
+    adversarial refereeing) the first judge-capable engine. Both prefer a USABLE engine when
+    `usable` is given — defaulting to one with no API key turns ⏎ into an error the picker has
+    to reject and re-ask. `usable` also excludes the non-engine `extra` rows, which is right."""
+    ok = (lambda lbl: usable is None or lbl in usable)
+    fallback = next((k for k, lbl, _ in opts if ok(lbl)), opts[0][0])
+    if not judge: return fallback
+    return next((k for k, lbl, _ in opts if engines.trait(lbl, "judge") and ok(lbl)), fallback)
 
 
 def _ask_engine(n_todo: int | None = None, judge: bool = False, extra: tuple = ()):
@@ -154,7 +158,7 @@ def _ask_engine(n_todo: int | None = None, judge: bool = False, extra: tuple = (
         opts = (_engine_options(engs, n_todo) if n_todo is not None
                 else [(str(i), e, h) for i, (e, _, h) in enumerate(engs, 1)])
         opts += list(extra)
-        k = ui.menu("engine", opts, default=_default_engine_key(opts, judge))
+        k = ui.menu("engine", opts, default=_default_engine_key(opts, judge, {e for e, ok, _ in engs if ok}))
         if k in {key for key, _, _ in extra}: return k
         name = {key: lbl for key, lbl, _ in opts}[k]
         if not {e: ok for e, ok, _ in engs}[name]:
@@ -314,7 +318,11 @@ def _promote_review_menu():
         ("d", "discard", "set aside without applying (archived; nothing written)"),
     ], default="a" if (npro or nal) else "d")
     if choice == "a":
-        promote.apply_decisions(); ui.say("done ✓  (run the backfill step to tag the source books)", "green")
+        res = promote.apply_decisions()
+        ui.say("done ✓  (run the backfill step to tag the source books)", "green")
+        if res.get("skipped"):                    # else the candidates hint outlives the apply, unexplained
+            ui.say(f"{res['skipped']} candidate(s) could not be decided (engine error / bad alias target) — "
+                   "still listed; re-run promote to retry them.", "yellow")
     elif choice == "d":
         arch = artifacts.archive(artifacts.review(), "discarded")
         ui.say(f"set aside -> {os.path.basename(arch)}", "dim")

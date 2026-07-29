@@ -43,6 +43,42 @@ def test_prune_keeps_only_the_newest():
     assert left == ["ff_20260101T000003.db", "ff_20260101T000004.db", "ff_20260101T000005.db"], left
 
 
+def _snaps(d, sizes):
+    for name, n in sizes:
+        with open(os.path.join(d, name), "w") as f: f.write("x" * n)
+
+
+def test_prune_enforces_a_byte_budget_not_just_a_count():
+    """BACKUP_KEEP alone sets no size ceiling — a snapshot is a whole metadata.db, so 20 copies of
+    a 25 MB db is 500 MB and the wizard's 'getting large' nudge could never be cleared by using the
+    tool normally. Observed live 2026-07-28 at 21 snapshots / 527 MB."""
+    d = tempfile.mkdtemp()
+    _snaps(d, [(f"ff_2026010{i}T000000.db", 100) for i in range(1, 6)])     # 5 x 100B = 500B
+    common._prune_backups(d, keep=20, budget=250)                            # count cap drops nothing
+    left = sorted(os.path.basename(p) for p in
+                  __import__("glob").glob(os.path.join(d, "ff_*.db")))
+    assert left == ["ff_20260103T000000.db", "ff_20260104T000000.db", "ff_20260105T000000.db"], left
+    assert sum(os.path.getsize(os.path.join(d, p)) for p in left) <= 300     # newest kept, oldest gone
+
+
+def test_prune_never_goes_below_the_minimum_however_big():
+    """A library whose db alone busts the budget must still keep a usable rollback history."""
+    d = tempfile.mkdtemp()
+    _snaps(d, [(f"ff_2026010{i}T000000.db", 1000) for i in range(1, 6)])
+    common._prune_backups(d, keep=20, budget=1)                              # budget smaller than one snapshot
+    left = __import__("glob").glob(os.path.join(d, "ff_*.db"))
+    assert len(left) == common.BACKUP_MIN, left
+
+
+def test_prune_leaves_foreign_files_alone():
+    """Only ff_* snapshots are ours; a hand-named backup is the user's and is never auto-deleted."""
+    d = tempfile.mkdtemp()
+    _snaps(d, [("ff_20260101T000000.db", 900), ("ff_20260102T000000.db", 900),
+               ("manual_pre_upgrade.db", 900)])
+    common._prune_backups(d, keep=20, budget=1)
+    assert os.path.exists(os.path.join(d, "manual_pre_upgrade.db"))
+
+
 def test_predict_populated_after_set_field():
     # a set_field REPLACES: untouched books keep their value, touched keep only a non-empty one
     before = {1, 2, 3}
@@ -63,6 +99,9 @@ if __name__ == "__main__":
     test_is_calibre_gui_ignores_cli_tools_and_our_own_helpers()
     test_backup_path_never_collides_within_a_second()
     test_prune_keeps_only_the_newest()
+    test_prune_enforces_a_byte_budget_not_just_a_count()
+    test_prune_never_goes_below_the_minimum_however_big()
+    test_prune_leaves_foreign_files_alone()
     test_predict_populated_after_set_field()
     test_wipe_verdict_thresholds()
     print("ok")

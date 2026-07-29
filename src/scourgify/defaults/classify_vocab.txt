@@ -2,16 +2,14 @@
 # The model may ONLY choose from these — keeps tagging consistent and noise-free. Edit/extend freely.
 # --- tropes ---
 Self-Insert
-SI/OC
-OC
-Reader Insert
+Original Character(s)
 Time Travel
 Reincarnation
 Fix-It
 Slow Burn
 Enemies to Lovers
 Friends to Lovers
-Found Family
+Families of Choice
 Fluff
 Angst
 Hurt/Comfort
@@ -25,8 +23,8 @@ Smart
 Manipulative
 Independent
 Bashing
-BAMF
-Out of Character
+BAMFs
+OOC
 Redemption
 Anti-Hero
 Harem
@@ -34,7 +32,7 @@ Polyamory
 Soulmates
 Soul Bond
 Pining
-Unrequited Love
+Possibly Unrequited Love
 Arranged Marriage
 Pregnancy
 Mpreg
@@ -44,7 +42,7 @@ LitRPG
 Isekai
 Crossover
 Alternate Universe
-Canon Divergence
+Alternate Universe - Canon Divergence
 Wholesome
 Revenge
 Coming of Age
@@ -55,22 +53,20 @@ Worldbuilding
 Het
 Slash
 Femslash
-Gen
-Multi
+Gen Work
 # --- ratings / warnings ---
-NSFW
+Not Suitable/Safe For Work
 Explicit
 Mature
-Teen
+Teenagers
 Smut
 Lemon
 PWP
 Gore
 Graphic Violence
-Major Character Death
 Minor Character Death
-Underage
-Non-Con
+Underage - Freeform
+Non-Consensual
 Dub-Con
 Abuse
 Torture
@@ -94,12 +90,11 @@ Future Knowledge
 Dimension Travel
 Multiverse Travel
 Transmigration
-Divine Intervention
-Mentorship
-Body Swap
-Genderbend
+Deus Ex Machina
+Mentors
+Bodyswap
+Gender Bender
 Secret Identity
-Trauma Recovery
 Self-Discovery
 Memory Loss
 Time Loop
@@ -117,3 +112,6 @@ Breeding
 Threesome
 Dom/sub
 Incest
+
+# --- corrections to the generated AO3 seed (see classify_vocab_ao3.txt; never hand-edit that) ---
+-Implied Sexual Content
