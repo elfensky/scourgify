@@ -29,7 +29,13 @@ def user_dir() -> str:
 # Paths are FUNCTIONS, never import-time constants — $SCOURGIFY_HOME set after import (tests)
 # must still redirect the whole tree.
 BACKUP_KEEP = 20                                      # keep this many newest snapshots; older ones are pruned
-BACKUP_WARN = 500 * 1024 * 1024                       # wizard nudges to trim past this many bytes of snapshots
+# ...but a snapshot is a whole metadata.db, so the COUNT cap alone sets no size ceiling: a 25 MB db
+# × 20 is 500 MB, a 100 MB one is 2 GB. The byte budget is the real cap — prune drops the oldest
+# until the snapshots fit, so the steady state is always under it and the wizard's nudge (below)
+# is something the user can actually act on instead of a permanent banner.
+BACKUP_BUDGET = 1024 * 1024 * 1024                    # total bytes of ff_* snapshots to keep
+BACKUP_MIN = 3                                        # ...but never prune below this many, however big they are
+BACKUP_WARN = BACKUP_BUDGET                           # wizard nudges past this — i.e. only for files prune can't touch
 REJECT_COLS = ["ts", "stage", "book", "title", "kind", "column", "before", "after", "class"]
 
 
@@ -317,13 +323,24 @@ def _backup_path(dirpath: str | None = None):
         p = os.path.join(dirpath, f"{base}_{n}.db"); n += 1
     return p
 
-def _prune_backups(dirpath: str | None = None, keep: int | None = None):
-    """Keep only the `keep` (default BACKUP_KEEP) newest snapshots (the timestamp name sorts
-    chronologically)."""
-    dirpath, keep = dirpath or backups_dir(), keep or BACKUP_KEEP
-    for p in sorted(glob.glob(os.path.join(dirpath, "ff_*.db")))[:-keep]:
-        try: os.remove(p)
-        except OSError: pass
+def _prune_backups(dirpath: str | None = None, keep: int | None = None, budget: int | None = None):
+    """Keep the `keep` (default BACKUP_KEEP) newest snapshots, then drop the oldest of those until
+    they fit in `budget` bytes — never going below BACKUP_MIN, so a library whose db alone busts
+    the budget still keeps a usable rollback history. The timestamp name sorts chronologically."""
+    dirpath = dirpath or backups_dir()
+    keep = BACKUP_KEEP if keep is None else keep
+    budget = BACKUP_BUDGET if budget is None else budget
+    snaps = sorted(glob.glob(os.path.join(dirpath, "ff_*.db")))    # oldest first
+    def drop(p):
+        try: os.remove(p); return True
+        except OSError: return False
+    for p in snaps[:-keep] if keep else snaps: drop(p)
+    snaps = snaps[-keep:] if keep else []
+    sizes = {p: os.path.getsize(p) for p in snaps if os.path.exists(p)}
+    snaps = [p for p in snaps if p in sizes]
+    while len(snaps) > BACKUP_MIN and sum(sizes.values()) > budget:
+        p = snaps.pop(0)                                            # oldest first
+        if drop(p): sizes.pop(p)
 
 # Defense-in-depth write guard: refuse a change-set that would catastrophically empty a populated
 # column. wrangle's semantic guards (data_loss/tag_loss) fire far earlier; this is the last-line net
