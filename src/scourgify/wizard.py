@@ -24,6 +24,8 @@ from scourgify import artifacts, common, engines, wrangle, classify, staleness, 
 from scourgify import setup as setup_mod
 from scourgify.common import library, db_path, load_config, ro_connect, custom_column_id, calibre_open
 
+BATCH_DEFAULT = 100     # wizard chunk size for the never-classified backlog; below SPEND_GATE
+                        # deliberately NOT equal to it, so the spend confirm still fires on a repeat sweep
 COLS = ["#fandoms", "#characters", "#relationships", "#genres", "#status", "#updated", "#wrangled"]
 ENGINE_KEYS = engines.ENGINE_ENV               # single source of truth (defined in engines); never disagree
 
@@ -102,13 +104,13 @@ def stage_wrangle():
         ui.say("nothing to normalize ✓", "green"); return
     ui.say("(per-value detail any time: scourgify audit)", "dim")
     choice = ui.menu(f"apply to {p.n_books} books? (Calibre closed; auto-backup)", [
-        ("a", "apply all", "write every book's normalizations in one pass"),
-        ("r", "review 1-by-1", "walk each book's unique changes; untick to reject (mass folds auto-apply)"),
-        ("s", "skip", "leave the library unchanged"),
-    ], default="a")
-    if choice == "s":
+        ("1", "apply", "apply all", "write every book's normalizations in one pass"),
+        ("2", "step", "review 1-by-1", "walk each book's unique changes; untick to reject (mass folds auto-apply)"),
+        ("3", "skip", "skip", "leave the library unchanged"),
+    ], default="apply")
+    if choice == "skip":
         ui.say("(skipped — nothing written)", "dim"); return
-    if choice == "r":
+    if choice == "step":
         p.step()
     p.write()
     ui.say("done ✓", "green")
@@ -134,15 +136,15 @@ def _engines(env=None):
     return [(e, e in ok, engines.trait(e, "hint" if e in ok else "unusable")) for e in engines.ENGINES]
 
 
-def _default_engine_key(opts: list, judge: bool = False, usable=None) -> str:
+def _default_engine_id(opts: list, judge: bool = False, usable=None) -> str:
     """PURE half of the menu default: the first option normally; for judge work (promote's
     adversarial refereeing) the first judge-capable engine. Both prefer a USABLE engine when
     `usable` is given — defaulting to one with no API key turns ⏎ into an error the picker has
     to reject and re-ask. `usable` also excludes the non-engine `extra` rows, which is right."""
-    ok = (lambda lbl: usable is None or lbl in usable)
-    fallback = next((k for k, lbl, _ in opts if ok(lbl)), opts[0][0])
+    ok = (lambda ident: usable is None or ident in usable)
+    fallback = next((i for _, i, _, _ in opts if ok(i)), opts[0][1])
     if not judge: return fallback
-    return next((k for k, lbl, _ in opts if engines.trait(lbl, "judge") and ok(lbl)), fallback)
+    return next((i for _, i, _, _ in opts if engines.trait(i, "judge") and ok(i)), fallback)
 
 
 def _ask_engine(n_todo: int | None = None, judge: bool = False, extra: tuple = ()):
@@ -156,29 +158,38 @@ def _ask_engine(n_todo: int | None = None, judge: bool = False, extra: tuple = (
             ui.error("no engine is usable — set an API key, or install the afm binary / a swift toolchain.")
             return None
         opts = (_engine_options(engs, n_todo) if n_todo is not None
-                else [(str(i), e, h) for i, (e, _, h) in enumerate(engs, 1)])
-        opts += list(extra)
-        k = ui.menu("engine", opts, default=_default_engine_key(opts, judge, {e for e, ok, _ in engs if ok}))
-        if k in {key for key, _, _ in extra}: return k
-        name = {key: lbl for key, lbl, _ in opts}[k]
+                else [(str(i), e, e, h) for i, (e, _, h) in enumerate(engs, 1)])
+        # extras continue the engine numbering but keep their own symbolic id, so the caller never
+        # has to know how many engines exist (renumbering them by position used to return a digit
+        # as the engine name -> KeyError, which _stage_guard does not absorb: session over)
+        opts += [(str(len(engs) + i), ident, lbl, hint) for i, (ident, lbl, hint) in enumerate(extra, 1)]
+        name = ui.menu("engine", opts, default=_default_engine_id(opts, judge, {e for e, ok, _ in engs if ok}))
+        if name in {ident for ident, _, _ in extra}: return name
         if not {e: ok for e, ok, _ in engs}[name]:
             ui.error(f"{name} isn't usable here — {dict((e, h) for e, _, h in engs)[name]}"); continue
         return name
 
 
-def _scope_options(ch: dict, total: int) -> tuple[list, str]:
-    """PURE half of the scope menu: (options, default) from the changed-map + book count —
-    testable without a console (the drive half below just asks)."""
-    opts = []
-    if ch:                                        # the cheap default: only what's new since the last run
-        why = collections.Counter(ch.values())
-        opts.append(("n", f"new/changed — {len(ch)} books",
-                     "books added or updated since the last classify: "
-                     + ", ".join(f"{n} {r}" for r, n in why.most_common())))
-    opts.append(("a", f"whole library — {total:,} books · full pass",
-                 "re-tag EVERY book regardless of tag count — a paid engine over this many books costs real money"))
-    opts.append(("s", "skip", "tag nothing this run (a targeted redo any time: scourgify classify --last 30 / --since DATE)"))
-    return opts, ("n" if ch else "a")
+def _scope_options(ch: dict, total: int, outstanding: int = 0) -> tuple[list, str]:
+    """PURE half of the scope menu: (options, default). Every row keeps a FIXED slot whether or
+    not it applies — an empty one greys out (id=None) instead of vanishing, so the number a user
+    has memorised never comes to mean something else. Slot 1 hiding used to make '2' mean either
+    'whole library (real money)' or 'never classified' depending on library state."""
+    why = collections.Counter(ch.values())
+    opts = [
+        ("1", "changed" if ch else None, f"new/changed — {len(ch)} books" if ch else "new/changed — none",
+         ("books added or updated since the last classify: "
+          + ", ".join(f"{n} {r}" for r, n in why.most_common())) if ch
+         else "nothing added or updated since the last classify"),
+        ("2", "unclassified" if outstanding else None,
+         f"never classified — {outstanding:,} books" if outstanding else "never classified — none",
+         "books classify has never attempted; work through them a chunk at a time" if outstanding
+         else "every sendable book has been classified at least once"),
+        ("3", "all", f"whole library — {total:,} books · full pass",
+         "re-tag EVERY book regardless of tag count — a paid engine over this many books costs real money"),
+        ("4", "skip", "skip", "tag nothing this run (a targeted redo any time: scourgify classify --books / --since DATE)"),
+    ]
+    return opts, ("changed" if ch else ("unclassified" if outstanding else "all"))
 
 
 def _engine_options(engs: list, n_todo: int) -> list:
@@ -187,23 +198,35 @@ def _engine_options(engs: list, n_todo: int) -> list:
     opts = []
     for i, (e, ok, hint) in enumerate(engs, 1):
         cost = classify.est_cost(n_todo, e)
-        opts.append((str(i), e, f"{hint}  ·  {'free' if not cost else f'~${cost:.2f}'} for {n_todo} books"))
+        opts.append((str(i), e, e, f"{hint}  ·  {'free' if not cost else f'~${cost:.2f}'} for {n_todo} books"))
     return opts
 
 
 def stage_classify():
     con = ro_connect(); ch = select.changed(con)
-    total = common.book_count(con); con.close()
+    total = common.book_count(con)
+    # the wizard always samples book text, so the outstanding count must be measured the same way
+    outstanding = len(select.pick(con, "unclassified", seen=artifacts.classified_ids(), text_fallback=True))
+    con.close()
     if not ch:
         ui.say("no new or changed books since the last classify.", "dim")
-    opts, default = _scope_options(ch, total)
+    opts, default = _scope_options(ch, total, outstanding)
     scope = ui.menu("classify scope", opts, default=default)
-    if scope == "s":
+    if scope == "skip":
         ui.say("(skipped — nothing tagged)", "dim"); return
+    batch = 0
+    if scope == "unclassified" and outstanding > BATCH_DEFAULT:
+        # the backlog is the whole expensive pass, so ask how much of it to do now. N is a COUNT
+        # slicing an identity-keyed set, not a position: the next run resumes at the next N
+        # whatever was added, deleted or re-fetched in between.
+        batch = ui.ask_int(f"how many books this run?  {outstanding:,} outstanding",
+                           BATCH_DEFAULT, lo=1, hi=outstanding)
     # thin descriptions sample the book text instead of being dropped; exactly one scope flag
     # (whole-library reuses select.pick("all")). The plan is resolved ONCE — the cost shown and
     # confirmed below is over the same `todo` set classify_run executes (never a re-gather).
-    a = classify.default_opts(text_fallback=True, incremental=scope == "n", **{"all": scope == "a"})
+    # NB batch must be set BEFORE plan(): Plan.__init__ is the only reader of it.
+    a = classify.default_opts(text_fallback=True, incremental=scope == "changed",
+                              unclassified=scope == "unclassified", batch=batch, **{"all": scope == "all"})
     p = classify.plan(a)                          # owns a COPY of a — steering goes through p.opts
     targets, todo = p.targets, p.todo
     if not targets:
@@ -241,6 +264,36 @@ def stage_classify():
     p.run()                                       # the SAME plan that was priced — no second gather
 
 
+def _proposal_options(n_rows: int, n_tagged: int) -> list:
+    """ONE slot layout for the proposal menu whether or not any book got tags. There used to be
+    two menus under the same title with different rows, so the same key meant 'review 1-by-1' in
+    one and 'discard' in the other. Now 'review 1-by-1' simply greys out (keeping slot 2) when
+    there is nothing to walk. Pure — see tests."""
+    return [
+        ("1", "apply", "apply",
+         f"write tags to {n_tagged} books + stamp all {n_rows} processed (Calibre closed; auto-backup)" if n_tagged
+         else f"stamp {n_rows} processed books so they aren't re-classified (no tags to add)"),
+        ("2", "step" if n_tagged else None, "review 1-by-1",
+         "walk each book's tags; untick to reject an AI-guessed tag before it's written" if n_tagged
+         else "nothing to walk — no book got tags this run"),
+        ("3", "keep", "keep", "leave it pending — hand-review the CSV first; the wizard offers it again next run"),
+        ("4", "discard", "discard", "set it aside without applying (archived as *_discarded_*.csv, nothing written)"),
+    ]
+
+
+def _do_proposal(choice: str) -> None:
+    """Act on a _proposal_options id — shared by both entries into the menu."""
+    if choice == "apply":
+        classify.apply_proposal(); ui.say("done ✓", "green")
+    elif choice == "step":
+        classify.apply_proposal_step(); ui.say("done ✓", "green")
+    elif choice == "discard":
+        arch = artifacts.archive(artifacts.prop(), "discarded")
+        ui.say(f"set aside -> {os.path.basename(arch)}", "dim")
+    else:
+        ui.say("(kept pending)", "dim")
+
+
 def stage_review():
     if not os.path.exists(artifacts.prop()):
         ui.say("no pending proposal — nothing to review ✓", "green"); return
@@ -252,15 +305,8 @@ def stage_review():
     if not tagged:                                    # every book was classified but matched no new vocab tags
         ui.say(f"{len(rows)} books were classified but got no new vocab tags this run.", "yellow")
         ui.say("apply to STAMP them as processed — else they're re-sent to the LLM every run.", "dim")
-        choice = ui.menu("proposal", [
-            ("a", "apply", f"stamp {len(rows)} processed books so they aren't re-classified (no tags to add)"),
-            ("d", "discard", "set aside — books stay unstamped and WILL be re-classified next run"),
-        ], default="a")
-        if choice == "a":
-            classify.apply_proposal(); ui.say("done ✓", "green")
-        else:
-            arch = artifacts.archive(artifacts.prop(), "discarded")
-            ui.say(f"set aside -> {os.path.basename(arch)}", "dim")
+        choice = ui.menu("proposal", _proposal_options(len(rows), 0), default="apply")
+        _do_proposal(choice)
         return
     cnt = collections.Counter(t for r in tagged for t in r["added_tags"])
     t = Table(box=box.SIMPLE, title=f"proposal from {vintage} — {len(tagged)} of {len(rows)} books get tags")
@@ -276,23 +322,7 @@ def stage_review():
     if n_failed:
         ui.say(f"⚠ {n_failed} books failed classification — see {artifacts.fail()} (recover with --engine apple)", "yellow")
     ui.say(f"full proposal: {artifacts.prop()}", "dim")
-    choice = ui.menu("proposal", [
-        ("a", "apply", f"write tags to {len(tagged)} books + stamp all {len(rows)} processed (Calibre closed; auto-backup)"),
-        ("r", "review 1-by-1", "walk each book's tags; untick to reject an AI-guessed tag before it's written"),
-        ("k", "keep", "leave it pending — hand-review the CSV first; the wizard offers it again next run"),
-        ("d", "discard", "set it aside without applying (archived as *_discarded_*.csv, nothing written)"),
-    ], default="a")
-    if choice == "a":
-        classify.apply_proposal()
-        ui.say("done ✓", "green")
-    elif choice == "r":
-        classify.apply_proposal_step()
-        ui.say("done ✓", "green")
-    elif choice == "d":
-        arch = artifacts.archive(artifacts.prop(), "discarded")
-        ui.say(f"set aside -> {os.path.basename(arch)}", "dim")
-    else:
-        ui.say("(kept pending)", "dim")
+    _do_proposal(ui.menu("proposal", _proposal_options(len(rows), len(tagged)), default="apply"))
 
 
 def _promote_review_menu():
@@ -313,17 +343,17 @@ def _promote_review_menu():
     ui.say(f"full verdicts (edit before applying if you like): {artifacts.review()}", "dim")
     npro, nal = len(by.get("promote", [])), len(by.get("alias", []))
     choice = ui.menu("verdicts", [
-        ("a", "apply", f"promote {npro} to the vocab, fold {nal} aliases (writes overrides/)"),
-        ("k", "keep", "leave the review file to hand-edit; the wizard offers it again next run"),
-        ("d", "discard", "set aside without applying (archived; nothing written)"),
-    ], default="a" if (npro or nal) else "d")
-    if choice == "a":
+        ("1", "apply", "apply", f"promote {npro} to the vocab, fold {nal} aliases (writes overrides/)"),
+        ("2", "keep", "keep", "leave the review file to hand-edit; the wizard offers it again next run"),
+        ("3", "discard", "discard", "set aside without applying (archived; nothing written)"),
+    ], default="apply" if (npro or nal) else "discard")
+    if choice == "apply":
         res = promote.apply_decisions()
         ui.say("done ✓  (run the backfill step to tag the source books)", "green")
         if res.get("skipped"):                    # else the candidates hint outlives the apply, unexplained
             ui.say(f"{res['skipped']} candidate(s) could not be decided (engine error / bad alias target) — "
                    "still listed; re-run promote to retry them.", "yellow")
-    elif choice == "d":
+    elif choice == "discard":
         arch = artifacts.archive(artifacts.review(), "discarded")
         ui.say(f"set aside -> {os.path.basename(arch)}", "dim")
     else:
@@ -391,7 +421,6 @@ TASKS = [
 ]
 WORKFLOW = [(name, why, fn) for k, name, why, fn, wf in TASKS if wf]
 _FN = {name: fn for k, name, why, fn, wf in TASKS}
-_NAME_BY_KEY = {k: name for k, name, why, fn, wf in TASKS}
 _WF_NAMES = [name for name, why, fn in WORKFLOW]
 # natural successor for a standalone task = the next stage in the guided workflow (overrides has none)
 NEXT = {_WF_NAMES[i]: _WF_NAMES[i + 1] for i in range(len(_WF_NAMES) - 1)}
@@ -414,11 +443,11 @@ def _run_stage(name):
     _stage_guard(_FN[name])
 
 
-def run_task(key):
+def run_task(name):
     """Run the chosen standalone task, then offer its natural workflow successor, one step at a time,
     so a task you jumped into can flow onward like the guided run instead of dead-ending at the menu."""
-    _run_stage(_NAME_BY_KEY[key])
-    nxt = NEXT.get(_NAME_BY_KEY[key])
+    _run_stage(name)
+    nxt = NEXT.get(name)
     while nxt and ui.confirm(f"continue to the natural next step — [bold]{nxt}[/]?", default=True):
         _run_stage(nxt)
         nxt = NEXT.get(nxt)
@@ -451,15 +480,16 @@ def _task_hint(name, info):
 
 
 def landing_menu(info):
-    """Ask what to do: the whole guided run, or a single task. Pending work is flagged inline."""
-    opts = [("w", "full maintenance run", "the guided lifecycle end to end: " +
+    """Ask what to do: the whole guided run, or a single task. Pending work is flagged inline.
+    Returns a symbolic id — 'workflow', a task NAME, or 'quit' — never a digit."""
+    opts = [("w", "workflow", "full maintenance run", "the guided lifecycle end to end: " +
              " → ".join(name for name, _, _ in WORKFLOW))]
     for k, name, why, fn, wf in TASKS:
         hint = _task_hint(name, info)
         short = why.split(" — ")[0].split(",")[0][:60]        # keep the menu row tight
-        opts.append((k, name, (f"[cyan]● {hint}[/]  " if hint else "") + f"[dim]{short}[/]"))
-    opts.append(("q", "quit", "leave the wizard"))
-    return ui.menu("what would you like to do?", opts, default="w")
+        opts.append((k, name, name, (f"[cyan]● {hint}[/]  " if hint else "") + f"[dim]{short}[/]"))
+    opts.append(("q", "quit", "quit", "leave the wizard"))
+    return ui.menu("what would you like to do?", opts, default="workflow")
 
 
 def _run():
@@ -479,12 +509,12 @@ def _run():
     while True:
         header(info)
         choice = landing_menu(info)
-        if choice == "q":
+        if choice == "quit":
             break
-        elif choice == "w":
+        elif choice == "workflow":
             run_workflow()
         else:
-            run_task(choice)                  # single task + offer of the natural next step(s)
+            run_task(choice)                  # a task NAME + offer of the natural next step(s)
         info = snapshot()                     # refresh so the next menu reflects what just changed
     console.print(); ui.say("done — run `scourgify` any time to pick up where you left off.", "dim")
 

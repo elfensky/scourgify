@@ -132,22 +132,67 @@ def transcript():
         yield buf
 
 
-OPTS = [("a", "apply", "write it"), ("r", "review", "1-by-1"), ("s", "skip", "nothing")]
+OPTS = [("1", "apply", "apply", "write it"), ("2", "review", "review", "1-by-1"),
+        ("3", "skip", "skip", "nothing")]
 
 
-def test_menu_returns_the_scripted_key_and_echoes_it():
-    with common.scripted_answers(["r"]), transcript() as buf:
-        assert ui.menu("proposal", OPTS) == "r"
+def test_menu_returns_the_symbolic_id_not_the_key():
+    """The key is what you type; the id is what the caller dispatches on. Keeping them apart is
+    what stops a conditional row from making a digit mean two different things."""
+    with common.scripted_answers(["2"]), transcript() as buf:
+        assert ui.menu("proposal", OPTS) == "review"
     out = buf.getvalue()
     assert "apply" in out and "review" in out      # still rendered in full — scripting is not silencing
-    assert "r" in out.split("choose")[-1]          # and the answer is echoed, so the log reads like a session
+    assert "2" in out.split("choose")[-1]          # and the answer is echoed, so the log reads like a session
 
 
 def test_menu_blank_answer_takes_the_default():
     with common.scripted_answers([""]), transcript():
-        assert ui.menu("proposal", OPTS, default="s") == "s"
+        assert ui.menu("proposal", OPTS, default="skip") == "skip"
     with common.scripted_answers([""]), transcript():
-        assert ui.menu("proposal", OPTS) == "a"    # no default given -> the first key, as when unscripted
+        assert ui.menu("proposal", OPTS) == "apply"   # no default -> the first row, as when unscripted
+
+
+def test_menu_rejects_a_default_that_is_not_an_enabled_row():
+    """rich hands a default straight back without checking it against the choices, so a stale one
+    used to escape on the interactive path only — green CI, broken wizard. Caught at build time,
+    and as a ValueError rather than an assert so -O cannot strip it."""
+    for bad in ("nope", "1"):                      # a wrong id, and a KEY passed where an id belongs
+        try:
+            with transcript(): ui.menu("proposal", OPTS, default=bad)
+            assert False, f"default {bad!r} must raise"
+        except ValueError as e:
+            assert "default" in str(e)
+
+
+def test_menu_disabled_row_keeps_its_slot_but_cannot_be_chosen():
+    """An inapplicable row greys out instead of vanishing, so the numbering never shifts under a
+    user (or a script) that has memorised it."""
+    opts = [("1", None, "unavailable", "nothing to do"), ("2", "go", "go", "")]
+    with common.scripted_answers(["2"]), transcript() as buf:
+        assert ui.menu("t", opts) == "go"
+    assert "unavailable" in buf.getvalue()         # still rendered, just dimmed
+    with common.scripted_answers(["1"]), transcript():
+        try:
+            ui.menu("t", opts); assert False, "a disabled row must not be selectable"
+        except common.ScriptError:
+            pass
+
+
+def test_ask_int_raises_on_garbage_when_scripted():
+    """Interactive: re-ask. Scripted: RAISE — re-asking would silently eat the next canned answer
+    and shift the queue by one, the drift this seam exists to make loud."""
+    with common.scripted_answers([""]), transcript():
+        assert ui.ask_int("how many", 100) == 100          # blank takes the default
+    with common.scripted_answers(["250"]), transcript():
+        assert ui.ask_int("how many", 100) == 250
+    for bad in ("abc", "0", "9999"):
+        with common.scripted_answers([bad]), transcript():
+            try:
+                ui.ask_int("how many", 100, lo=1, hi=500)
+                assert False, f"{bad!r} must raise, not re-ask"
+            except common.ScriptError:
+                pass
 
 
 def test_menu_rejects_a_key_that_is_not_on_offer():
@@ -163,7 +208,7 @@ def test_menu_rejects_a_key_that_is_not_on_offer():
 
 def test_menu_accepts_an_also_key():
     with common.scripted_answers(["q"]), transcript():
-        assert ui.menu("proposal", OPTS, also=("q",)) == "q"   # unrendered aliases still validate
+        assert ui.menu("proposal", OPTS, also=("q",)) == "q"   # unrendered aliases stand for themselves
 
 
 def test_confirm_routes_through_the_shared_parser():

@@ -106,13 +106,16 @@ by glob — a new test file is in CI by existing. `uv run tests/test_wizard_flow
 wizard stages in-process with canned answers (`common.scripted_answers`) against a fixture library —
 the interaction flows (no-write paths, classify scope-skip spending nothing, a skip-all step review
 leaving the proposal byte-identical) are pinned in CI in milliseconds. The same seam drives the wizard
-from a shell: `SCOURGIFY_SCRIPT="w,s,n,q" scourgify` answers each prompt in order — a **test hook, not
+from a shell: `SCOURGIFY_SCRIPT="w,3,n,q" scourgify` answers each prompt in order — a **test hook, not
 a user feature** (no `--help` entry). A blank answer (an empty entry, e.g. the trailing one in
 `"4,"`) means "press enter" and takes the prompt's default — and the wizard's defaults are apply /
 full maintenance run, so a blank is a real "yes" here, not a no-op. An empty or whitespace-only
 `SCOURGIFY_SCRIPT` (e.g. an interpolated-but-unset var) is instead parsed as an empty queue, so the
-very first prompt raises rather than silently walking those defaults. A script that runs short or
-names a key that isn't on offer raises `common.ScriptError`, which is deliberately NOT a
+very first prompt raises rather than silently walking those defaults. Menu keys are **digits** on a fixed slot per row — a row that does not apply greys out rather
+than vanishing, so a number never comes to mean something else; only the landing menu's `w`/`q`
+and `ui.checklist`'s `a`/`s`/`q` (where digits already mean "toggle item N") stay letters.
+`ui.menu` returns a row's **symbolic id**, never its key, so no call site dispatches on a
+position. A script that runs short or names a key that isn't on offer raises `common.ScriptError`, which is deliberately NOT a
 `SystemExit`: `wizard._stage_guard` absorbs those, and swallowing a scripting failure would hand
 back a green run that asserted nothing.
 `uv run tests/drive_wizard.py` (NOT in CI; a few seconds) stays the pre-release check that a real PTY
@@ -139,7 +142,10 @@ FFF fetch → uv run scourgify apply --apply           # 1. junk-drop/canonicali
 ```
 
 (Or the wizard: `uv run scourgify` walks exactly this loop, guided. Targeted redo:
-`classify --last 30` / `--since DATE`.)
+`classify --books …` / `--since DATE`; work through a backlog with `classify --unclassified --batch N`,
+which is the one scope that ADVANCES — it selects books classify has never attempted
+(`artifacts.classified_ids`: applied archives + the pending proposal + the failure log) and can
+actually send (`select.sendable`), so each apply strictly shrinks it.)
 
 **⚠️ Cost:** a full Gemini `classify --fresh` pass over the library is **tens of euros** — measured
 2026-07-30 against a 7,949-book library at list price: **≈$25** for `gemini-2.5-flash`

@@ -40,21 +40,32 @@ def test_task_hint_other_tasks_and_unknown():
     assert wizard._task_hint("bogus", {}) == ""
 
 
-def test_scope_options_pure_half():
-    # the decide-what-to-offer half of the scope menu, no console anywhere near it
-    opts, default = wizard._scope_options({1: "new", 2: "updated", 3: "new"}, 100)
-    assert [k for k, _, _ in opts] == ["n", "a", "s"] and default == "n"
-    assert "3 books" in opts[0][1] and "2 new" in opts[0][2]
-    opts, default = wizard._scope_options({}, 1234)
-    assert [k for k, _, _ in opts] == ["a", "s"] and default == "a"    # nothing changed -> whole-library default
-    assert "1,234 books" in opts[0][1]
+def test_scope_options_slots_are_stable_in_every_library_state():
+    """THE Part-C invariant. Rows are conditional, so if an empty one vanished the numbering would
+    shift and '2' would mean 'never classified' in one state and 'whole library, real money' in
+    another. Every row keeps its slot; an inapplicable one greys out (id=None) instead."""
+    changed, empty = wizard._scope_options({1: "new", 2: "updated", 3: "new"}, 100, 50)[0], \
+                     wizard._scope_options({}, 1234, 0)[0]
+    for opts in (changed, empty):
+        assert [k for k, _, _, _ in opts] == ["1", "2", "3", "4"]          # slots never move
+        assert [i for _, i, _, _ in opts][2:] == ["all", "skip"]           # ... and neither do meanings
+    assert [i for _, i, _, _ in changed][:2] == ["changed", "unclassified"]
+    assert [i for _, i, _, _ in empty][:2] == [None, None]                 # both greyed, still present
+    assert "3 books" in changed[0][2] and "2 new" in changed[0][3]
+    assert "1,234 books" in empty[2][2]
+
+
+def test_scope_options_default_follows_availability():
+    assert wizard._scope_options({1: "new"}, 100, 50)[1] == "changed"      # cheapest useful scope
+    assert wizard._scope_options({}, 100, 50)[1] == "unclassified"         # nothing changed -> the backlog
+    assert wizard._scope_options({}, 100, 0)[1] == "all"                   # nothing left -> only a full pass
 
 
 def test_engine_options_price_the_billed_set():
     engs = [("apple", True, "free, on-device"), ("claude", True, "key set ✓")]
     opts = wizard._engine_options(engs, 10)
-    assert opts[0][:2] == ("1", "apple") and "free" in opts[0][2]
-    assert opts[1][1] == "claude" and "~$" in opts[1][2] and "for 10 books" in opts[1][2]
+    assert opts[0][:3] == ("1", "apple", "apple") and "free" in opts[0][3]
+    assert opts[1][1] == "claude" and "~$" in opts[1][3] and "for 10 books" in opts[1][3]
 
 
 def test_engines_cloud_usable_iff_key_in_env():
@@ -67,23 +78,40 @@ def test_engines_cloud_usable_iff_key_in_env():
     assert all(h for _, _, h in wizard._engines(env={}))                 # every engine always carries a hint
 
 
-def test_default_engine_key_judge_prefers_first_judge_capable():
-    """The promote picker's default: first judge-capable engine (apple is not); classify's: '1'."""
-    opts = [("1", "apple", "h"), ("2", "claude", "h"), ("3", "openai", "h")]
-    assert wizard._default_engine_key(opts, judge=False) == "1"
-    assert wizard._default_engine_key(opts, judge=True) == "2"
-    assert wizard._default_engine_key([("1", "apple", "h")], judge=True) == "1"   # nothing capable: first
+OPTS3 = [("1", "apple", "apple", "h"), ("2", "claude", "claude", "h"), ("3", "openai", "openai", "h")]
 
 
-def test_default_engine_key_never_defaults_to_an_unusable_engine():
+def test_default_engine_id_judge_prefers_first_judge_capable():
+    """The promote picker's default: first judge-capable engine (apple is not). An ENGINE NAME,
+    not a key — the default has to survive the row order changing."""
+    assert wizard._default_engine_id(OPTS3, judge=False) == "apple"
+    assert wizard._default_engine_id(OPTS3, judge=True) == "claude"
+    assert wizard._default_engine_id([("1", "apple", "apple", "h")], judge=True) == "apple"
+
+
+def test_default_engine_id_never_defaults_to_an_unusable_engine():
     """⏎ on the promote picker used to land on claude with no ANTHROPIC_API_KEY set — the picker
     rejected its own default and re-asked. The default must be usable."""
-    opts = [("1", "apple", "h"), ("2", "claude", "h"), ("3", "openai", "h"), ("c", "compare", "h")]
+    opts = OPTS3 + [("4", "compare", "compare", "h")]
     usable = {"apple", "openai"}                                  # no claude key in env
-    assert wizard._default_engine_key(opts, judge=True, usable=usable) == "3"
-    assert wizard._default_engine_key(opts, judge=False, usable=usable) == "1"
-    assert wizard._default_engine_key(opts, judge=False, usable={"openai"}) == "3"   # skips unusable apple
-    assert wizard._default_engine_key(opts, judge=True, usable=set()) == "1"         # nothing usable: first
+    assert wizard._default_engine_id(opts, judge=True, usable=usable) == "openai"
+    assert wizard._default_engine_id(opts, judge=False, usable=usable) == "apple"
+    assert wizard._default_engine_id(opts, judge=False, usable={"openai"}) == "openai"
+    assert wizard._default_engine_id(opts, judge=True, usable=set()) == "apple"      # nothing usable: first
+    # `compare` is not an engine, but engines.trait() falls back to the cloud defaults for any
+    # unlisted name and so reports it judge-capable — the usable filter is what keeps it out.
+    assert wizard._default_engine_id(opts, judge=True, usable=usable) != "compare"
+
+
+def test_proposal_menu_has_one_slot_layout_tagged_or_not():
+    """Two menus once shared the title "proposal" with different rows, so the same key meant
+    'review 1-by-1' in one and 'discard' in the other — a keystroke that silently archived a
+    proposal. One layout now; 'review 1-by-1' greys out when no book got tags."""
+    full, stamp = wizard._proposal_options(10, 4), wizard._proposal_options(10, 0)
+    for opts in (full, stamp):
+        assert [k for k, _, _, _ in opts] == ["1", "2", "3", "4"]
+        assert [i for _, i, _, _ in opts][::3] == ["apply", "discard"]   # slots 1 and 4 fixed
+    assert full[1][1] == "step" and stamp[1][1] is None                  # slot 2 kept, just disabled
 
 
 if __name__ == "__main__":
