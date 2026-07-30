@@ -170,6 +170,36 @@ def archive_rows(rows: list, kind: str, path: str | None = None) -> str:
     return arch
 
 
+def _ids(path: str, col: str = "book_id") -> set:
+    out = set()
+    for r in read_rows(path):
+        try: out.add(int(r[col]))
+        except (KeyError, ValueError, TypeError): pass
+    return out
+
+
+def classified_ids() -> set:
+    """Books classify has already ATTEMPTED — the cursor a "what's left" scope reads.
+
+    Three sources, and the choice of each is load-bearing:
+      *_applied_* archives — classification actually written to the library.
+      the pending proposal — results in hand, awaiting the review step.
+      classify_failures.csv — attempted and BLOCKED (e.g. Gemini's PROHIBITED_CONTENT, a
+        deterministic ~14% of a mature library). An errored book gets no proposal row on
+        purpose so it can be retried, but it must not stay "outstanding" forever: it would
+        re-occupy the head of every future batch and be re-billed with no progress. The log is
+        self-clearing (merge_failures drops a book that later succeeds), so this retires a book
+        exactly as long as it stays blocked.
+
+    Deliberately NOT *_discarded_* — discarding means the user threw those results away, so
+    those books must stay candidates."""
+    seen = set()
+    for f in applied_proposals(): seen |= _ids(f)
+    seen |= _ids(prop())
+    seen |= _ids(fail())
+    return seen
+
+
 def applied_proposals() -> list:
     """Every archived applied proposal, oldest first — the naming convention is archive()'s,
     so the glob lives here with it (promote.backfill reads the book↔proposed_new record back)."""
