@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-29
 **Ships as:** 1.6.0 (feature)
-**Status:** approved design, not yet implemented
+**Status:** IMPLEMENTED 2026-07-30 (see "What changed during implementation")
 **Supersedes:** the positional `--window` design of the same date (rejected — see "Rejected: positional windows")
 
 ## Problem
@@ -223,3 +223,43 @@ two.
   knowing that it cannot (all 7,949 are stamped; only 111 have an applied proposal), but proposal
   membership answers
   the question without a migration.
+
+
+## What changed during implementation
+
+Adversarial review of this spec, then building it, moved five things. Recorded because each was a
+defect in the design, not a matter of taste.
+
+**1. A prerequisite the spec never mentioned: `est_cost` was wrong by 5x.** The whole motivation
+rested on "a full pass is ≈€50" while the tool's own estimator said $4.59 for gemini. Measured
+against real books: `gemini-2.5-flash` is a reasoning model and bills ~1,061 hidden THINKING tokens
+per book as output, so the true list price is ~$24.51 and the flat-80 estimate quoted a fifth of it
+— in the confirm shown immediately before spending. Fixed first (`engines.TRAITS['out_tokens']`),
+since every number downstream depended on it.
+
+**2. `classified_ids()` also counts the FAILURE LOG.** The spec had applied + pending only. But an
+errored book gets no proposal row on purpose (so it can retry), and every picker is newest-first
+while `--batch` takes a prefix — so failures re-occupy the head of every batch. At Gemini's measured
+~14% block rate the sweep asymptotes at ~1,229 of 7,838 and then bills 200 books a run for nothing.
+The log is self-clearing, so counting it retires a book exactly as long as it stays blocked.
+
+**3. `select.sendable()` — the scope must exclude what `gather()` would drop.** `gather()` drops a
+book under 40 chars of text before it can reach a proposal, so 148 such books would have sat in
+"never classified" forever and the set could never empty. They are not outstanding work, they are
+unclassifi*able*. `--text-fallback` widens the test to any book with a file to sample.
+
+**4. Symbolic ids alone do NOT fix conditional rows — slots must be stable.** The spec had ids
+fixing dispatch, but the user still types a positional digit, and an id cannot reach the input side.
+A faithful migration of the spec-as-written broke the existing scope-skip cost pin. Rows now keep a
+FIXED slot and grey out (`id=None`) when inapplicable, so a number never changes meaning. This also
+retired a live hazard the spec had merely documented: the two menus titled "proposal" had different
+rows, so one key meant 'review 1-by-1' in one and 'discard' in the other.
+
+**5. `assert default in keys` became a `ValueError`, and `ask_text` became `ask_int`.** `-O` strips
+asserts, and an AssertionError is not a `SystemExit` so `_stage_guard` would not absorb it — the
+spec's own fix carried the failure mode it condemned. The prompt asks for a number, so it validates
+one; scripted runs RAISE on garbage rather than re-asking, which would silently eat the next canned
+answer.
+
+Also: the wizard batch default is 100, deliberately not `SPEND_GATE`'s 200 — a default equal to the
+gate ceiling means a repeated sweep never once prompts.

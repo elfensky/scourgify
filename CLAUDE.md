@@ -40,11 +40,14 @@ promote → backfill** — each dry-running first, showing its report, and askin
 stage auto-skips). There is no separate audit step — the wrangle stage's dry run IS the audit;
 `scourgify audit` stays for the full per-value detail. The wrangle stage drives one
 **`wrangle.plan()`** object (preview → guard → optional step → write; never a recompute). The
-classify stage opens with a **scope menu** — new/changed (the cheap default) or **whole library**
-(a full pass; still offered when nothing's changed) — resolves the run ONCE via
+classify stage opens with a **scope menu** on fixed slots — new/changed (the cheap default),
+**never classified** (the backlog; asks how many to do this run and sets `--batch`), **whole
+library** (a full pass), skip — resolves the run ONCE via
 **`classify.plan()`** (so the € the user confirms is over the exact `todo` set the run bills, and
 the expensive text extraction never runs twice), shows per-engine cost estimates
-(`classify.est_cost`, list prices in `classify.PRICING`), offers an engine **bake-off**
+(`classify.est_cost`, list prices in `classify.PRICING`, per-engine output tokens in
+`engines.TRAITS['out_tokens']` — a reasoning model bills hidden thinking as output, so gemini is
+~14x its visible answer and costs MORE per book than claude despite a lower per-token price), offers an engine **bake-off**
 (`classify.bakeoff`: the same ~5 sample books through every usable engine, display-only), and
 enables `--text-fallback` so thin descriptions get sampled rather than dropped. The review stage offers apply / keep / discard (discard archives to
 `*_discarded_*.csv`). The wrangle and review stages also offer a **1-by-1 review** (`ui.checklist`,
@@ -60,6 +63,16 @@ sparkline, rising candidates).
 
 **`select.py`** — the one owner of "which books does this run operate on"; classify's scope flags and
 the wizard header both go through it, so they can never disagree.
+**`--unclassified` is the only scope that ADVANCES** — the one to chunk a backlog with
+(`--unclassified --batch N`, apply, repeat). It selects books classify has never *attempted*
+(`artifacts.classified_ids()`: applied archives + the pending proposal + **the failure log**) and
+could actually send (`select.sendable()`: description ≥ `MIN_DESC`, or any book with a file to
+sample under `--text-fallback`). Both filters are what make it finite: an errored book gets no
+proposal row on purpose, so without counting failures it re-occupies the head of every batch
+forever; and `gather()` drops a thin-text book before it can reach a proposal, so without
+`sendable` it could never leave the set. Discarded archives are deliberately NOT counted — the user
+threw those results away. `--last N` / `--since` / `--all` do NOT advance (they re-pick the same
+set), and `--all` additionally suppresses the resume by marking every book explicit.
 `parse_books()` owns the `--books` spec grammar (`1,2,3`, `10-20`, `@ids.txt`, or any
 comma-combination; `@file` expands one level deep) and the `ids` pick mode selects exactly those
 books — the one way `classify`, `wrangle apply` and `staleness` are pointed at a named set.
