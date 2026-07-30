@@ -76,7 +76,10 @@ threw those results away. `--last N` / `--since` / `--all` do NOT advance (they 
 set), and `--all` additionally suppresses the resume by marking every book explicit.
 `parse_books()` owns the `--books` spec grammar (`1,2,3`, `10-20`, `@ids.txt`, or any
 comma-combination; `@file` expands one level deep) and the `ids` pick mode selects exactly those
-books — the one way `classify`, `wrangle apply` and `staleness` are pointed at a named set.
+books — the one way `classify`, `wrangle apply` and `staleness` are pointed at a named set. Those same three
+also take **`--last N`** (the N most recently added), which resolves through `select.pick("last")` to ids and
+then reuses the `--books` path — so one grammar, one meaning of "N", across every book-scoped command; the two
+flags are mutually exclusive. The wizard exposes it too (wrangle apply / staleness / classify scope menus).
 A book is new/changed iff unstamped
 ∨ `#updated` > stamp ∨ added-date (`books.timestamp`) > stamp — the added-date clock catches re-fetches
 (FanFicFare bumps it) while staying immune to scourgify's own writes (`last_modified` is deliberately
@@ -137,8 +140,12 @@ works at all — header, landing menu, clean quit. `scourgify audit` remains the
 against-your-library check: full new state, before/after counts, and SAFETY lines asserting **no book loses its
 last fandom or character** (`apply` aborts if any book would end with an empty `#fandoms`/`#characters` it started
 with — a bad `fandoms.csv` alias→"" or an empty `decompose` payload; a blocklisted non-fandom relocated to tags is
-preserved and not counted) plus a **tag mass-deletion guardrail** (`apply` aborts if tags would shrink >25% and
->200 assignments — the signature of an over-broad junk rule). `--force` overrides both.
+preserved and not counted) plus a **tag mass-deletion guardrail** (`apply` aborts if tags would shrink >25%
+AND more than a floor — the signature of an over-broad junk rule). The floor **scales with the run**
+(`_shrink_floor`: `min(200, max(20, assignments//2))`), because a flat 200 silently disarmed the guard on a
+scoped run — `restrict()` narrows the counts, so at ~4 tags/book a 50-book scope holds ~195 assignments and
+wiping ALL of them stayed under the floor. Library-wide behaviour is unchanged (the fraction dominates long
+before the floor); a small scope is no longer a blind spot. `--force` overrides both.
 
 ## Maintenance loop (after new FanFicFare downloads)
 

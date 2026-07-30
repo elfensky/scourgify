@@ -325,19 +325,37 @@ def test_synth_identity_override_is_a_noop_in_transform():
 
 
 # ---- SAFETY guardrails (pure; CLAUDE.md invariants) ----
+def _guard_fires(before, after, force=False):
+    try:
+        tag_loss_guard(before, after, force); return False
+    except SystemExit:
+        return True
+
+
 def test_tag_loss_guard_ceiling():
     # just under the ceiling: never aborts (need BOTH >floor lost AND >fraction shrink)
-    tag_loss_guard(1000, 1000 - TAG_SHRINK_FLOOR, force=False)          # exactly floor lost -> ok
-    tag_loss_guard(100, 0, force=False)                                 # 100% shrink but < floor lost -> ok
-    # over the ceiling: aborts
-    try:
-        tag_loss_guard(1000, 1000 - (TAG_SHRINK_FLOOR + int(1000 * TAG_SHRINK_FRACTION)), force=False)
-        assert False, "expected SystemExit on mass tag deletion"
-    except SystemExit:
-        pass
+    assert not _guard_fires(1000, 1000 - TAG_SHRINK_FLOOR)               # exactly floor lost -> ok
+    assert _guard_fires(1000, 1000 - (TAG_SHRINK_FLOOR + int(1000 * TAG_SHRINK_FRACTION)))
     # --force overrides, and tags_before == 0 is a no-op
-    tag_loss_guard(1000, 0, force=True)
-    tag_loss_guard(0, 0, force=False)
+    assert not _guard_fires(1000, 0, force=True)
+    assert not _guard_fires(0, 0)
+
+
+def test_tag_loss_guard_is_reachable_on_a_scoped_run():
+    """A flat floor silently disarms the guard when `restrict()` narrows the counts: at ~4 tags a
+    book, a 50-book scope holds ~195 assignments, so wiping ALL of them stayed under a 200 floor.
+    Measured on a real library: unreachable below ~51 books, i.e. `apply --books 1-50` could delete
+    every tag those books had while printing a SAFETY line. This test used to assert the hole —
+    `tag_loss_guard(100, 0)` was pinned as "100% shrink but < floor lost -> ok"."""
+    assert _guard_fires(195, 0)              # ~50 books, total wipe  -> MUST abort
+    assert _guard_fires(39, 0)               # ~10 books, total wipe  -> MUST abort
+    assert _guard_fires(100, 0)              # the old hole, now closed
+    # ...without becoming trigger-happy on ordinary scoped edits
+    assert not _guard_fires(195, 165)        # 30 of 195 lost on a 50-book scope -> fine
+    assert not _guard_fires(39, 35)          # a couple of junk tags on 10 books -> fine
+    # library-wide behaviour is unchanged: the fraction dominates long before the floor
+    assert not _guard_fires(31023, 31023 - 7000)
+    assert _guard_fires(31023, 31023 - 8000)
 
 def test_data_loss_guard_aborts_on_last_value_lost():
     data_loss_guard(0, 0, force=False)                                  # nothing lost -> ok

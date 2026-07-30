@@ -267,12 +267,29 @@ def audit(cfg: dict, m: dict) -> None:
 DETAIL_BOOKS = 10           # per-book diff lines shown in the apply preview before deferring to `audit`
 TAG_SHRINK_FRACTION = 0.25  # mass-deletion guardrail: abort if tags shrink more than this fraction ...
 TAG_SHRINK_FLOOR = 200      # ... AND lose more than this many assignments (named like SPEND_GATE/BACKUP_KEEP)
+TAG_SHRINK_MIN = 20         # ... but on a SCOPED run the floor scales down to this, never below it
+
+
+def _shrink_floor(tags_before: int) -> int:
+    """The absolute-loss half of the guardrail, scaled to the run's own size.
+
+    A flat floor silently disarms the guard on a scoped run: `restrict()` narrows the counts to
+    the selected books, and at a typical ~4 tags/book a 50-book scope holds ~195 assignments —
+    so wiping 100% of them stays under a 200 floor and the guard cannot fire, whatever the damage.
+    Measured on a real library: unreachable below ~51 books. `apply --books 1-50` (and now
+    `--last 50`) could delete every tag on those books while printing a reassuring SAFETY line.
+
+    Scaling by half the scope keeps library-wide behaviour identical (the fraction dominates long
+    before the floor does) while making a small scope guardable; TAG_SHRINK_MIN stops a handful of
+    books from tripping on ordinary edits."""
+    return min(TAG_SHRINK_FLOOR, max(TAG_SHRINK_MIN, tags_before // 2))
+
 
 def tag_loss_guard(tags_before: int, tags_after: int, force: bool) -> None:
     """Abort on a suspicious mass-deletion of tags (e.g. an over-broad junk.txt regex).
-    ponytail: heuristic ceiling — >25% shrink AND >200 assignments lost; --force overrides."""
+    ponytail: heuristic ceiling — >25% shrink AND more than the scaled floor lost; --force overrides."""
     lost = tags_before - tags_after
-    if tags_before and lost > max(TAG_SHRINK_FLOOR, int(tags_before * TAG_SHRINK_FRACTION)) and not force:
+    if tags_before and lost > max(_shrink_floor(tags_before), int(tags_before * TAG_SHRINK_FRACTION)) and not force:
         raise SystemExit(f"ABORT: tags would shrink {tags_before} -> {tags_after} assignments (-{lost}). "
                          "Check junk.txt / overrides for an over-broad rule, or re-run with --force.")
 
@@ -540,12 +557,16 @@ def main() -> None:
     p.add_argument("--step", action="store_true", help="with `apply`: review each book's unique changes 1-by-1 (interactive)")
     p.add_argument("--books", default=None, metavar="SPEC",
                    help="with `apply`: only these books — '1,2,3', '10-20', '@ids.txt' (audit is always library-wide)")
+    p.add_argument("--last", type=int, default=0, metavar="N",
+                   help="with `apply`: only the N most recently added books (the same N as classify --last)")
     p.add_argument("--force", action="store_true", help="override the tag mass-deletion guardrail")
     p.add_argument("--yes", "-y", action="store_true", help="non-interactive: take the recommended default for every prompt")
     a = p.parse_args()
-    if a.books is not None and a.command != "apply":
-        raise SystemExit("--books applies to `apply` only (audit is always library-wide: its report "
+    if (a.books is not None or a.last) and a.command != "apply":
+        raise SystemExit("--books/--last apply to `apply` only (audit is always library-wide: its report "
                          "reads the transform's decision log, which carries no book ids).")
+    if a.books is not None and a.last:
+        raise SystemExit("--books and --last are two ways to name the same thing — pick one.")
     if a.command is None:
         from scourgify.common import interactive
         if interactive():
@@ -565,9 +586,13 @@ def main() -> None:
     elif a.command == "apply":
         do_write = a.apply or a.step
         p = plan(cfg, maps)                        # ONE compute: preview, guards, step, and write all read it
-        if a.books is not None:
+        if a.books is not None or a.last:
             from scourgify import select
-            want = select.parse_books(a.books)
+            if a.books is not None:
+                want = select.parse_books(a.books)
+            else:                                  # --last N: the N most recently added, resolved to ids
+                from scourgify.common import ro_connect
+                con = ro_connect(); want = select.pick(con, "last", n=a.last); con.close()
             p.restrict(want)                       # narrows the WRITE set; the read stays library-wide
             print(f"  scope: {len(want)} book(s) by id -> {p.n_books} with changes")
             absent = sum(1 for b in want if b not in p.tagn)

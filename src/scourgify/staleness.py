@@ -75,9 +75,16 @@ def main() -> None:
     p.add_argument("--dead-years", type=float, default=5)
     p.add_argument("--books", default=None, metavar="SPEC",
                    help="only these books: '1,2,3', '10-20', '@ids.txt' (one id per line), or a combination")
+    p.add_argument("--last", type=int, default=0, metavar="N",
+                   help="only the N most recently added books (the same N as classify --last)")
     a = p.parse_args()
 
+    if a.books is not None and a.last:
+        raise SystemExit("--books and --last are two ways to name the same thing — pick one.")
     books = select.parse_books(a.books) if a.books is not None else None
+    if a.last:
+        from scourgify.common import ro_connect
+        con = ro_connect(); books = select.pick(con, "last", n=a.last); con.close()
     label, rows = compute(a.stale_years, a.dead_years, books)
     print(f"staleness audit  (today={datetime.date.today()}, stale>={a.stale_years}y, dead>={a.dead_years}y"
           + (f", scoped to {len(books)} book(s)" if books is not None else "") + ")")

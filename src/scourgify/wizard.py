@@ -107,10 +107,19 @@ def stage_wrangle():
     choice = ui.menu(f"apply to {p.n_books} books? (Calibre closed; auto-backup)", [
         ("1", "apply", "apply all", "write every book's normalizations in one pass"),
         ("2", "step", "review 1-by-1", "walk each book's unique changes; untick to reject (mass folds auto-apply)"),
-        ("3", "skip", "skip", "leave the library unchanged"),
+        ("3", "last", "most recent N books", "write only the newest N — try a rule change on a few books first"),
+        ("4", "skip", "skip", "leave the library unchanged"),
     ], default="apply")
     if choice == "skip":
         ui.say("(skipped — nothing written)", "dim"); return
+    if choice == "last":
+        con = ro_connect(); total = common.book_count(con)
+        n = ui.ask_int(f"how many of the most recent books?  {total:,} in the library",
+                       LAST_DEFAULT, lo=1, hi=total)
+        p.restrict(select.pick(con, "last", n=n)); con.close()   # narrows the WRITE set, not the read
+        if not p.n_books:
+            ui.say("none of those books need changes ✓", "green"); return
+        ui.say(f"scoped to {p.n_books} of the newest {n} books", "dim")
     if choice == "step":
         p.step()
     p.write()
@@ -122,11 +131,24 @@ def stage_staleness():
     if not rows:
         ui.say("all #status values already consistent ✓", "green"); return
     staleness.show(label, rows)                     # the ONE renderer — same output as `scourgify staleness`
-    if ui.confirm(f"re-derive {label} for {len(rows)} books? (Calibre closed; auto-backup)", default=True):
-        staleness.write(label, rows)
-        ui.say("done ✓", "green")
-    else:
-        ui.say("(skipped — nothing written)", "dim")
+    choice = ui.menu(f"re-derive {label} for {len(rows)} books? (Calibre closed; auto-backup)", [
+        ("1", "apply", "apply all", "re-derive #status for every book listed above"),
+        ("2", "last", "most recent N books", "only the newest N of them"),
+        ("3", "skip", "skip", "leave #status unchanged"),
+    ], default="apply")
+    if choice == "skip":
+        ui.say("(skipped — nothing written)", "dim"); return
+    if choice == "last":
+        con = ro_connect(); total = common.book_count(con)
+        n = ui.ask_int(f"how many of the most recent books?  {total:,} in the library",
+                       LAST_DEFAULT, lo=1, hi=total)
+        want = set(select.pick(con, "last", n=n)); con.close()
+        rows = [r for r in rows if r[0] in want]
+        if not rows:
+            ui.say("none of those books need a status change ✓", "green"); return
+        ui.say(f"scoped to {len(rows)} of the newest {n} books", "dim")
+    staleness.write(label, rows)
+    ui.say("done ✓", "green")
 
 
 def _engines(env=None):
