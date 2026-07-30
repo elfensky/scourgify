@@ -4,7 +4,7 @@ module-attribute seams (a fake engine in ENGINES, a recording run_writer) agains
 fixture db, with every artifact under a $SCOURGIFY_HOME temp. Written to pin behavior BEFORE the
 Plan-object refactor: whatever these assert must survive it.
 No framework:  uv run tests/test_classify_run.py   (also pytest-collectable)."""
-import contextlib, os, sys, tempfile
+import contextlib, io, os, sys, tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 from fixture_db import build
@@ -155,6 +155,28 @@ def test_step_review_archives_only_the_books_it_applied():
         assert applied == {1}, applied                       # ONLY the book that was written
         pending = {r["book_id"] for r in artifacts.read_proposal()}
         assert pending == {2, 3}, pending                    # skipped + post-quit stay pending
+
+
+def test_scope_only_reaches_no_engine():
+    """`classify` without --apply is NOT read-only -- it still sends every selected book. This is
+    the flag that makes "what would this select?" free, so it must stop before any engine call and
+    write no proposal. (2026-07-30: a "read-only" smoke test started grinding 7,681 books.)"""
+    class Exploding:
+        def __init__(self, model, timeout): pass
+        def ask(self, prompt): raise AssertionError("scope-only must not reach an engine")
+    books = [{"id": i, "added": f"2026-01-0{i} 10:00:00", "desc": DESC, "tags": []} for i in (1, 2, 3)]
+    with harness(books):
+        saved = classify.ENGINES.get("apple")
+        classify.ENGINES["apple"] = Exploding
+        try:
+            a = classify.default_opts(all=True, scope_only=True, engine="apple")
+            with contextlib.redirect_stdout(io.StringIO()) as buf:
+                classify.classify_run(a)
+        finally:
+            if saved is not None: classify.ENGINES["apple"] = saved
+        out = buf.getvalue()
+        assert "scope-only" in out and "3 would be sent" in out, out
+        assert not os.path.exists(artifacts.prop()), "scope-only must not write a proposal"
 
 
 def test_run_accepts_injected_ask():
