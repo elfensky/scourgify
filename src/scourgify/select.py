@@ -102,11 +102,12 @@ def sendable(con: sqlite3.Connection, text_fallback: bool = False) -> set:
     fallback side (extract() can still come back empty on a DRM'd or odd file), so the scope may
     keep a handful of books that turn out unsendable. Being optimistic is the safe direction —
     it can leave a book in the set, never silently drop one that was classifiable."""
-    from scourgify.booktext import strip_html, paths
+    from scourgify.booktext import strip_html
     ok = {b for b, t in con.execute("SELECT book, text FROM comments")
           if len(strip_html(t or "")) >= MIN_DESC}
-    if text_fallback:
-        ok |= set(paths(con))                     # a file to sample is enough on its own
+    if text_fallback:                             # a file to sample is enough on its own. Asking the
+        ok |= {b for (b,) in con.execute(         # data table directly, not booktext.paths(), which
+            "SELECT DISTINCT book FROM data")}    # resolves absolute paths and so needs CALIBRE_LIBRARY
     return ok
 
 
