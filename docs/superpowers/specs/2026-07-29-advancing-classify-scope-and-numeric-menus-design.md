@@ -20,8 +20,8 @@ through in chunks**:
 
 The stamp cannot serve as the cursor: `#wrangled` is backfilled across the whole library on first
 run by design (`classify.py:189-191`, inside `if not have_wrangled`), so it does not distinguish
-"classified" from "was present when the column was created". Measured: **7,949 stamped, 7,668 ever
-in a proposal, 281 never classified.**
+"classified" from "was present when the column was created". Measured: **7,949 stamped, but only
+111 books in an applied archive** — see Part A for what that means.
 
 **2. Menu keys are inconsistent.** The landing menu is numbered; every menu below it is lettered.
 
@@ -35,13 +35,30 @@ Add one pick mode, owned by `select.py` (CLAUDE.md's sole owner of "which books 
 operate on"):
 
 ```python
-# select.py
+# artifacts.py — owns WHAT COUNTS as classified, next to the archive-naming convention
+def classified_ids() -> set[int]:
+    """Books whose classification was actually WRITTEN: every *_applied_* archive plus the
+    pending proposal. Deliberately NOT *_discarded_* — discarding means the user threw those
+    results away, so those books must stay candidates."""
+
+# select.py — owns WHICH BOOKS a run operates on
 def unclassified(con, seen: set[int]) -> list[int]:
-    """Books with no row in ANY proposal, archived or pending — newest-added-first.
-    `seen` is injected (artifacts is classify's vocabulary, not select's) so this stays pure."""
+    """Books with no applied/pending proposal row — newest-added-first. `seen` is injected
+    (artifacts is classify's vocabulary, not select's) so this stays pure and testable."""
 ```
 
 wired as `pick(con, "unclassified", ids=seen)` and exposed as `classify --unclassified`.
+
+**What counts as classified is a real decision, not a detail.** Measured on the live library:
+111 books sit in applied archives, 0 pending, and **7,656 in _discarded_ archives** — a large
+2026-07-04 run that was billed and then thrown away. Counting discards as done would report 281
+books remaining; the correct definition reports **7,838**. The second number is the honest one:
+those books have no classification written to the library. It is also the only definition under
+which the set behaves — a discard must not retire a book, or the scope stops meaning anything.
+
+(The legacy `classify_proposal_full.csv` in `data/` is written by no current code and is not
+counted. `applied_proposals()` already globs only the `_applied_` convention, so this falls out
+for free.)
 
 **Why this is the correct cursor:**
 
@@ -55,7 +72,8 @@ wired as `pick(con, "unclassified", ids=seen)` and exposed as `classify --unclas
   positional scheme could do
 
 Chunk with the existing `--batch N`. `classify --unclassified --batch 200`, apply, repeat: each run
-strictly shrinks the remaining set. Today that is 281 books, ≈ €2.
+strictly shrinks the remaining set by exactly the batch size. Today that is 7,838 books — a real
+backlog, and precisely the ≈€50 pass the user could not previously break into affordable pieces.
 
 `--fresh` remains the (expensive, documented) way to deliberately re-classify already-done books.
 
@@ -72,16 +90,34 @@ draft missed it and would have raised `AttributeError` on every run).
 ```
 classify scope
   1  new/changed — 12 books
-  2  never classified — 281 books        ← new
+  2  never classified — 7,838 books      ← new
   3  whole library — 7,949 books · full pass
   4  skip
 ```
 
-Row 2 appears only when the set is non-empty, and carries its count so the cost is legible before
-selection. Choosing it sets `unclassified=True`; `--batch` is not exposed in the wizard — the row's
-own count is the batch, and the existing spend confirmation prices it.
+Row 2 appears only when the set is non-empty, and carries its remaining count so the size of the
+backlog is legible before selection. Because that count is currently 7,838 — the whole ≈€50 pass —
+the row **must** ask how much to do this run:
 
-No new prompt primitive is needed. `ui.ask_text` is dropped along with the window grammar.
+```
+> 2
+how many books this run?  7,838 remaining  [200]
+> 200
+→ 200 books, ~$1.40 (openai)
+```
+
+This is the original "N books" ask, and it is safe here in a way the rejected design was not:
+**N is a count, not a position.** It sets `--batch`, which slices an identity-keyed set, so the
+next run resumes at the next 200 regardless of what was added, deleted, or re-fetched in between.
+A blank takes the default; the answer is validated as a positive integer and re-asked on garbage,
+never aborting the stage.
+
+One small prompt primitive, `ui.ask_int(msg, default)`, routed through `common.script_next` like
+every other prompt so `SCOURGIFY_SCRIPT` still drives the flow. (The rejected design's
+`ui.ask_text` + window grammar is gone; this asks for a number and gets a number.)
+
+The existing spend confirmation then prices exactly the N chosen, since `classify.plan()` is still
+resolved once.
 
 ## Part C — digits everywhere except `w` and `q`
 
@@ -119,11 +155,19 @@ The user chose the hard switch over `also=` aliases with this understood.
 
 ## Testing
 
+- `classified_ids()` — counts `*_applied_*` archives and the pending proposal, and **excludes
+  `*_discarded_*`** (the decision that swings the live number between 281 and 7,838, so it gets a
+  test naming both)
 - `unclassified` — pure, given an injected `seen` set: excludes proposed books, includes new ones,
   survives a deleted book, and is newest-added-first
 - the set strictly shrinks after an apply archives a proposal (the property that makes chunked
   sweeping correct — and unlike the rejected design's, it is testable, because it depends on
   membership rather than on the DB not changing underneath)
+- chunking advances: `--unclassified --batch N` twice, with an apply between, yields two
+  **disjoint** batches — the same property the rejected design could only assert on a frozen
+  snapshot, now true under mutation
+- `ui.ask_int` — honours its default on a blank, re-asks on garbage rather than raising through
+  the stage guard, and reads from the scripting seam
 - `--unclassified` reaches `explicit` at `classify.py:257` — a regression test for the
   `AttributeError` class of bug
 - every menu builder's `(key, id, …)` mapping, and that callers dispatch on `id`: specifically that
@@ -176,5 +220,6 @@ two.
 - Windowing `staleness` or `wrangle apply`
 - A sort-key choice — added date, matching every existing picker
 - Making the `#wrangled` stamp distinguish "classified" from "first-run backfill". It is worth
-  knowing that it cannot (281 books are stamped but unclassified), but proposal membership answers
+  knowing that it cannot (all 7,949 are stamped; only 111 have an applied proposal), but proposal
+  membership answers
   the question without a migration.
