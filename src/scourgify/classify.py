@@ -26,7 +26,7 @@ from scourgify.common import (HERE, data_dir, user_dir, ro_connect, custom_colum
                               interactive as _interactive, confirm as _confirm)
 from scourgify.overrides import ov_path, merge_vocab, read_aliases      # overrides/ paths + format readers live there
 from scourgify.artifacts import (prop, rank, fail,                      # artifact paths + formats live in artifacts.py
-                                 read_proposal, write_proposal, write_ranked, archive)
+                                 read_proposal, write_proposal, write_ranked, archive, archive_rows)
 # the engine seam lives in engines.py; re-exported here so `classify.ENGINES` / `classify.ask_retry`
 # stay valid for promote, the wizard, and existing tests
 from scourgify.engines import ENGINES, ENGINE_ENV, PRICING, usable_engines, ask_retry, is_free, max_workers as engine_workers
@@ -234,10 +234,18 @@ def apply_proposal_step() -> None:
     if not decided:
         print("(nothing decided — proposal left untouched.)"); return
     apply_proposal(rows=decided)                   # PROP untouched until success — a writer refusal loses nothing
-    archive(prop(), "applied")                     # the full record (decided + pending) — backfill reads it back
+    # Archive ONLY the rows that were written. An *_applied_* archive is the durable record of
+    # "this book has been classified", so naming a skipped book in one retires it from future
+    # scopes despite nothing reaching the library — quit on book 2 of 200 used to file all 200.
+    # The live proposal still holds the full record until it is replaced below, so a crash in
+    # between loses nothing and simply re-applies (the tag write is a union, i.e. idempotent).
+    arch = archive_rows(decided, "applied")
     if pending:
-        write_proposal(pending)
+        write_proposal(pending)                    # backfill's _proposal_files() reads these from prop()
         print(f"{len(pending)} book(s) left pending for a later run -> {os.path.basename(prop())}")
+    else:
+        os.remove(prop())
+    print(f"applied rows archived -> {os.path.basename(arch)}")
 
 
 # ---- gather books (read-only) ----
