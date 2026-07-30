@@ -45,6 +45,50 @@ def test_review_round_trip_and_archive():
     assert os.path.basename(arch).startswith("review_applied_") and arch.endswith(".csv")
 
 
+def _home(td):
+    """Point the whole artifact tree at a tempdir (paths are functions, so this reaches them)."""
+    os.environ["SCOURGIFY_HOME"] = td
+    os.makedirs(os.path.join(td, "data"), exist_ok=True)
+
+
+def test_classified_ids_counts_applied_pending_and_failures_not_discarded():
+    """The cursor a "what's left" scope reads. Each source is a decision:
+      applied/pending  -> classification written, or in hand awaiting review.
+      failures         -> ATTEMPTED but blocked. Without this an errored book gets no proposal
+                          row (by design, so it can retry), sits at the head of every future
+                          batch and is re-billed forever with zero progress.
+      discarded        -> EXCLUDED. The user threw those results away; the books stay candidates."""
+    old = os.environ.get("SCOURGIFY_HOME")
+    with tempfile.TemporaryDirectory() as td:
+        _home(td)
+        try:
+            artifacts.write_proposal([{"book_id": 1, "title": "p", "added_tags": [], "proposed_new": []}])
+            artifacts.archive(artifacts.prop(), "applied")                       # 1 = applied
+            artifacts.write_proposal([{"book_id": 2, "title": "q", "added_tags": [], "proposed_new": []}])
+            artifacts.archive(artifacts.prop(), "discarded")                     # 2 = discarded
+            artifacts.write_proposal([{"book_id": 3, "title": "r", "added_tags": [], "proposed_new": []}])
+            artifacts.write_failures([[4, "blocked", "blocked:PROHIBITED_CONTENT"]])
+            assert artifacts.classified_ids() == {1, 3, 4}                       # 2 stays a candidate
+        finally:
+            os.environ.pop("SCOURGIFY_HOME", None) if old is None else os.environ.__setitem__("SCOURGIFY_HOME", old)
+
+
+def test_archive_rows_files_only_what_it_is_given():
+    """A partial apply must not name un-applied books in an *_applied_* archive."""
+    old = os.environ.get("SCOURGIFY_HOME")
+    with tempfile.TemporaryDirectory() as td:
+        _home(td)
+        try:
+            rows = [{"book_id": i, "title": f"b{i}", "added_tags": ["T"], "proposed_new": []} for i in (1, 2, 3)]
+            artifacts.write_proposal(rows)
+            arch = artifacts.archive_rows(rows[:1], "applied")
+            assert {r["book_id"] for r in artifacts.read_proposal(arch)} == {1}
+            assert os.path.exists(artifacts.prop())                              # live file untouched
+            assert {r["book_id"] for r in artifacts.read_proposal()} == {1, 2, 3}
+        finally:
+            os.environ.pop("SCOURGIFY_HOME", None) if old is None else os.environ.__setitem__("SCOURGIFY_HOME", old)
+
+
 def test_merge_failures_drops_books_that_have_since_succeeded():
     """The failure log means "failed and not since recovered". Gemini blocked 7 books; re-running
     them through openai succeeded — the documented recovery — but the log still listed all 7,

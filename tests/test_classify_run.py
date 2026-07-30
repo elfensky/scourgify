@@ -128,6 +128,35 @@ def test_apply_proposal_ops_union_stamp_archive():
         assert not os.path.exists(artifacts.prop()) and len(artifacts.applied_proposals()) == 1
 
 
+def test_step_review_archives_only_the_books_it_applied():
+    """An *_applied_* archive is the durable record of "this book was classified" — scopes read it
+    back to decide what is still outstanding. So a book the user SKIPPED (or everything after a
+    quit) must never appear in one: filing it there retires the book while nothing reached the
+    library. Quitting on book 2 of 200 used to archive all 200 as applied."""
+    from scourgify import ui
+    books = [{"id": i, "added": f"2026-01-0{i} 10:00:00", "desc": DESC, "tags": []} for i in (1, 2, 3)]
+    with harness(books, custom=(("wrangled", {}),)):
+        artifacts.write_proposal([{"book_id": 1, "title": "b1", "added_tags": ["Keep"], "proposed_new": []},
+                                  {"book_id": 2, "title": "b2", "added_tags": ["Skipped"], "proposed_new": []},
+                                  {"book_id": 3, "title": "b3", "added_tags": ["AfterQuit"], "proposed_new": []}])
+        saved_w, saved_c, saved_i = classify.run_writer, ui.checklist, ui.interactive
+        # book 1 accepted, book 2 skipped, book 3 never reached (quit)
+        answers = iter([([0], [], "apply"), ([], [], "skip"), ([], [], "quit")])
+        classify.run_writer = lambda ops, force=False: None
+        ui.checklist = lambda *a, **k: next(answers)
+        ui.interactive = lambda: True
+        try:
+            classify.apply_proposal_step()
+        finally:
+            classify.run_writer, ui.checklist, ui.interactive = saved_w, saved_c, saved_i
+
+        (arch,) = artifacts.applied_proposals()
+        applied = {r["book_id"] for r in artifacts.read_proposal(arch)}
+        assert applied == {1}, applied                       # ONLY the book that was written
+        pending = {r["book_id"] for r in artifacts.read_proposal()}
+        assert pending == {2, 3}, pending                    # skipped + post-quit stay pending
+
+
 def test_run_accepts_injected_ask():
     """Plan.run(ask=) — the injected prompt->(text, err) seam, like promote.run's ask=."""
     books = [{"id": 1, "added": "2026-01-01 10:00:00", "desc": DESC}]

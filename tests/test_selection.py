@@ -117,6 +117,58 @@ def test_pick_ids():
     assert select.pick(_con(), "ids", ids=[]) == []
 
 
+# ---- the advancing scope: never attempted, and actually sendable ----
+LONG = "A description comfortably past the forty-character floor. " * 2
+UBOOKS = [dict(id=1, added="2026-01-01 10:00:00+00:00", desc=LONG),
+          dict(id=2, added="2026-01-02 10:00:00+00:00", desc=LONG),
+          dict(id=3, added="2026-01-03 10:00:00+00:00", desc=LONG),
+          dict(id=4, added="2026-01-04 10:00:00+00:00", desc="too short"),   # under MIN_DESC
+          dict(id=5, added="2026-01-05 10:00:00+00:00")]                     # no description at all
+
+
+def _ucon():
+    d = tempfile.mkdtemp()
+    return build(os.path.join(d, "metadata.db"), UBOOKS, custom=[("updated", {}), ("wrangled", {})])
+
+
+def test_unclassified_excludes_attempted_and_unsendable():
+    """The two filters that make this scope FINITE. Without the sendable half, a book gather()
+    would drop for thin text can never reach a proposal, so it never leaves the set: every batch
+    re-selects it and the set never empties."""
+    con = _ucon()
+    assert select.pick(con, "unclassified", seen=set()) == [3, 2, 1]      # newest-added-first
+    assert select.pick(con, "unclassified", seen={2}) == [3, 1]           # attempted -> retired
+    # 4 (thin) and 5 (no description) are never sendable on descriptions alone
+    assert 4 not in select.pick(con, "unclassified", seen=set())
+    assert 5 not in select.pick(con, "unclassified", seen=set())
+
+
+def test_unclassified_widens_when_text_fallback_can_rescue_a_book():
+    """--text-fallback samples the book's prose, so a thin/absent description is no longer
+    disqualifying — but only for a book that actually has a file to sample."""
+    con = _ucon()
+    con.execute("INSERT INTO data VALUES(?,?,?)", (4, "EPUB", "book4"))
+    con.commit()
+    assert 4 in select.pick(con, "unclassified", seen=set(), text_fallback=True)
+    assert 5 not in select.pick(con, "unclassified", seen=set(), text_fallback=True)   # no file
+
+
+def test_unclassified_batches_are_disjoint_and_the_set_shrinks():
+    """The property that makes chunked sweeping correct, and the one the rejected positional
+    design could only assert on a frozen snapshot: simulate applying a batch by adding it to
+    `seen`, and the next batch must not overlap while the remainder strictly shrinks."""
+    con = _ucon()
+    seen, batches = set(), []
+    while True:
+        todo = select.pick(con, "unclassified", seen=seen)[:2]      # --batch 2
+        if not todo: break
+        batches.append(todo); seen |= set(todo)                    # apply -> archived -> attempted
+    flat = [b for chunk in batches for b in chunk]
+    assert flat == [3, 2, 1], flat                                  # every sendable book, exactly once
+    assert len(flat) == len(set(flat))                              # ... and no overlap between batches
+    assert select.pick(con, "unclassified", seen=seen) == []        # the set EMPTIES
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

@@ -75,7 +75,7 @@ def test_classify_scope_skip_reaches_no_engine():
     saved = classify.plan
     classify.plan = boom
     try:
-        with wizard_lib(), common.scripted_answers(["s"]), transcript() as buf:
+        with wizard_lib(), common.scripted_answers(["4"]), transcript() as buf:
             wizard.stage_classify()
     finally:
         classify.plan = saved
@@ -88,7 +88,7 @@ def test_step_review_skipping_every_book_leaves_the_proposal_byte_identical():
     # NB: the file assertions live INSIDE wizard_lib — once it exits, the tempdir is gone and
     # common.data_dir() resolves back to the user's REAL ~/.config/scourgify.
     with wizard_lib(PROPOSAL) as prop:
-        with common.scripted_answers(["r", "s", "s"]), transcript() as buf:
+        with common.scripted_answers(["2", "s", "s"]), transcript() as buf:
             wizard.stage_review()
         assert "nothing decided" in buf.getvalue()
         with open(prop) as f:
@@ -97,7 +97,7 @@ def test_step_review_skipping_every_book_leaves_the_proposal_byte_identical():
 
 def test_review_discard_archives_without_writing():
     with wizard_lib(PROPOSAL) as prop:
-        with common.scripted_answers(["d"]), transcript() as buf:
+        with common.scripted_answers(["4"]), transcript() as buf:
             wizard.stage_review()
         assert "set aside" in buf.getvalue()
         assert not os.path.exists(prop)                               # archived, not applied
@@ -107,7 +107,7 @@ def test_review_discard_archives_without_writing():
 
 def test_review_keep_leaves_the_proposal_pending():
     with wizard_lib(PROPOSAL) as prop:
-        with common.scripted_answers(["k"]), transcript() as buf:
+        with common.scripted_answers(["3"]), transcript() as buf:
             wizard.stage_review()
         assert "kept pending" in buf.getvalue()
         with open(prop) as f:
@@ -151,10 +151,12 @@ def test_a_full_menu_lap_runs_every_task_without_writing():
     then quit. Pins that the menu loop survives a full lap and that stage_staleness / stage_promote
     / stage_backfill / stage_overrides are reached at all — the four stages no other test drives.
     Nothing here may write to the library or reach an engine."""
+    # menu answers are DIGITS (slot numbers, stable in every library state); the bare "s"/"n" are
+    # ui.checklist skips and y/n confirms, which keep letters — see ui.checklist's exception.
     lap = ["1", "n",                  # wrangle  (clean fixture: no apply menu) -> decline staleness
            "2", "n",                  # staleness (already consistent)          -> decline classify
-           "3", "s", "n",             # classify -> scope skip (no engine)      -> decline review
-           "4", "r", "s", "s", "n",   # review -> 1-by-1, SKIP both books       -> decline promote
+           "3", "4", "n",             # classify -> scope skip (slot 4)         -> decline review
+           "4", "2", "s", "s", "n",   # review -> 1-by-1 (slot 2), SKIP both    -> decline promote
            "5", "n",                  # promote (no candidates)                 -> decline backfill
            "6",                       # backfill (nothing to do; no successor)
            "7",                       # overrides (no rejects logged; not in the workflow)

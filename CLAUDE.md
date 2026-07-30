@@ -40,11 +40,14 @@ promote → backfill** — each dry-running first, showing its report, and askin
 stage auto-skips). There is no separate audit step — the wrangle stage's dry run IS the audit;
 `scourgify audit` stays for the full per-value detail. The wrangle stage drives one
 **`wrangle.plan()`** object (preview → guard → optional step → write; never a recompute). The
-classify stage opens with a **scope menu** — new/changed (the cheap default) or **whole library**
-(a full pass; still offered when nothing's changed) — resolves the run ONCE via
+classify stage opens with a **scope menu** on fixed slots — new/changed (the cheap default),
+**never classified** (the backlog; asks how many to do this run and sets `--batch`), **whole
+library** (a full pass), skip — resolves the run ONCE via
 **`classify.plan()`** (so the € the user confirms is over the exact `todo` set the run bills, and
 the expensive text extraction never runs twice), shows per-engine cost estimates
-(`classify.est_cost`, list prices in `classify.PRICING`), offers an engine **bake-off**
+(`classify.est_cost`, list prices in `classify.PRICING`, per-engine output tokens in
+`engines.TRAITS['out_tokens']` — a reasoning model bills hidden thinking as output, so gemini is
+~14x its visible answer and costs MORE per book than claude despite a lower per-token price), offers an engine **bake-off**
 (`classify.bakeoff`: the same ~5 sample books through every usable engine, display-only), and
 enables `--text-fallback` so thin descriptions get sampled rather than dropped. The review stage offers apply / keep / discard (discard archives to
 `*_discarded_*.csv`). The wrangle and review stages also offer a **1-by-1 review** (`ui.checklist`,
@@ -60,6 +63,16 @@ sparkline, rising candidates).
 
 **`select.py`** — the one owner of "which books does this run operate on"; classify's scope flags and
 the wizard header both go through it, so they can never disagree.
+**`--unclassified` is the only scope that ADVANCES** — the one to chunk a backlog with
+(`--unclassified --batch N`, apply, repeat). It selects books classify has never *attempted*
+(`artifacts.classified_ids()`: applied archives + the pending proposal + **the failure log**) and
+could actually send (`select.sendable()`: description ≥ `MIN_DESC`, or any book with a file to
+sample under `--text-fallback`). Both filters are what make it finite: an errored book gets no
+proposal row on purpose, so without counting failures it re-occupies the head of every batch
+forever; and `gather()` drops a thin-text book before it can reach a proposal, so without
+`sendable` it could never leave the set. Discarded archives are deliberately NOT counted — the user
+threw those results away. `--last N` / `--since` / `--all` do NOT advance (they re-pick the same
+set), and `--all` additionally suppresses the resume by marking every book explicit.
 `parse_books()` owns the `--books` spec grammar (`1,2,3`, `10-20`, `@ids.txt`, or any
 comma-combination; `@file` expands one level deep) and the `ids` pick mode selects exactly those
 books — the one way `classify`, `wrangle apply` and `staleness` are pointed at a named set.
@@ -106,13 +119,16 @@ by glob — a new test file is in CI by existing. `uv run tests/test_wizard_flow
 wizard stages in-process with canned answers (`common.scripted_answers`) against a fixture library —
 the interaction flows (no-write paths, classify scope-skip spending nothing, a skip-all step review
 leaving the proposal byte-identical) are pinned in CI in milliseconds. The same seam drives the wizard
-from a shell: `SCOURGIFY_SCRIPT="w,s,n,q" scourgify` answers each prompt in order — a **test hook, not
+from a shell: `SCOURGIFY_SCRIPT="w,3,n,q" scourgify` answers each prompt in order — a **test hook, not
 a user feature** (no `--help` entry). A blank answer (an empty entry, e.g. the trailing one in
 `"4,"`) means "press enter" and takes the prompt's default — and the wizard's defaults are apply /
 full maintenance run, so a blank is a real "yes" here, not a no-op. An empty or whitespace-only
 `SCOURGIFY_SCRIPT` (e.g. an interpolated-but-unset var) is instead parsed as an empty queue, so the
-very first prompt raises rather than silently walking those defaults. A script that runs short or
-names a key that isn't on offer raises `common.ScriptError`, which is deliberately NOT a
+very first prompt raises rather than silently walking those defaults. Menu keys are **digits** on a fixed slot per row — a row that does not apply greys out rather
+than vanishing, so a number never comes to mean something else; only the landing menu's `w`/`q`
+and `ui.checklist`'s `a`/`s`/`q` (where digits already mean "toggle item N") stay letters.
+`ui.menu` returns a row's **symbolic id**, never its key, so no call site dispatches on a
+position. A script that runs short or names a key that isn't on offer raises `common.ScriptError`, which is deliberately NOT a
 `SystemExit`: `wizard._stage_guard` absorbs those, and swallowing a scripting failure would hand
 back a green run that asserted nothing.
 `uv run tests/drive_wizard.py` (NOT in CI; a few seconds) stays the pre-release check that a real PTY
@@ -139,9 +155,17 @@ FFF fetch → uv run scourgify apply --apply           # 1. junk-drop/canonicali
 ```
 
 (Or the wizard: `uv run scourgify` walks exactly this loop, guided. Targeted redo:
-`classify --last 30` / `--since DATE`.)
+`classify --books …` / `--since DATE`; work through a backlog with `classify --unclassified --batch N`,
+which is the one scope that ADVANCES — it selects books classify has never attempted
+(`artifacts.classified_ids`: applied archives + the pending proposal + the failure log) and can
+actually send (`select.sendable`), so each apply strictly shrinks it.)
 
-**⚠️ Cost:** a full Gemini `classify --fresh` pass over the library ≈ **€50** in tokens. Never run `--fresh`
+**⚠️ Cost:** a full Gemini `classify --fresh` pass over the library is **tens of euros** — measured
+2026-07-30 against a 7,949-book library at list price: **≈$25** for `gemini-2.5-flash`
+(~1,020 input + ~1,111 output tokens/book, of which **~1,061 are hidden THINKING tokens** billed as
+output — `engines.TRAITS['out_tokens']` carries that per engine, and `est_cost` used to assume a flat
+80 and so quoted gemini at a fifth of its real price). `--text-fallback` pushes input higher still.
+Never run `--fresh`
 casually — use `--incremental` (only changed/new books), `--batch N`, or `--engine apple` (free, on-device).
 Confirm with the user before any full cloud run (classify itself gates cloud runs >200 books behind a
 confirmation / `--yes`). **Do NOT bulk re-fetch FFF metadata** — it re-pollutes columns not protected by

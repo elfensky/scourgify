@@ -90,14 +90,45 @@ def changed(con: sqlite3.Connection) -> dict:
     return changed_pure(*_clocks(con))
 
 
+MIN_DESC = 40           # classify.gather() keeps a book only if its text reaches this many chars
+
+
+def sendable(con: sqlite3.Connection, text_fallback: bool = False) -> set:
+    """Books classify.gather() could actually send: a description of at least MIN_DESC chars —
+    the same test gather applies — or, with --text-fallback, any book with a format file whose
+    prose can be sampled instead.
+
+    Deliberately a cheap DB-only predicate, not an extraction pass: it is optimistic on the
+    fallback side (extract() can still come back empty on a DRM'd or odd file), so the scope may
+    keep a handful of books that turn out unsendable. Being optimistic is the safe direction —
+    it can leave a book in the set, never silently drop one that was classifiable."""
+    from scourgify.booktext import strip_html
+    ok = {b for b, t in con.execute("SELECT book, text FROM comments")
+          if len(strip_html(t or "")) >= MIN_DESC}
+    if text_fallback:                             # a file to sample is enough on its own. Asking the
+        ok |= {b for (b,) in con.execute(         # data table directly, not booktext.paths(), which
+            "SELECT DISTINCT book FROM data")}    # resolves absolute paths and so needs CALIBRE_LIBRARY
+    return ok
+
+
 def pick(con: sqlite3.Connection, mode: str = "incremental", n: int = 0,
-         since: str = "", min_tags: int = 2, ids: list[int] | None = None) -> list[int]:
+         since: str = "", min_tags: int = 2, ids: list[int] | None = None,
+         seen: set | None = None, text_fallback: bool = False) -> list[int]:
     """[book_id ...] newest-added-first for one scope:
       incremental — changed() books only            last   — the n most recently added
       since       — added OR site-updated >= date   sparse — fewer than min_tags tags
-      all         — everything                      ids    — exactly these (absent ones dropped)"""
+      all         — everything                      ids    — exactly these (absent ones dropped)
+      unclassified — never attempted (`seen`) and sendable (see below)"""
     added, upd, stamped = _clocks(con)
     newest = sorted(added, key=lambda b: (_key(added[b]), b), reverse=True)
+    if mode == "unclassified":
+        # Two filters, and BOTH are what make this scope finite — the property that lets it be
+        # chunked. `seen` (artifacts.classified_ids) retires books already attempted; `sendable`
+        # excludes books gather() would drop for thin text, which would otherwise sit in "never
+        # classified" forever, re-selected at the head of every batch and never able to leave.
+        # A book with no usable text is not outstanding work, it is unclassifiABLE.
+        ok = sendable(con, text_fallback)
+        return [b for b in newest if b not in (seen or set()) and b in ok]
     if mode == "incremental":
         ch = changed_pure(added, upd, stamped)
         return [b for b in newest if b in ch]

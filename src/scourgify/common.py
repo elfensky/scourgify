@@ -108,7 +108,7 @@ def _parse_script(raw: str) -> list:
     return [a.strip() for a in raw.split(",")] if raw.strip() else []
 
 
-# Canned answers for a scripted run: `SCOURGIFY_SCRIPT=w,s,n,q scourgify` for ad-hoc shell use,
+# Canned answers for a scripted run: `SCOURGIFY_SCRIPT=w,3,n,q scourgify` for ad-hoc shell use,
 # or common.scripted_answers([...]) in tests. Read ONCE at import — tests use the context manager,
 # so this only constrains shell use, where the variable is set before launch anyway.
 # ponytail: split on ',', so a checklist multi-toggle in an env-var script uses spaces ("1 3").

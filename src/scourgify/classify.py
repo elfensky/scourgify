@@ -19,14 +19,15 @@ Engines (--engine):  apple = on-device Apple Foundation Models via ./afm (free; 
           file. Selection semantics live in select.py (shared with the wizard header)."""
 import argparse, os, csv, json, re, collections, difflib
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from scourgify import booktext, report, select
+from scourgify import booktext, engines as engines_mod, report, select
 from scourgify.booktext import strip_html                               # text extraction lives in booktext.py
 from scourgify.common import (HERE, data_dir, user_dir, ro_connect, custom_column_id, run_writer, library,
                               current_tags, titles as book_titles, op_create_column, op_set_field, op_stamp_now,
                               interactive as _interactive, confirm as _confirm)
 from scourgify.overrides import ov_path, merge_vocab, read_aliases      # overrides/ paths + format readers live there
 from scourgify.artifacts import (prop, rank, fail,                      # artifact paths + formats live in artifacts.py
-                                 read_proposal, write_proposal, write_ranked, archive)
+                                 read_proposal, write_proposal, write_ranked, archive, archive_rows,
+                                 classified_ids)
 # the engine seam lives in engines.py; re-exported here so `classify.ENGINES` / `classify.ask_retry`
 # stay valid for promote, the wizard, and existing tests
 from scourgify.engines import ENGINES, ENGINE_ENV, PRICING, usable_engines, ask_retry, is_free, max_workers as engine_workers
@@ -99,10 +100,14 @@ def existing_terms() -> list:
     return out
 
 def est_cost(n_books: int, engine: str) -> float:
-    """Rough list-price $ estimate for a run: input ≈ prompt chars/4 tokens, output ≈ 80 tokens/book."""
+    """Rough list-price $ estimate for a run: input ≈ prompt chars/4 tokens, output per engine.
+
+    Output is per-engine (engines.TRAITS 'out_tokens') because a reasoning model bills its hidden
+    thinking as output — gemini-2.5-flash spends ~14x the visible answer on thoughts. A flat 80
+    under-quoted it fivefold, which is the worst direction for a number shown before spending."""
     i, o = PRICING.get(engine, (0.0, 0.0))
     tokens_in = (len(", ".join(load_vocab())) + 1900) / 4      # vocab + 1500-char description + instructions
-    return n_books * (tokens_in * i + 80 * o) / 1e6
+    return n_books * (tokens_in * i + engines_mod.trait(engine, "out_tokens") * o) / 1e6
 
 
 def prompt_for(desc: str, maxtags: int) -> str:
@@ -230,10 +235,18 @@ def apply_proposal_step() -> None:
     if not decided:
         print("(nothing decided — proposal left untouched.)"); return
     apply_proposal(rows=decided)                   # PROP untouched until success — a writer refusal loses nothing
-    archive(prop(), "applied")                     # the full record (decided + pending) — backfill reads it back
+    # Archive ONLY the rows that were written. An *_applied_* archive is the durable record of
+    # "this book has been classified", so naming a skipped book in one retires it from future
+    # scopes despite nothing reaching the library — quit on book 2 of 200 used to file all 200.
+    # The live proposal still holds the full record until it is replaced below, so a crash in
+    # between loses nothing and simply re-applies (the tag write is a union, i.e. idempotent).
+    arch = archive_rows(decided, "applied")
     if pending:
-        write_proposal(pending)
+        write_proposal(pending)                    # backfill's _proposal_files() reads these from prop()
         print(f"{len(pending)} book(s) left pending for a later run -> {os.path.basename(prop())}")
+    else:
+        os.remove(prop())
+    print(f"applied rows archived -> {os.path.basename(arch)}")
 
 
 # ---- gather books (read-only) ----
@@ -251,10 +264,14 @@ def gather(a: argparse.Namespace) -> tuple:
         missing, scope = len(want) - len(ids), f"{len(want)} book(s) by id"
     elif a.all:       ids, scope = select.pick(con, "all"), "whole library"
     elif a.incremental: ids, scope = select.pick(con, "incremental"), "new/changed since last classify"
+    elif a.unclassified:                          # the advancing scope: never attempted, and sendable
+        ids = select.pick(con, "unclassified", seen=classified_ids(), text_fallback=a.text_fallback)
+        scope = f"never classified ({len(ids)} outstanding)"
     elif a.last:      ids, scope = select.pick(con, "last", n=a.last), f"last {a.last} added"
     elif a.since:     ids, scope = select.pick(con, "since", since=a.since), f"added/updated since {a.since}"
     else:             ids, scope = select.pick(con, "sparse", min_tags=a.min_tags), f"fewer than {a.min_tags} tags"
-    explicit = set(ids) if (a.books is not None or a.all or a.incremental or a.last or a.since) else set()
+    explicit = set(ids) if (a.books is not None or a.all or a.incremental or a.unclassified
+                            or a.last or a.since) else set()
     def needs(b): return b in explicit
     desc = {b: t for b, t in c.execute("SELECT book, text FROM comments")}
     # when the description is thin, sample the book's own text instead of dropping the book
@@ -421,6 +438,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--books", default=None, metavar="SPEC",
                    help="only these books: '1,2,3', '10-20', '@ids.txt' (one id per line), or a combination")
     p.add_argument("--incremental", action="store_true", help="only new/changed books (never classified, #updated newer than their #wrangled marker, or re-fetched)")
+    p.add_argument("--unclassified", action="store_true",
+                   help="only books classify has never attempted (see artifacts.classified_ids) and can "
+                        "actually send — the scope that ADVANCES, so --batch N chews through a library")
     p.add_argument("--all", action="store_true", help="the WHOLE library — every book, regardless of tag count (a full cloud pass costs real money)")
     p.add_argument("--last", type=int, default=0, metavar="N", help="(re)process the N most recently added books")
     p.add_argument("--since", default="", metavar="DATE", help="(re)process books added or site-updated on/after this ISO date")

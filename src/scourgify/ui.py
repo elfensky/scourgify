@@ -37,23 +37,64 @@ def panel(renderable, title=None, style="cyan"):
 
 
 def menu(title, options, default=None, also=()):
-    """Render a keyed menu and return the chosen key. options = [(key, label, hint), ...];
-    `also` lists extra accepted keys that aren't rendered (e.g. a 'q' quit alias)."""
+    """Render a keyed menu and return the chosen row's symbolic ID.
+
+    options = [(key, id, label, hint), ...]. The KEY is what the user types — presentation. The
+    ID is what the caller dispatches on. They are deliberately separate: several menus build
+    their rows conditionally, so a key's meaning is position-dependent while an id's never is.
+    Dispatching on keys is how "2" came to mean 'review 1-by-1' in one proposal menu and
+    'discard' in the other.
+
+    A row with id=None is rendered dimmed and cannot be chosen, but KEEPS ITS SLOT — so a number
+    the user has memorised never shifts under them when a row stops applying.
+
+    `default` is an ID too, for the same reason (and a wrong one raises here rather than being
+    silently returned: rich hands a default straight back without validating it against the
+    choices, so a stale default used to escape on the interactive path only). `also` lists extra
+    accepted keys that aren't rendered (e.g. a 'q' quit alias); they return themselves."""
     t = Table(box=box.SIMPLE, show_header=False, pad_edge=False)
     t.add_column(style="bold cyan", justify="right"); t.add_column(); t.add_column(style="dim")
-    for k, label, hint in options:
-        t.add_row(k, label, hint)
+    for k, ident, label, hint in options:
+        if ident is None: t.add_row(f"[dim]{k}[/]", f"[dim]{label}[/]", f"[dim]{hint}[/]")
+        else:             t.add_row(k, label, hint)
     panel(t, title=title)
-    keys = [k for k, _, _ in options] + list(also)
-    default = default or keys[0]
+    by_key = {k: i for k, i, _, _ in options if i is not None}
+    by_key.update({k: k for k in also})                # unrendered aliases stand for themselves
+    keys = list(by_key)
+    if default is not None and default not in by_key.values():
+        # a programmer error, not user input — loud and immediate, and not strippable by -O
+        raise ValueError(f"menu {title!r}: default {default!r} is not an enabled row")
+    dkey = next((k for k, i in by_key.items() if i == default), keys[0])
     if common.scripted():
         ans = common.script_next(f"menu {title!r} (choices: {'/'.join(keys)})").strip()
-        if ans == "": ans = default                    # '' = pressing enter = take the default
-        if ans not in keys:
+        if ans == "": ans = dkey                       # '' = pressing enter = take the default
+        if ans not in by_key:
             raise common.ScriptError(f"menu {title!r}: {ans!r} is not one of {'/'.join(keys)}")
         say(f"[dim]choose:[/] {ans}")                  # echo, so a captured run reads like a session
-        return ans
-    return Prompt.ask("choose", choices=keys, default=default, console=console)
+        return by_key[ans]
+    return by_key[Prompt.ask("choose", choices=keys, default=dkey, console=console)]
+
+
+def ask_int(msg, default, lo=1, hi=None):
+    """A bounded integer prompt (the batch size). Interactive: re-ask on garbage. SCRIPTED: raise
+    ScriptError instead — re-asking would silently eat the next canned answer and shift the whole
+    queue by one, which is exactly the drift this seam exists to make loud."""
+    while True:
+        if common.scripted():
+            raw = common.script_next(f"number {msg!r}").strip()
+            say(f"[dim]{msg}[/] {raw or default}")
+        else:
+            raw = Prompt.ask(msg, default=str(default), console=console).strip()
+        if raw == "": return default
+        try:
+            n = int(raw)
+            if n < lo or (hi is not None and n > hi): raise ValueError
+            return n
+        except ValueError:
+            bound = f"{lo}-{hi}" if hi is not None else f"at least {lo}"
+            if common.scripted():
+                raise common.ScriptError(f"number {msg!r}: {raw!r} is not an integer ({bound})")
+            error(f"expected a whole number ({bound})")
 
 
 def confirm(msg, default=False):

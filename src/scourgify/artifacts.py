@@ -144,12 +144,60 @@ def write_failures(rows: list, path: str | None = None) -> None:
         w = csv.writer(f); w.writerow(FAIL_COLS); w.writerows(rows)
 
 
+def _arch_path(path: str, kind: str) -> str:
+    """The <name>_<kind>_<ts>.csv archive name — the convention itself, in one place."""
+    return path.replace(".csv", f"_{kind}_{time.strftime('%Y%m%d-%H%M%S')}.csv")
+
+
 def archive(path: str, kind: str) -> str:
     """Set a consumed artifact aside as <name>_<kind>_<ts>.csv (kind: 'applied' | 'discarded'),
     so stale rows can never re-apply. -> the archive path."""
-    arch = path.replace(".csv", f"_{kind}_{time.strftime('%Y%m%d-%H%M%S')}.csv")
+    arch = _arch_path(path, kind)
     os.rename(path, arch)
     return arch
+
+
+def archive_rows(rows: list, kind: str, path: str | None = None) -> str:
+    """Archive an EXPLICIT row set under the same convention, leaving the live file alone.
+
+    For a partial apply (`--apply --step`, where the user skips or quits partway): an
+    `*_applied_*` archive is read back as "these books were written", so it must name only the
+    rows that actually were. Leaving the live proposal in place also makes the caller's ordering
+    crash-safe — the full record survives until the caller replaces it with the leftovers."""
+    path = path or prop()
+    arch = _arch_path(path, kind)
+    write_proposal(rows, arch)
+    return arch
+
+
+def _ids(path: str, col: str = "book_id") -> set:
+    out = set()
+    for r in read_rows(path):
+        try: out.add(int(r[col]))
+        except (KeyError, ValueError, TypeError): pass
+    return out
+
+
+def classified_ids() -> set:
+    """Books classify has already ATTEMPTED — the cursor a "what's left" scope reads.
+
+    Three sources, and the choice of each is load-bearing:
+      *_applied_* archives — classification actually written to the library.
+      the pending proposal — results in hand, awaiting the review step.
+      classify_failures.csv — attempted and BLOCKED (e.g. Gemini's PROHIBITED_CONTENT, a
+        deterministic ~14% of a mature library). An errored book gets no proposal row on
+        purpose so it can be retried, but it must not stay "outstanding" forever: it would
+        re-occupy the head of every future batch and be re-billed with no progress. The log is
+        self-clearing (merge_failures drops a book that later succeeds), so this retires a book
+        exactly as long as it stays blocked.
+
+    Deliberately NOT *_discarded_* — discarding means the user threw those results away, so
+    those books must stay candidates."""
+    seen = set()
+    for f in applied_proposals(): seen |= _ids(f)
+    seen |= _ids(prop())
+    seen |= _ids(fail())
+    return seen
 
 
 def applied_proposals() -> list:

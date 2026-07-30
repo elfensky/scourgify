@@ -19,10 +19,17 @@ PRICING = {"apple": (0.0, 0.0), "claude": (1.00, 5.00), "openai": (0.15, 0.60), 
 # What each engine is LIKE — callers consult these instead of string-testing the name, so adding
 # an engine is a row here, not a hunt for `== "apple"` scattered across the tools.
 # (Free-ness is a PRICING fact — an engine is free iff its list price is (0, 0) — not a trait row.)
-_TRAIT_DEFAULTS = {"parallel": True, "judge": True, "hint": "key set ✓", "unusable": "no API key in env"}
+# `out_tokens`: billed OUTPUT tokens per classify call — the estimate est_cost prices. A reasoning
+# model bills its hidden thinking as output, so this is NOT just the visible answer: measured against
+# real library books (2026-07-30, 5-book sample), gemini-2.5-flash returns ~50 answer tokens on top of
+# ~1061 THINKING tokens. Assuming the visible 80 made the wizard quote gemini at a fifth of its real
+# price right before the user spends money. Re-measure when a default model changes.
+_TRAIT_DEFAULTS = {"parallel": True, "judge": True, "hint": "key set ✓", "unusable": "no API key in env",
+                   "out_tokens": 80}
 TRAITS = {"apple": {"parallel": False,               # one subprocess pipe — not thread-safe
                     "judge": False,                  # too weak for promote's adversarial refereeing
-                    "hint": "free, on-device", "unusable": "needs the afm binary or a swift toolchain"}}
+                    "hint": "free, on-device", "unusable": "needs the afm binary or a swift toolchain"},
+          "gemini": {"out_tokens": 1111}}            # ~50 answer + ~1061 thinking (measured)
 
 
 def trait(e: str, k: str):

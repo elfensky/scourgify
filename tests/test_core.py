@@ -239,8 +239,13 @@ def test_vocab_overrides_merge():
 def test_est_cost():
     from scourgify.classify import est_cost
     assert est_cost(100, "apple") == 0.0                               # on-device is free
-    assert 0 < est_cost(100, "gemini") < est_cost(100, "claude")       # scales with list price
+    assert 0 < est_cost(100, "openai") < est_cost(100, "claude")       # scales with list price
     assert est_cost(200, "gemini") == 2 * est_cost(100, "gemini")      # linear in books
+    # gemini's per-token list price is BELOW claude's, yet it costs more per book: it is a reasoning
+    # model and bills ~1061 hidden thinking tokens as output (measured 2026-07-30). This assertion
+    # used to read `gemini < claude` "scales with list price" — that intuition is what made the
+    # wizard quote a fifth of gemini's real cost, so it is pinned the right way round now.
+    assert est_cost(100, "gemini") > est_cost(100, "claude")
 
 def test_whole_library_scope_is_opt_in():
     from scourgify import classify
