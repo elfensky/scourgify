@@ -106,6 +106,21 @@ def test_traits_free_workers_judge():
         assert engines.trait(e, "hint") and engines.trait(e, "unusable")
 
 
+def test_est_cost_prices_a_reasoning_engine_by_its_thinking_tokens():
+    """A reasoning model bills hidden thinking as OUTPUT. Measured against real library books
+    (2026-07-30): gemini-2.5-flash returns ~50 answer tokens on top of ~1061 thinking tokens, so a
+    full-library pass really costs ~$24.51 — the flat-80 estimate quoted $4.59, a fifth of it, in
+    the wizard's confirm right before the user spends. Under-quoting is the dangerous direction."""
+    from scourgify import classify
+    assert engines.trait("gemini", "out_tokens") > 1000        # thinking is counted
+    assert engines.trait("openai", "out_tokens") == 80         # non-reasoning default unchanged
+    gem = classify.est_cost(7949, "gemini")
+    assert 20 < gem < 30, gem                                  # measured $24.51 on a 5-book sample
+    assert classify.est_cost(7949, "apple") == 0               # free engines stay free
+    # ordering the wizard's engine table depends on: gemini must not look cheaper than openai
+    assert gem > classify.est_cost(7949, "openai")
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

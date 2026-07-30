@@ -143,4 +143,4 @@ scourgify rollback --list        # your undo history
 
 Costs to remember: everything is free except **classify** and **promote** on a cloud engine
 — and both show you the count and price, then ask. A full-library cloud pass over thousands
-of books is real money (~€50); the wizard's default scope (new/changed only) is pennies.
+of books is real money (tens of euros — ~$25 for gemini over ~8k books); the wizard's default scope (new/changed only) is pennies.

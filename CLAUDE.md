@@ -141,7 +141,12 @@ FFF fetch → uv run scourgify apply --apply           # 1. junk-drop/canonicali
 (Or the wizard: `uv run scourgify` walks exactly this loop, guided. Targeted redo:
 `classify --last 30` / `--since DATE`.)
 
-**⚠️ Cost:** a full Gemini `classify --fresh` pass over the library ≈ **€50** in tokens. Never run `--fresh`
+**⚠️ Cost:** a full Gemini `classify --fresh` pass over the library is **tens of euros** — measured
+2026-07-30 against a 7,949-book library at list price: **≈$25** for `gemini-2.5-flash`
+(~1,020 input + ~1,111 output tokens/book, of which **~1,061 are hidden THINKING tokens** billed as
+output — `engines.TRAITS['out_tokens']` carries that per engine, and `est_cost` used to assume a flat
+80 and so quoted gemini at a fifth of its real price). `--text-fallback` pushes input higher still.
+Never run `--fresh`
 casually — use `--incremental` (only changed/new books), `--batch N`, or `--engine apple` (free, on-device).
 Confirm with the user before any full cloud run (classify itself gates cloud runs >200 books behind a
 confirmation / `--yes`). **Do NOT bulk re-fetch FFF metadata** — it re-pollutes columns not protected by

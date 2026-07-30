@@ -19,7 +19,7 @@ Engines (--engine):  apple = on-device Apple Foundation Models via ./afm (free; 
           file. Selection semantics live in select.py (shared with the wizard header)."""
 import argparse, os, csv, json, re, collections, difflib
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from scourgify import booktext, report, select
+from scourgify import booktext, engines as engines_mod, report, select
 from scourgify.booktext import strip_html                               # text extraction lives in booktext.py
 from scourgify.common import (HERE, data_dir, user_dir, ro_connect, custom_column_id, run_writer, library,
                               current_tags, titles as book_titles, op_create_column, op_set_field, op_stamp_now,
@@ -99,10 +99,14 @@ def existing_terms() -> list:
     return out
 
 def est_cost(n_books: int, engine: str) -> float:
-    """Rough list-price $ estimate for a run: input ≈ prompt chars/4 tokens, output ≈ 80 tokens/book."""
+    """Rough list-price $ estimate for a run: input ≈ prompt chars/4 tokens, output per engine.
+
+    Output is per-engine (engines.TRAITS 'out_tokens') because a reasoning model bills its hidden
+    thinking as output — gemini-2.5-flash spends ~14x the visible answer on thoughts. A flat 80
+    under-quoted it fivefold, which is the worst direction for a number shown before spending."""
     i, o = PRICING.get(engine, (0.0, 0.0))
     tokens_in = (len(", ".join(load_vocab())) + 1900) / 4      # vocab + 1500-char description + instructions
-    return n_books * (tokens_in * i + 80 * o) / 1e6
+    return n_books * (tokens_in * i + engines_mod.trait(engine, "out_tokens") * o) / 1e6
 
 
 def prompt_for(desc: str, maxtags: int) -> str:
