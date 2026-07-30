@@ -41,8 +41,9 @@ stage auto-skips). There is no separate audit step — the wrangle stage's dry r
 `scourgify audit` stays for the full per-value detail. The wrangle stage drives one
 **`wrangle.plan()`** object (preview → guard → optional step → write; never a recompute). The
 classify stage opens with a **scope menu** on fixed slots — new/changed (the cheap default),
-**never classified** (the backlog; asks how many to do this run and sets `--batch`), **whole
-library** (a full pass), skip — resolves the run ONCE via
+**never classified** (the backlog; asks how many to do this run and sets `--batch`), **most recent
+N books** (a targeted redo; asks N and sets `--last`, which re-sends books already classified),
+**whole library** (a full pass), skip — resolves the run ONCE via
 **`classify.plan()`** (so the € the user confirms is over the exact `todo` set the run bills, and
 the expensive text extraction never runs twice), shows per-engine cost estimates
 (`classify.est_cost`, list prices in `classify.PRICING`, per-engine output tokens in

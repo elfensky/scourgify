@@ -47,12 +47,20 @@ def test_scope_options_slots_are_stable_in_every_library_state():
     changed, empty = wizard._scope_options({1: "new", 2: "updated", 3: "new"}, 100, 50)[0], \
                      wizard._scope_options({}, 1234, 0)[0]
     for opts in (changed, empty):
-        assert [k for k, _, _, _ in opts] == ["1", "2", "3", "4"]          # slots never move
-        assert [i for _, i, _, _ in opts][2:] == ["all", "skip"]           # ... and neither do meanings
+        assert [k for k, _, _, _ in opts] == ["1", "2", "3", "4", "5"]     # slots never move
+        assert [i for _, i, _, _ in opts][2:] == ["last", "all", "skip"]   # ... and neither do meanings
     assert [i for _, i, _, _ in changed][:2] == ["changed", "unclassified"]
     assert [i for _, i, _, _ in empty][:2] == [None, None]                 # both greyed, still present
     assert "3 books" in changed[0][2] and "2 new" in changed[0][3]
-    assert "1,234 books" in empty[2][2]
+    assert "1,234 books" in empty[3][2]
+
+
+def test_scope_options_last_row_is_always_offered():
+    """The targeted redo ("do the newest N again") must be reachable from the wizard, not just
+    from `classify --last N` on the CLI. It is offered in every state a library has books."""
+    assert wizard._scope_options({}, 100, 0)[0][2][1] == "last"
+    assert wizard._scope_options({1: "new"}, 100, 50)[0][2][1] == "last"
+    assert wizard._scope_options({}, 0, 0)[0][2][1] is None            # empty library: greyed
 
 
 def test_scope_options_default_follows_availability():
