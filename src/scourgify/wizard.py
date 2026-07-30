@@ -24,6 +24,7 @@ from scourgify import artifacts, common, engines, wrangle, classify, staleness, 
 from scourgify import setup as setup_mod
 from scourgify.common import library, db_path, load_config, ro_connect, custom_column_id, calibre_open
 
+LAST_DEFAULT  = 30      # wizard default for the 'most recent N' redo (matches the documented --last 30)
 BATCH_DEFAULT = 100     # wizard chunk size for the never-classified backlog; below SPEND_GATE
                         # deliberately NOT equal to it, so the spend confirm still fires on a repeat sweep
 COLS = ["#fandoms", "#characters", "#relationships", "#genres", "#status", "#updated", "#wrangled"]
@@ -185,9 +186,12 @@ def _scope_options(ch: dict, total: int, outstanding: int = 0) -> tuple[list, st
          f"never classified — {outstanding:,} books" if outstanding else "never classified — none",
          "books classify has never attempted; work through them a chunk at a time" if outstanding
          else "every sendable book has been classified at least once"),
-        ("3", "all", f"whole library — {total:,} books · full pass",
+        ("3", "last" if total else None, "most recent N books",
+         "re-classify a chosen number of the newest books — a targeted redo; these have usually been "
+         "classified before, so a paid engine bills them again"),
+        ("4", "all", f"whole library — {total:,} books · full pass",
          "re-tag EVERY book regardless of tag count — a paid engine over this many books costs real money"),
-        ("4", "skip", "skip", "tag nothing this run (a targeted redo any time: scourgify classify --books / --since DATE)"),
+        ("5", "skip", "skip", "tag nothing this run (a targeted redo any time: scourgify classify --books / --since DATE)"),
     ]
     return opts, ("changed" if ch else ("unclassified" if outstanding else "all"))
 
@@ -214,7 +218,12 @@ def stage_classify():
     scope = ui.menu("classify scope", opts, default=default)
     if scope == "skip":
         ui.say("(skipped — nothing tagged)", "dim"); return
-    batch = 0
+    batch = last = 0
+    if scope == "last":
+        # a targeted redo: --last re-sends its books whether or not they were classified before
+        # (an explicitly scoped book bypasses the resume), which is the point of asking for one.
+        last = ui.ask_int(f"how many of the most recent books?  {total:,} in the library",
+                          LAST_DEFAULT, lo=1, hi=total)
     if scope == "unclassified" and outstanding > BATCH_DEFAULT:
         # the backlog is the whole expensive pass, so ask how much of it to do now. N is a COUNT
         # slicing an identity-keyed set, not a position: the next run resumes at the next N
@@ -226,7 +235,8 @@ def stage_classify():
     # confirmed below is over the same `todo` set classify_run executes (never a re-gather).
     # NB batch must be set BEFORE plan(): Plan.__init__ is the only reader of it.
     a = classify.default_opts(text_fallback=True, incremental=scope == "changed",
-                              unclassified=scope == "unclassified", batch=batch, **{"all": scope == "all"})
+                              unclassified=scope == "unclassified", last=last, batch=batch,
+                              **{"all": scope == "all"})
     p = classify.plan(a)                          # owns a COPY of a — steering goes through p.opts
     targets, todo = p.targets, p.todo
     if not targets:

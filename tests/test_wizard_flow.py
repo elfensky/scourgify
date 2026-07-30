@@ -75,7 +75,7 @@ def test_classify_scope_skip_reaches_no_engine():
     saved = classify.plan
     classify.plan = boom
     try:
-        with wizard_lib(), common.scripted_answers(["4"]), transcript() as buf:
+        with wizard_lib(), common.scripted_answers(["5"]), transcript() as buf:
             wizard.stage_classify()
     finally:
         classify.plan = saved
@@ -155,7 +155,7 @@ def test_a_full_menu_lap_runs_every_task_without_writing():
     # ui.checklist skips and y/n confirms, which keep letters — see ui.checklist's exception.
     lap = ["1", "n",                  # wrangle  (clean fixture: no apply menu) -> decline staleness
            "2", "n",                  # staleness (already consistent)          -> decline classify
-           "3", "4", "n",             # classify -> scope skip (slot 4)         -> decline review
+           "3", "5", "n",             # classify -> scope skip (slot 5)         -> decline review
            "4", "2", "s", "s", "n",   # review -> 1-by-1 (slot 2), SKIP both    -> decline promote
            "5", "n",                  # promote (no candidates)                 -> decline backfill
            "6",                       # backfill (nothing to do; no successor)
