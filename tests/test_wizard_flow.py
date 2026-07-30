@@ -182,6 +182,64 @@ def test_a_full_menu_lap_runs_every_task_without_writing():
         assert not os.path.isdir(common.backups_dir()) or not os.listdir(common.backups_dir())
 
 
+# ---- the "most recent N books" rows added to the wrangle + staleness stages ----
+DIRTY = [{"id": 1, "title": "Old Book", "added": "2026-01-01 10:00:00", "tags": ["Complete", "Keeper"]},
+         {"id": 2, "title": "New Book", "added": "2026-06-01 10:00:00", "tags": ["Oneshot", "Keeper"]}]
+
+
+@contextlib.contextmanager
+def dirty_lib():
+    """A fixture library the shipped defaults WILL change: 'Complete' is junk-dropped and
+    'Oneshot' folds to 'One Shot', so stage_wrangle has something to write."""
+    with tempfile.TemporaryDirectory() as td:
+        lib = os.path.join(td, "library"); os.makedirs(lib)
+        build(os.path.join(lib, "metadata.db"), DIRTY, custom=[(c, {}) for c in COLS]).close()
+        home = os.path.join(td, "home")
+        with env(SCOURGIFY_HOME=home, CALIBRE_LIBRARY=lib, COLUMNS="100", NONINTERACTIVE=None):
+            os.makedirs(common.data_dir())
+            with open(os.path.join(home, "config.toml"), "w") as f:
+                f.write('[columns]\n[behavior]\n[overrides]\ndir = "overrides"\n')
+            yield
+
+
+def test_wrangle_stage_most_recent_n_narrows_the_write():
+    """The wizard row for `apply --last N`. It must narrow the WRITE set only — the read stays
+    library-wide because transform() needs global context."""
+    from scourgify import wrangle
+    recorded = []
+    with dirty_lib():
+        saved = wrangle.run_writer
+        wrangle.run_writer = lambda ops, force=False: recorded.append(ops)
+        try:                                     # slot 3 = most recent N, then N=1
+            with common.scripted_answers(["3", "1"]), transcript() as buf:
+                wizard.stage_wrangle()
+        finally:
+            wrangle.run_writer = saved
+    out = buf.getvalue()
+    assert "scoped to 1 of the newest 1 books" in out, out
+    (ops,) = recorded
+    written = {b for o in ops if o["op"] == "set_field" for b in map(int, o["values"])}
+    assert written == {2}, written                # only the NEWEST book, not the older one
+
+
+def test_staleness_stage_most_recent_n_narrows_the_rows():
+    """Same row on the staleness stage. compute() is library-wide; the row filter is the scoping."""
+    from scourgify import staleness
+    seen = []
+    with dirty_lib():
+        saved_c, saved_w = staleness.compute, staleness.write
+        staleness.compute = lambda *a, **k: ("#status", [(1, "In-Progress", "Hiatus", 3.0),
+                                                         (2, "In-Progress", "Abandoned", 6.0)])
+        staleness.write = lambda label, rows: seen.append([r[0] for r in rows])
+        try:                                     # slot 2 = most recent N, then N=1
+            with common.scripted_answers(["2", "1"]), transcript() as buf:
+                wizard.stage_staleness()
+        finally:
+            staleness.compute, staleness.write = saved_c, saved_w
+    assert seen == [[2]], seen                    # only the newest book's status is re-derived
+    assert "scoped to 1 of the newest 1 books" in buf.getvalue()
+
+
 def test_a_short_script_raises_instead_of_exiting_zero():
     """The single most important test in this file. Unscripted, running out of input raises
     EOFError, which wizard.run() catches and turns into a clean exit 0 — a test written that way
