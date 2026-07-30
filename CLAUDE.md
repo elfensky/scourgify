@@ -168,6 +168,21 @@ which is the one scope that ADVANCES — it selects books classify has never att
 (`artifacts.classified_ids`: applied archives + the pending proposal + the failure log) and can
 actually send (`select.sendable`), so each apply strictly shrinks it.)
 
+**⚠️ "Dry run" does NOT mean "no engine call".** Without `--apply`, `classify` does not write to
+the library — but it still SENDS every selected book to the engine. There is no such thing as a
+free `classify` smoke test: use **`classify --scope-only`**, which resolves the scope, prints what
+would be sent and what each engine would cost, and stops before any engine call. (Learned the hard
+way 2026-07-30: `classify --unclassified` was run as a "read-only" check and started grinding
+through 7,681 books.) The read-only checks that cost nothing: `scourgify audit`,
+`scourgify staleness` (no `--apply`), `scourgify rollback --list`, `classify --scope-only`, and
+`SCOURGIFY_SCRIPT="q" scourgify`.
+
+**⚠️ Testing engines:** `--engine apple` is the DEFAULT because it is free and on-device — which
+also makes it the safe failure mode when a command is run by accident. But it is **not good enough
+for this work yet** (weak tagging, and single-threaded, so a large scope takes hours). When
+verifying behaviour, use `--engine openai` (cheapest usable) or `gemini`; keep the scope small
+(`--books` / `--batch`) and treat apple only as a free-but-low-quality fallback.
+
 **⚠️ Cost:** a full Gemini `classify --fresh` pass over the library is **tens of euros** — measured
 2026-07-30 against a 7,949-book library at list price: **≈$25** for `gemini-2.5-flash`
 (~1,020 input + ~1,111 output tokens/book, of which **~1,061 are hidden THINKING tokens** billed as

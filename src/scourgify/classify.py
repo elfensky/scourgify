@@ -427,13 +427,28 @@ def spend_gate(n_books: int, engine: str, yes: bool) -> None:
 def classify_run(run) -> None:
     """Execute a classify run: a Plan (the wizard's path — planned, priced, and confirmed once)
     or a bare argparse Namespace (the CLI path — planned here)."""
-    (plan(run) if isinstance(run, argparse.Namespace) else run).run()
+    p = plan(run) if isinstance(run, argparse.Namespace) else run
+    if getattr(p.opts, "scope_only", False):
+        # STOP before any engine call. "dry run" in this tool means "does not write to the
+        # library" — it does NOT mean "does not call the engine": a bare `classify` still sends
+        # every selected book. This is the flag for "what would this select?".
+        print(f"  scope-only: {len(p.targets)} candidate book(s), {len(p.todo)} would be sent"
+              f" — nothing sent, nothing written.")
+        for eng in sorted(ENGINES):
+            c = est_cost(len(p.todo), eng)
+            print(f"    {eng:8} {'free' if not c else f'~${c:.2f}'}")
+        return
+    p.run()
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Content-based tagging from a controlled vocabulary (LLM engines; dry-run until --apply).")
     p.add_argument("--engine", default="apple", choices=sorted(ENGINES), help="apple = on-device, free (default)")
     p.add_argument("--apply", action="store_true", help="apply 'added_tags' from the proposal + stamp #wrangled (Calibre closed)")
+    p.add_argument("--scope-only", action="store_true",
+                   help="resolve the scope, print what WOULD be sent and what each engine would "
+                        "cost, then stop — no engine calls. (Without --apply a run still SENDS: "
+                        "'dry run' here means it does not write to the library.)")
     p.add_argument("--step", action="store_true", help="with --apply: review each book's tags 1-by-1 (interactive; untick to reject)")
     p.add_argument("--books", default=None, metavar="SPEC",
                    help="only these books: '1,2,3', '10-20', '@ids.txt' (one id per line), or a combination")
