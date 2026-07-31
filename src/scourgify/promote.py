@@ -138,16 +138,20 @@ def decide(cand: dict, ask, verify_ask=None, existing: list | None = None) -> di
 
 
 def apply_decisions(review_path: str | None = None, vocab_path: str | None = None, tropes_path: str | None = None,
-                    aliases_path: str | None = None, ledger_path: str | None = None) -> dict:
+                    aliases_path: str | None = None, ledger_path: str | None = None,
+                    rows: list | None = None) -> dict:
     review_path = review_path or review()
     aliases_path = aliases_path or ov_path("promote_aliases.csv")
     ledger_path = ledger_path or ledger()
     vocab_path = vocab_path or ov_path("classify_vocab.txt")
     tropes_path = tropes_path or ov_path("tropes.csv")
-    if not os.path.exists(review_path):
-        raise SystemExit(f"no review to apply ({os.path.basename(review_path)} not found — run promote first).")
+    from_file = rows is None                   # explicit rows = the --step path; the caller archives
+    if from_file:
+        if not os.path.exists(review_path):
+            raise SystemExit(f"no review to apply ({os.path.basename(review_path)} not found — run promote first).")
+        rows = read_rows(review_path)
     n = {"promote": 0, "alias": 0, "reject": 0, "skipped": 0}
-    for r in read_rows(review_path):
+    for r in rows:
         tag, target = r["tag"], r.get("target", "")
         v = r["verdict"].strip().lower()
         if v not in VERDICTS:
@@ -165,13 +169,62 @@ def apply_decisions(review_path: str | None = None, vocab_path: str | None = Non
             append_rows(aliases_path, ["candidate", "target"], [[tag, target]])
         n[v] = n.get(v, 0) + 1
         append_ledger(tag, v, target, ledger_path)
-    arch = archive(review_path, "applied")
+    arch = archive(review_path, "applied") if from_file else None
     # a skipped row gets no ledger entry ON PURPOSE (an 'error' verdict is a transport failure, not
     # a decision) — so it stays a candidate. Say so: otherwise apply reports success and the wizard's
     # "N candidates" hint survives the apply with nothing on screen explaining why.
     print(f"applied: {n['promote']} promoted, {n['alias']} aliased, {n['reject']} rejected"
           + (f", {n['skipped']} left UNDECIDED (offered again next run)" if n["skipped"] else "")
-          + f"; review archived -> {os.path.basename(arch)}")
+          + (f"; review archived -> {os.path.basename(arch)}" if arch else ""))
+    return n
+
+
+def verdict_line(r: dict) -> str:
+    """One adjudicated candidate as a review line. Pure — the checklist is a dumb string widget."""
+    v = (r.get("verdict") or "").strip().lower()
+    what = {"promote": "[green]promote[/]", "alias": "[cyan]alias →[/] " + (r.get("target") or ""),
+            "reject": "[dim]reject[/]"}.get(v, f"[red]{v}[/]")
+    warn = " [yellow]⚠contested[/]" if str(r.get("contested")) == "True" else ""
+    n = r.get("count") or "?"
+    return f"[bold]{r.get('tag','')}[/]{warn}  ({n} book(s))  {what}  [dim]{(r.get('reason') or '')[:70]}[/]"
+
+
+def apply_decisions_step(review_path: str | None = None) -> dict:
+    """1-by-1 review of the adjudicated verdicts: untick any you disagree with.
+
+    Ticked verdicts are applied and land in the ledger. An unticked one gets NO ledger row, so the
+    candidate stays undecided and is offered again — the same "this was not a durable decision"
+    rule an engine error already follows. Before this, disagreeing with 3 of 50 verdicts meant
+    'keep' and hand-editing a CSV; the whole point of an adjudicated list is judging it item by
+    item, which is how the wrangle and classify reviews already work."""
+    from scourgify import ui
+    from scourgify.artifacts import archive_rows
+    review_path = review_path or review()
+    if not os.path.exists(review_path):
+        raise SystemExit(f"no review to apply ({os.path.basename(review_path)} not found — run promote first).")
+    if not interactive():
+        raise SystemExit("--step needs an interactive terminal (omit it to apply the whole review).")
+    rows = read_rows(review_path)
+    actionable = [r for r in rows if (r.get("verdict") or "").strip().lower() in VERDICTS]
+    other = [r for r in rows if r not in actionable]          # errors: never applicable, stay pending
+    if not actionable:
+        print("(no applicable verdicts — nothing to review.)"); return {}
+    acc, rej, action = ui.checklist("verdicts — untick any you disagree with", 
+                                    [verdict_line(r) for r in actionable],
+                                    subtitle="ticked verdicts are applied; unticked ones stay undecided "
+                                             "and are offered again")
+    if action in ("skip", "quit") or not acc:
+        print("(nothing decided — review left untouched.)"); return {}
+    decided = [actionable[i] for i in acc]
+    pending = [actionable[i] for i in rej] + other
+    n = apply_decisions(review_path, rows=decided)            # explicit rows: no archive, no file read
+    arch = archive_rows(decided, "applied", review_path, write_review)   # only what was applied
+    if pending:
+        write_review(pending, review_path)
+        print(f"{len(pending)} verdict(s) left undecided -> {os.path.basename(review_path)}")
+    else:
+        os.remove(review_path)
+    print(f"applied verdicts archived -> {os.path.basename(arch)}")
     return n
 
 

@@ -143,11 +143,20 @@ def stage_staleness():
     staleness.show(label, rows)                     # the ONE renderer — same output as `scourgify staleness`
     choice = ui.menu(f"re-derive {label} for {len(rows)} books? (Calibre closed; auto-backup)", [
         ("1", "apply", "apply all", "re-derive #status for every book listed above"),
-        ("2", "last", "most recent N books", "only the newest N of them"),
-        ("3", "skip", "skip", "leave #status unchanged"),
+        ("2", "step", "review 1-by-1", "walk each book; untick one to leave its #status alone"),
+        ("3", "last", "most recent N books", "only the newest N of them"),
+        ("4", "skip", "skip", "leave #status unchanged"),
     ], default="apply")
     if choice == "skip":
         ui.say("(skipped — nothing written)", "dim"); return
+    if choice == "step":
+        con = ro_connect(); titles = common.titles(con); con.close()
+        acc, _, action = ui.checklist(f"{label} changes — untick to leave a book alone",
+                                      [staleness.status_line(r, str(titles.get(r[0], ""))) for r in rows])
+        if action in ("skip", "quit") or not acc:
+            ui.say("(nothing decided — nothing written)", "dim"); return
+        rows = [rows[i] for i in acc]
+        ui.say(f"{len(rows)} book(s) accepted", "dim")
     if choice == "last":
         con = ro_connect(); total = common.book_count(con)
         n = ui.ask_int(f"how many of the most recent books?  {total:,} in the library",
@@ -385,12 +394,14 @@ def _promote_review_menu():
     ui.say(f"full verdicts (edit before applying if you like): {artifacts.review()}", "dim")
     npro, nal = len(by.get("promote", [])), len(by.get("alias", []))
     choice = ui.menu("verdicts", [
-        ("1", "apply", "apply", f"promote {npro} to the vocab, fold {nal} aliases (writes overrides/)"),
-        ("2", "keep", "keep", "leave the review file to hand-edit; the wizard offers it again next run"),
-        ("3", "discard", "discard", "set aside without applying (archived; nothing written)"),
+        ("1", "apply", "apply all", f"promote {npro} to the vocab, fold {nal} aliases (writes overrides/)"),
+        ("2", "step", "review 1-by-1", "walk each candidate; untick a verdict you disagree with "
+                                       "(it stays undecided and is offered again)"),
+        ("3", "keep", "keep", "leave the review file to hand-edit; the wizard offers it again next run"),
+        ("4", "discard", "discard", "set aside without applying (archived; nothing written)"),
     ], default="apply" if (npro or nal) else "discard")
-    if choice == "apply":
-        res = promote.apply_decisions()
+    if choice in ("apply", "step"):
+        res = promote.apply_decisions_step() if choice == "step" else promote.apply_decisions()
         ui.say("done ✓  (run the backfill step to tag the source books)", "green")
         if res.get("skipped"):                    # else the candidates hint outlives the apply, unexplained
             ui.say(f"{res['skipped']} candidate(s) could not be decided (engine error / bad alias target) — "
@@ -426,12 +437,32 @@ def stage_promote():
 
 
 def stage_backfill():
-    """Delegates to promote.backfill — the ONE implementation of the preview→confirm→write loop
-    (the shared common.confirm works in the wizard's TTY like anywhere else)."""
-    if promote.backfill():
-        ui.say("done ✓", "green")
-    else:
+    """apply-all delegates to promote.backfill (the ONE preview→confirm→write loop); the 1-by-1
+    path filters the plan per book first, so a book you don't want tagged simply isn't written."""
+    chg, adds = promote.backfill_plan()
+    if not chg:
         ui.say("(backfill applies vocab-promoted tags to the books that first suggested them)", "dim")
+        ui.say("nothing to backfill ✓", "green"); return
+    con = ro_connect(); titles = common.titles(con); con.close()
+    choice = ui.menu(f"backfill {len(chg)} book(s)? (Calibre closed; auto-backup)", [
+        ("1", "apply", "apply all", "write the promoted/aliased tags onto every book that proposed them"),
+        ("2", "step", "review 1-by-1", "walk each book; untick one to leave it untagged"),
+        ("3", "skip", "skip", "leave the books unchanged"),
+    ], default="apply")
+    if choice == "skip":
+        ui.say("(skipped — nothing written)", "dim"); return
+    if choice == "step":
+        books = sorted(adds)
+        acc, _, action = ui.checklist("backfill — untick a book to leave it untagged",
+                                      [f"[bold]#{b}[/] {str(titles.get(b,''))[:44]}  + "
+                                       f"[cyan]{', '.join(sorted(adds[b]))}[/]" for b in books])
+        if action in ("skip", "quit") or not acc:
+            ui.say("(nothing decided — nothing written)", "dim"); return
+        keep = {books[i] for i in acc}
+        chg = {b: v for b, v in chg.items() if b in keep}
+        ui.say(f"{len(chg)} book(s) accepted", "dim")
+    common.run_writer([common.op_set_field("tags", chg)])
+    ui.say(f"backfilled {len(chg)} book(s) ✓", "green")
 
 
 def stage_overrides():
@@ -439,12 +470,27 @@ def stage_overrides():
         ui.say("no rejected changes logged — nothing to convert ✓", "green")
         ui.say("(reject deterministic changes in `apply --step` to feed this)", "dim")
         return
-    overrides.build_overrides(do_apply=False)                  # dry-run preview (grouped by target file)
-    if ui.confirm("write these override lines to overrides/?", default=False):
-        overrides.build_overrides(do_apply=True)
-        ui.say("done ✓", "green")
-    else:
-        ui.say("(previewed only — nothing written)", "dim")
+    auto = overrides.build_overrides(do_apply=False) or {}     # dry-run preview (grouped by target file)
+    if not auto:
+        return
+    choice = ui.menu("write these override lines to overrides/?", [
+        ("1", "apply", "write all", "append every line above to your overrides/"),
+        ("2", "step", "review 1-by-1", "walk each rule; untick one you don't want"),
+        ("3", "skip", "skip", "previewed only — nothing written"),
+    ], default="skip")
+    if choice == "skip":
+        ui.say("(previewed only — nothing written)", "dim"); return
+    only = None
+    if choice == "step":
+        pairs = [(fn, l) for fn in sorted(auto) for l in sorted(set(auto[fn]))]
+        acc, _, action = ui.checklist("override rules — untick one you don't want",
+                                      [f"[dim]{fn}[/]  {l}" for fn, l in pairs])
+        if action in ("skip", "quit") or not acc:
+            ui.say("(nothing decided — nothing written)", "dim"); return
+        only = {pairs[i] for i in acc}
+        ui.say(f"{len(only)} rule(s) accepted", "dim")
+    overrides.build_overrides(do_apply=True, only=only)
+    ui.say("done ✓", "green")
 
 
 # key, name, one-line description, stage fn, in-the-guided-workflow?
