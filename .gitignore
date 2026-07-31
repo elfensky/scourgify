@@ -34,3 +34,6 @@ classify_state.json
 .claude-octopus/
 .claude/
 scorecard.png
+
+# graphify graph (generated locally)
+graphify-out/
