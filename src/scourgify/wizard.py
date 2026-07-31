@@ -46,6 +46,13 @@ def snapshot():
         missing = [c for c in COLS if custom_column_id(con, c) is None]
         # new/changed since the last classify-apply — same select.changed() the classify stage uses
         changed = len(select.changed(con)) if "#updated" not in missing and "#wrangled" not in missing else None
+        # the largest single piece of outstanding work in most libraries, and it used to be
+        # invisible here — the header cheerfully said "up to date" with thousands never attempted.
+        # text_fallback=True because the wizard always samples book text, so the count matches the
+        # scope the classify stage will actually resolve. ~0.03s on a 7,949-book library.
+        try: unclassified = len(select.pick(con, "unclassified", seen=artifacts.classified_ids(),
+                                            text_fallback=True))
+        except Exception: unclassified = 0
         con.close()
     except Exception as e:
         raise SystemExit(f"can't read {db_path()} — is CALIBRE_LIBRARY correct? ({e})")
@@ -62,7 +69,7 @@ def snapshot():
     if os.path.exists(artifacts.ledger()):                     # unlike a "ledger has promotions" flag, which never clears
         try: backfill_n = len(promote.backfill_plan()[0])
         except Exception: backfill_n = 0
-    return {"books": books, "missing": missing, "changed": changed,
+    return {"books": books, "missing": missing, "changed": changed, "unclassified": unclassified,
             "pending": pending, "to_stamp": to_stamp, "calibre": calibre_open(),
             "candidates": candidates, "verdicts_pending": verdicts_pending,
             "rejects": rejects, "backfill": backfill_n, "backups": common.backups_size(),
@@ -76,8 +83,11 @@ def header(info):
     g.add_row("columns", "[green]all present ✓[/]" if not info["missing"]
               else f"[yellow]missing: {', '.join(info['missing'])}[/]  → setup will fix this")
     if info["changed"] is not None:
-        g.add_row("changes", f"[cyan]{info['changed']} books new/changed since the last classify[/]"
-                  if info["changed"] else "[green]library up to date ✓[/]")
+        bits = []
+        if info["changed"]: bits.append(f"[cyan]{info['changed']} new/changed since the last classify[/]")
+        if info.get("unclassified"):
+            bits.append(f"[cyan]{info['unclassified']:,} never classified[/]  → the classify step, a chunk at a time")
+        g.add_row("classify", "  ·  ".join(bits) if bits else "[green]every book classified ✓[/]")
     g.add_row("proposal", f"[cyan]{info['pending']} books queued to apply[/]  → the review step"
               if info["pending"] else "[dim]none pending[/]")
     n, b = info["backups"]
@@ -498,7 +508,10 @@ def run_workflow():
 
 def _task_hint(name, info):
     """The cyan 'pending work' marker for a task, from the file-based snapshot signals."""
-    if name == "classify": return f"{info['changed']} new/changed" if info.get("changed") else ""
+    if name == "classify":
+        return " · ".join(b for b in (f"{info['changed']} new/changed" if info.get("changed") else "",
+                                      f"{info['unclassified']:,} never classified" if info.get("unclassified") else "")
+                          if b)
     if name == "review":
         if info["pending"]: return f"{info['pending']} books to apply"
         return f"{info['to_stamp']} to stamp" if info.get("to_stamp") else ""

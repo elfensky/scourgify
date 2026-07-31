@@ -240,6 +240,20 @@ def test_staleness_stage_most_recent_n_narrows_the_rows():
     assert "scoped to 1 of the newest 1 books" in buf.getvalue()
 
 
+def test_snapshot_reports_the_never_classified_backlog():
+    """End to end through the real snapshot(): a library with unattempted books must SAY so.
+    The fixture's two books have descriptions and no proposal, so both are outstanding."""
+    with wizard_lib():
+        info = wizard.snapshot()
+        assert info["unclassified"] == 2, info
+        assert "2 never classified" in wizard._task_hint("classify", info)
+        # ...and once they are attempted, the signal clears
+        from scourgify import artifacts
+        artifacts.write_proposal([{"book_id": b, "title": "x", "added_tags": [], "proposed_new": []}
+                                  for b in (1, 2)])
+        assert wizard.snapshot()["unclassified"] == 0
+
+
 def test_a_short_script_raises_instead_of_exiting_zero():
     """The single most important test in this file. Unscripted, running out of input raises
     EOFError, which wizard.run() catches and turns into a clean exit 0 — a test written that way

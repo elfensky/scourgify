@@ -32,6 +32,17 @@ def test_task_hint_promote_joins_candidates_and_verdicts():
     assert wizard._task_hint("promote", {"candidates": 0, "verdicts_pending": False}) == ""
 
 
+def test_task_hint_classify_surfaces_the_backlog():
+    """The never-classified backlog is the largest outstanding work in most libraries and used to
+    be invisible: snapshot() did not carry it, so the wizard said "up to date" with thousands of
+    books never attempted. Reported live 2026-07-31 at 7,829 books."""
+    assert wizard._task_hint("classify", {"changed": 12, "unclassified": 0}) == "12 new/changed"
+    assert wizard._task_hint("classify", {"changed": 0, "unclassified": 7829}) == "7,829 never classified"
+    assert wizard._task_hint("classify", {"changed": 12, "unclassified": 7829}) \
+        == "12 new/changed · 7,829 never classified"
+    assert wizard._task_hint("classify", {"changed": 0, "unclassified": 0}) == ""
+
+
 def test_task_hint_other_tasks_and_unknown():
     assert wizard._task_hint("classify", {"changed": 12}) == "12 new/changed"
     assert wizard._task_hint("classify", {"changed": 0}) == ""

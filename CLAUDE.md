@@ -30,8 +30,9 @@ uv run scourgify apply --apply                       # write changes (Calibre CL
 **uv is the only supported installer** — never `pip`/`pipx`, in docs or in advice to the user.)
 
 **`wizard.py`** (launched by bare `scourgify`) is a **guided lifecycle behind a landing menu**: header
-(books, column health, new/changed count via `select.changed`, pending proposal, Calibre-open
-warning) → setup if columns/config are missing → then a **menu** (`landing_menu`) that asks what to do —
+(books, column health, new/changed count via `select.changed`, the **never-classified backlog**
+(`select.pick("unclassified")` — usually the largest outstanding work, and the header must never say
+"up to date" while it is non-zero), pending proposal, Calibre-open warning) → setup if columns/config are missing → then a **menu** (`landing_menu`) that asks what to do —
 the **full maintenance run** (`run_workflow` over `WORKFLOW`) or a **single task** (`TASKS`), with
 unfinished work flagged inline from cheap file signals in `snapshot()` (pending proposal, undecided
 new-tag candidates, `--step` rejects, backfillable promotions). The menu loops (re-`snapshot` after each
