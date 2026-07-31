@@ -219,6 +219,19 @@ def _append_override(path: str, lines: list) -> list:
     return added
 
 
+def step_pick(auto: dict) -> set | None:
+    """1-by-1 review of the synthesized override lines -> the accepted {(file, line)} set, or None
+    for "nothing decided". Shared by `overrides --apply --step` and the wizard stage."""
+    from scourgify import ui
+    if not ui.interactive():
+        raise SystemExit("--step needs an interactive terminal (omit it to write every line).")
+    pairs = [(fn, l) for fn in sorted(auto) for l in sorted(set(auto[fn]))]
+    acc, _, action = ui.checklist("override rules — untick one you don't want",
+                                  [f"[dim]{fn}[/]  {l}" for fn, l in pairs])
+    if action in ("skip", "quit") or not acc: return None
+    return {pairs[i] for i in acc}
+
+
 def build_overrides(do_apply: bool = False, master: bool = False, only: set | None = None) -> dict:
     """Read data/rejects.csv, turn the auto-suppressible wrangle rejects into identity-override lines
     (grouped by target file), and list the manual ones for hand-editing. Dry-run unless do_apply.
@@ -296,6 +309,16 @@ def overrides_cmd(argv: list) -> None:
         description="Turn logged wrangle rejects (from `apply --step`) into override rules so the same "
                     "wrong change never recurs. Dry-run until --apply; only appends to override files.")
     p.add_argument("--apply", action="store_true", help="write the override lines (default: preview only)")
+    p.add_argument("--step", action="store_true",
+                   help="with --apply: review each override line 1-by-1 (untick one you don't want)")
     p.add_argument("--master", action="store_true", help="target bundled defaults/ instead of overrides/ (maintainer; checkout only)")
     a = p.parse_args(argv)
-    build_overrides(a.apply, a.master)
+    if a.apply and a.step:
+        auto = build_overrides(False, a.master) or {}      # preview once, then pick from that plan
+        if not auto: return
+        only = step_pick(auto)
+        if only is None:
+            print("(nothing decided — nothing written.)"); return
+        build_overrides(True, a.master, only)
+    else:
+        build_overrides(a.apply, a.master)

@@ -333,8 +333,22 @@ def backfill_plan(ledger_path: str | None = None) -> tuple[dict, dict]:
     return chg, adds
 
 
-def backfill(yes: bool = False) -> int:
-    """CLI entry: preview, confirm, then write the promoted/aliased tags onto their source books."""
+def backfill_step(chg: dict, adds: dict, titles: dict) -> dict:
+    """1-by-1 review of the backfill -> the ACCEPTED {book: tags} ({} = nothing decided). Shared by
+    `promote --backfill --step` and the wizard stage, per CLAUDE.md's same-engine-function rule."""
+    from scourgify import ui
+    books = sorted(adds)
+    acc, _, action = ui.checklist("backfill — untick a book to leave it untagged",
+                                  [f"[bold]#{b}[/] {str(titles.get(b, ''))[:44]}  + "
+                                   f"[cyan]{', '.join(sorted(adds[b]))}[/]" for b in books])
+    if action in ("skip", "quit"): return {}
+    keep = {books[i] for i in acc}
+    return {b: v for b, v in chg.items() if b in keep}
+
+
+def backfill(yes: bool = False, step: bool = False) -> int:
+    """CLI entry: preview, confirm (or 1-by-1 review), then write the promoted/aliased tags onto
+    their source books."""
     chg, adds = backfill_plan()
     if not chg:
         print("backfill: nothing to do — source books already carry their promoted tags ✓"); return 0
@@ -346,7 +360,14 @@ def backfill(yes: bool = False) -> int:
     con.close()
     for b in preview: print(f"  #{b} {str(titles.get(b, ''))[:50]}: + {', '.join(sorted(adds[b]))}")
     if len(adds) > 8: print(f"  … +{len(adds) - 8} more books")
-    if not yes:
+    if step:                                   # the checklist IS the confirmation
+        if not interactive():
+            raise SystemExit("--step needs an interactive terminal (omit it to apply the whole backfill).")
+        con = ro_connect(); chg = backfill_step(chg, adds, book_titles(con)); con.close()
+        if not chg:
+            print("(nothing decided — nothing written.)"); return 0
+        print(f"  {len(chg)} book(s) accepted")
+    elif not yes:
         if not interactive():
             print("  non-interactive: re-run with --yes to write."); return 0
         if not confirm("apply this backfill? (Calibre closed)"):
@@ -405,6 +426,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--apply", action="store_true", help="fold data/promote_review.csv into overrides/")
     p.add_argument("--backfill", action="store_true",
                    help="apply promoted/aliased tags to the books that first proposed them (deterministic, no LLM; Calibre closed)")
+    p.add_argument("--step", action="store_true",
+                   help="with --apply: review each verdict 1-by-1 (untick one to leave it undecided); "
+                        "with --backfill: review each book (untick one to leave it untagged)")
     return p
 
 
@@ -429,13 +453,13 @@ def main() -> None:
         # not an error here: `promote --apply` archives promote_review.csv, so the natural
         # follow-up run has none left and the backfill (which reads the ledger, not the review)
         # must still happen. It used to abort on the review and never reach the backfill.
-        try: apply_decisions()
+        try: apply_decisions_step() if a.step else apply_decisions()
         except SystemExit as e: print(f"{e}\n  (continuing to --backfill, which reads the ledger)")
-        backfill(yes=a.yes or a.apply)
+        backfill(yes=a.yes or a.apply, step=a.step)
     elif a.apply:
-        apply_decisions()
+        apply_decisions_step() if a.step else apply_decisions()
     elif a.backfill:
-        backfill(yes=a.yes)
+        backfill(yes=a.yes, step=a.step)
     else:
         run(a)
 

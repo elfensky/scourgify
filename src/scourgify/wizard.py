@@ -150,12 +150,9 @@ def stage_staleness():
     if choice == "skip":
         ui.say("(skipped — nothing written)", "dim"); return
     if choice == "step":
-        con = ro_connect(); titles = common.titles(con); con.close()
-        acc, _, action = ui.checklist(f"{label} changes — untick to leave a book alone",
-                                      [staleness.status_line(r, str(titles.get(r[0], ""))) for r in rows])
-        if action in ("skip", "quit") or not acc:
+        rows = staleness.step(label, rows)        # the SAME function `staleness --apply --step` calls
+        if not rows:
             ui.say("(nothing decided — nothing written)", "dim"); return
-        rows = [rows[i] for i in acc]
         ui.say(f"{len(rows)} book(s) accepted", "dim")
     if choice == "last":
         con = ro_connect(); total = common.book_count(con)
@@ -452,14 +449,9 @@ def stage_backfill():
     if choice == "skip":
         ui.say("(skipped — nothing written)", "dim"); return
     if choice == "step":
-        books = sorted(adds)
-        acc, _, action = ui.checklist("backfill — untick a book to leave it untagged",
-                                      [f"[bold]#{b}[/] {str(titles.get(b,''))[:44]}  + "
-                                       f"[cyan]{', '.join(sorted(adds[b]))}[/]" for b in books])
-        if action in ("skip", "quit") or not acc:
+        chg = promote.backfill_step(chg, adds, titles)   # SAME function as `promote --backfill --step`
+        if not chg:
             ui.say("(nothing decided — nothing written)", "dim"); return
-        keep = {books[i] for i in acc}
-        chg = {b: v for b, v in chg.items() if b in keep}
         ui.say(f"{len(chg)} book(s) accepted", "dim")
     common.run_writer([common.op_set_field("tags", chg)])
     ui.say(f"backfilled {len(chg)} book(s) ✓", "green")
@@ -482,12 +474,9 @@ def stage_overrides():
         ui.say("(previewed only — nothing written)", "dim"); return
     only = None
     if choice == "step":
-        pairs = [(fn, l) for fn in sorted(auto) for l in sorted(set(auto[fn]))]
-        acc, _, action = ui.checklist("override rules — untick one you don't want",
-                                      [f"[dim]{fn}[/]  {l}" for fn, l in pairs])
-        if action in ("skip", "quit") or not acc:
+        only = overrides.step_pick(auto)          # SAME function as `overrides --apply --step`
+        if only is None:
             ui.say("(nothing decided — nothing written)", "dim"); return
-        only = {pairs[i] for i in acc}
         ui.say(f"{len(only)} rule(s) accepted", "dim")
     overrides.build_overrides(do_apply=True, only=only)
     ui.say("done ✓", "green")
