@@ -8,7 +8,8 @@ Idempotent & self-correcting — re-run after an #updated refresh and the status
 Rule: <STALE yrs -> In-Progress | STALE..DEAD -> Hiatus | >=DEAD -> Abandoned. Tunable: --stale-years 2 --dead-years 5.
 Completed/Dropped/Rewritten and books without an #updated date are NEVER changed."""
 import argparse, datetime, collections
-from scourgify.common import load_config, ro_connect, read_custom_column, run_writer, op_set_field
+from scourgify.common import (load_config, ro_connect, read_custom_column, run_writer,
+                              op_set_field, titles as book_titles)
 from scourgify import select
 
 ACTIVITY = {"In-Progress", "Hiatus", "Abandoned"}      # re-derived from activity
@@ -60,6 +61,19 @@ def status_line(r: tuple, title: str = "") -> str:
     return f"[bold]#{b}[/] {title[:44]}  [dim]{old or '(none)'}[/] → [cyan]{new}[/]  [dim]{age:.1f}y[/]"
 
 
+def step(status_label: str, rows: list) -> list:
+    """1-by-1 review of the proposed #status changes -> the ACCEPTED rows ([] = nothing decided).
+    Lives here, not in the wizard: CLAUDE.md's rule is that a wizard stage calls the same engine
+    function the subcommand does, so `staleness --apply --step` and the wizard share one path."""
+    from scourgify import ui
+    if not ui.interactive():
+        raise SystemExit("--step needs an interactive terminal (omit it to apply every change).")
+    con = ro_connect(); titles = book_titles(con); con.close()
+    acc, _, action = ui.checklist(f"{status_label} changes — untick to leave a book alone",
+                                  [status_line(r, str(titles.get(r[0], ""))) for r in rows])
+    return [] if action in ("skip", "quit") else [rows[i] for i in acc]
+
+
 def write(status_label: str, rows: list) -> None:
     run_writer([op_set_field(status_label, {b: n for b, o, n, _ in rows})])
 
@@ -77,6 +91,8 @@ def show(label: str, rows: list) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description="Re-derive #status from #updated age (activity family only).")
     p.add_argument("--apply", action="store_true", help="write #status (Calibre closed)")
+    p.add_argument("--step", action="store_true",
+                   help="with --apply: review each book's #status change 1-by-1 (untick to leave it alone)")
     p.add_argument("--stale-years", type=float, default=2)
     p.add_argument("--dead-years", type=float, default=5)
     p.add_argument("--books", default=None, metavar="SPEC",
@@ -97,6 +113,10 @@ def main() -> None:
     show(label, rows)
 
     if a.apply:
+        if a.step:
+            rows = step(label, rows)
+            if not rows:
+                print("(nothing decided — nothing written.)"); return
         write(label, rows)
         print(f"re-derived {label} for {len(rows)} books.")
     else:

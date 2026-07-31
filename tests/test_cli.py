@@ -64,6 +64,29 @@ def test_subcommand_argv_is_reframed_for_the_tool():
     assert argv[0] == "scourgify classify" and argv[1:] == ["--last", "30"]
 
 
+def test_every_reviewable_subcommand_exposes_step():
+    """CLAUDE.md: a wizard stage calls the SAME engine function the subcommand does. So every
+    stage that offers a 1-by-1 review must have a --step on the CLI too, or the wizard can do
+    something the CLI cannot. promote/staleness/overrides shipped the wizard half first."""
+    import inspect
+    from scourgify import classify, promote, staleness, wrangle, overrides
+    for mod in (classify, promote, staleness, wrangle, overrides):
+        # staleness/wrangle/overrides build their parser inside main(), so check the source
+        assert '"--step"' in inspect.getsource(mod), f"{mod.__name__} exposes no --step"
+
+
+def test_step_helpers_live_in_the_tool_modules_not_the_wizard():
+    """The checklist itself may only be driven from a tool module — the wizard must delegate, so
+    `--step` on the CLI and the wizard's slot 2 can never diverge."""
+    import inspect
+    from scourgify import wizard
+    assert "ui.checklist" not in inspect.getsource(wizard), \
+        "wizard.py drives a checklist directly; move it into the tool module and delegate"
+    from scourgify import promote, staleness, overrides
+    for fn in (promote.apply_decisions_step, promote.backfill_step, staleness.step, overrides.step_pick):
+        assert callable(fn)
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
