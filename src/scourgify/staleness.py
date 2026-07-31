@@ -54,6 +54,12 @@ def compute(stale_years: float = 2.0, dead_years: float = 5.0,
     return status_label, rows
 
 
+def status_line(r: tuple, title: str = "") -> str:
+    """One #status change as a review line: (book, old, new, age). Pure."""
+    b, old, new, age = r
+    return f"[bold]#{b}[/] {title[:44]}  [dim]{old or '(none)'}[/] → [cyan]{new}[/]  [dim]{age:.1f}y[/]"
+
+
 def write(status_label: str, rows: list) -> None:
     run_writer([op_set_field(status_label, {b: n for b, o, n, _ in rows})])
 

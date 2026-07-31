@@ -219,9 +219,13 @@ def _append_override(path: str, lines: list) -> list:
     return added
 
 
-def build_overrides(do_apply: bool = False, master: bool = False) -> None:
+def build_overrides(do_apply: bool = False, master: bool = False, only: set | None = None) -> dict:
     """Read data/rejects.csv, turn the auto-suppressible wrangle rejects into identity-override lines
-    (grouped by target file), and list the manual ones for hand-editing. Dry-run unless do_apply."""
+    (grouped by target file), and list the manual ones for hand-editing. Dry-run unless do_apply.
+
+    `only`: a set of (filename, line) pairs to keep — the 1-by-1 review path, so a rule you don't
+    want simply isn't written. Returns the {filename: [line, ...]} plan, which is what the wizard
+    renders its checklist from (one computation, not two).""" 
     from scourgify.common import rejects_path
     if not os.path.exists(rejects_path()):
         print(f"no rejects logged yet ({os.path.basename(rejects_path())} not found — reject something in `apply --step` first)."); return
@@ -240,6 +244,9 @@ def build_overrides(do_apply: bool = False, master: bool = False) -> None:
             for fn, line in actions: auto[fn].append(line)
         else:
             manual.append((r["kind"], col, r["before"], r["after"], reason))
+    if only is not None:                       # 1-by-1 review kept only these lines
+        auto = {fn: [l for l in lines if (fn, l) in only] for fn in auto}
+        auto = {fn: lines for fn, lines in auto.items() if lines}
     tgt = DEF if master else overrides_dir()
     where = "defaults/ (MASTER — checkout only; installed defaults are read-only)" if master else "overrides/"
     print(f"{'APPLY' if do_apply else 'DRY-RUN'} — {sum(len(v) for v in auto.values())} auto-suppressible line(s) → {where}")
@@ -265,6 +272,7 @@ def build_overrides(do_apply: bool = False, master: bool = False) -> None:
     elif not do_apply and auto:
         print("\n(dry-run — re-run `scourgify overrides --apply` to write these"
               + (" to the master defaults" if master else "") + ".)")
+    return dict(auto)
 
 
 def _archive_consumed_rejects() -> None:

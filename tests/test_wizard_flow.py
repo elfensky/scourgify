@@ -231,8 +231,8 @@ def test_staleness_stage_most_recent_n_narrows_the_rows():
         staleness.compute = lambda *a, **k: ("#status", [(1, "In-Progress", "Hiatus", 3.0),
                                                          (2, "In-Progress", "Abandoned", 6.0)])
         staleness.write = lambda label, rows: seen.append([r[0] for r in rows])
-        try:                                     # slot 2 = most recent N, then N=1
-            with common.scripted_answers(["2", "1"]), transcript() as buf:
+        try:                                     # slot 3 = most recent N (slot 2 is now review 1-by-1), then N=1
+            with common.scripted_answers(["3", "1"]), transcript() as buf:
                 wizard.stage_staleness()
         finally:
             staleness.compute, staleness.write = saved_c, saved_w
@@ -252,6 +252,26 @@ def test_snapshot_reports_the_never_classified_backlog():
         artifacts.write_proposal([{"book_id": b, "title": "x", "added_tags": [], "proposed_new": []}
                                   for b in (1, 2)])
         assert wizard.snapshot()["unclassified"] == 0
+
+
+def test_staleness_stage_per_book_review_unticks_a_book():
+    """Every stage that proposes a LIST of changes must let a human judge them one at a time —
+    the unit here is a book's #status change. All-or-nothing was the gap reported 2026-07-31."""
+    from scourgify import staleness
+    seen = []
+    with dirty_lib():
+        saved_c, saved_w = staleness.compute, staleness.write
+        staleness.compute = lambda *a, **k: ("#status", [(1, "In-Progress", "Hiatus", 3.0),
+                                                         (2, "In-Progress", "Abandoned", 6.0)])
+        staleness.write = lambda label, rows: seen.append([r[0] for r in rows])
+        try:                                     # slot 2 = review 1-by-1; untick item 2
+            # slot 2, toggle item 2 off, then ⏎ to apply what stays ticked
+            with common.scripted_answers(["2", "2", ""]), transcript() as buf:
+                wizard.stage_staleness()
+        finally:
+            staleness.compute, staleness.write = saved_c, saved_w
+    assert seen == [[1]], seen                    # only the book left ticked is written
+    assert "1 book(s) accepted" in buf.getvalue()
 
 
 def test_a_short_script_raises_instead_of_exiting_zero():

@@ -157,7 +157,7 @@ def archive(path: str, kind: str) -> str:
     return arch
 
 
-def archive_rows(rows: list, kind: str, path: str | None = None) -> str:
+def archive_rows(rows: list, kind: str, path: str | None = None, writer=None) -> str:
     """Archive an EXPLICIT row set under the same convention, leaving the live file alone.
 
     For a partial apply (`--apply --step`, where the user skips or quits partway): an
@@ -166,7 +166,7 @@ def archive_rows(rows: list, kind: str, path: str | None = None) -> str:
     crash-safe — the full record survives until the caller replaces it with the leftovers."""
     path = path or prop()
     arch = _arch_path(path, kind)
-    write_proposal(rows, arch)
+    (writer or write_proposal)(rows, arch)      # `writer` picks the row schema (proposal vs review)
     return arch
 
 
