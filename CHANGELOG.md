@@ -9,11 +9,10 @@ All notable changes to scourgify are documented here. The format follows
 ### Changed
 
 - **Repo conformance sweep.** Added `dependabot.yml` (pip + github-actions, minor/patch
-  grouped), a version-bump gate workflow (advisory, PR-triggered), a `gitleaks` job in `ci.yml`
-  (secret history scan), and `.python-version` (3.14). `AGENTS.md` is now the real agent file
-  with `CLAUDE.md` symlinked to it; `graphify-out/` is generated locally and git-ignored.
-  Dependabot security updates and secret-scanning push protection enabled repo-side; default
-  branch set to `develop`.
+  grouped), a version-bump gate workflow (advisory, PR-triggered), and `.python-version` (3.14).
+  `AGENTS.md` is now the real agent file with `CLAUDE.md` symlinked to it; `graphify-out/` is
+  generated locally and git-ignored. Dependabot security updates and GitHub-native secret scanning
+  + push protection enabled repo-side (no third-party gitleaks); default branch set to `develop`.
 - **Version source is now static in `pyproject.toml`.** Dropped the `[tool.hatch.version]`
   indirection that read `__version__` from `src/scourgify/__init__.py`; `pyproject.toml`'s
   `[project] version` is now the single source, and `__version__` resolves at runtime via
