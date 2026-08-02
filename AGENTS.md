@@ -57,8 +57,7 @@ CLI `apply --step` / `classify --apply --step`): walk each book's changes, untic
 individual items. Rejects land in `data/rejects.csv` (see `docs/superpowers/specs/2026-07-06-…`);
 `scourgify overrides` turns the deterministic (wrangle) ones into identity-override lines so the same
 change never recurs (dry-run default, `--apply` writes, `--master` targets `defaults/`), while
-classify rejects are log-only (an AI hallucination, not a rule bug). Stages call the same engine functions the subcommands do (previews → confirm →
-write), so guardrails and auto-backup apply identically; guardrail `SystemExit`s skip the stage, not
+classify rejects are log-only (an AI hallucination, not a rule bug). **The wizard ASKS; the tool modules DO.** A stage may render menus/prompts and then hand off — it may never drive a review checklist or assemble a write itself, because the CLI is the other front door into the same functions and anything the wizard does privately is invisible to it (and to any guard added later). Where a flow needs a different question, the tool takes an injected decision callback (`promote.backfill(decide=…)`, the same seam as `Plan.run(ask=…)`), so there is ONE flow and the doors differ only in how they ask. `tests/test_cli.py` enforces this by reading wizard.py's source: `ui.checklist`, `run_writer(` and `op_set_field(` may not appear in it. Stages call the same engine functions the subcommands do (previews → confirm → write), so guardrails and auto-backup apply identically; guardrail `SystemExit`s skip the stage, not
 the run. `ui.py` holds the shared rich Console + prompt helpers (lintle `term.py` pattern). classify
 runs render a live dashboard (`report.Dashboard`: progress, tagged/failed/rate, throughput
 sparkline, rising candidates).

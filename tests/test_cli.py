@@ -75,13 +75,25 @@ def test_every_reviewable_subcommand_exposes_step():
         assert '"--step"' in inspect.getsource(mod), f"{mod.__name__} exposes no --step"
 
 
-def test_step_helpers_live_in_the_tool_modules_not_the_wizard():
-    """The checklist itself may only be driven from a tool module — the wizard must delegate, so
-    `--step` on the CLI and the wizard's slot 2 can never diverge."""
+def test_the_wizard_asks_but_never_does_the_work():
+    """The architectural line, made mechanical rather than remembered.
+
+    The wizard is a front door: it may ASK (menus, prompts) and then hand off. It may never carry
+    the work itself, because the CLI is the other front door into the same functions and anything
+    the wizard does privately is invisible to it. Both halves of this were violated in the same
+    week: the 1-by-1 checklists were written inline in wizard.py (so promote/staleness/overrides
+    had no CLI --step at all), and stage_backfill assembled its own run_writer call (silently
+    dropping promote.backfill's per-book preview, and bypassing any guard added there later).
+
+    A rule in a document is a rule someone has to remember; this one is checked."""
     import inspect
     from scourgify import wizard
-    assert "ui.checklist" not in inspect.getsource(wizard), \
-        "wizard.py drives a checklist directly; move it into the tool module and delegate"
+    src = inspect.getsource(wizard)
+    body = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+    for banned, why in (("ui.checklist", "drives a review checklist — move it into the tool module"),
+                        ("run_writer(", "assembles a write — call the tool's function, which guards it"),
+                        ("op_set_field(", "builds a write op — that belongs with the tool's write path")):
+        assert banned not in body, f"wizard.py {why}"
     from scourgify import promote, staleness, overrides
     for fn in (promote.apply_decisions_step, promote.backfill_step, staleness.step, overrides.step_pick):
         assert callable(fn)

@@ -346,9 +346,14 @@ def backfill_step(chg: dict, adds: dict, titles: dict) -> dict:
     return {b: v for b, v in chg.items() if b in keep}
 
 
-def backfill(yes: bool = False, step: bool = False) -> int:
-    """CLI entry: preview, confirm (or 1-by-1 review), then write the promoted/aliased tags onto
-    their source books."""
+def backfill(yes: bool = False, step: bool = False, decide=None) -> int:
+    """THE backfill flow — plan, preview, decide, guarded write — for every front door.
+
+    `decide(chg, adds) -> chg to write` (falsy aborts) is the only thing that varies between them:
+    the CLI's confirm/--step by default, the wizard's menu when it injects one. Same seam as
+    Plan.run(ask=)/run(verify_ask=). The wizard used to assemble its own run_writer call here,
+    which silently dropped this function's per-book preview — a wizard user saw less before a
+    write than a CLI user, and any guard added here would have missed them entirely."""
     chg, adds = backfill_plan()
     if not chg:
         print("backfill: nothing to do — source books already carry their promoted tags ✓"); return 0
@@ -360,7 +365,11 @@ def backfill(yes: bool = False, step: bool = False) -> int:
     con.close()
     for b in preview: print(f"  #{b} {str(titles.get(b, ''))[:50]}: + {', '.join(sorted(adds[b]))}")
     if len(adds) > 8: print(f"  … +{len(adds) - 8} more books")
-    if step:                                   # the checklist IS the confirmation
+    if decide is not None:                     # a front door supplying its own question
+        chg = decide(chg, adds)
+        if not chg:
+            print("(nothing decided — nothing written.)"); return 0
+    elif step:                                 # the checklist IS the confirmation
         if not interactive():
             raise SystemExit("--step needs an interactive terminal (omit it to apply the whole backfill).")
         con = ro_connect(); chg = backfill_step(chg, adds, book_titles(con)); con.close()

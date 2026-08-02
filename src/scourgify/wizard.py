@@ -434,27 +434,22 @@ def stage_promote():
 
 
 def stage_backfill():
-    """apply-all delegates to promote.backfill (the ONE preview→confirm→write loop); the 1-by-1
-    path filters the plan per book first, so a book you don't want tagged simply isn't written."""
-    chg, adds = promote.backfill_plan()
-    if not chg:
+    """Asks; promote.backfill() does the work. The write itself (and its preview, guards and
+    auto-backup) lives there, so `promote --backfill` and this stage cannot diverge."""
+    def decide(chg, adds):
+        con = ro_connect(); titles = common.titles(con); con.close()
+        choice = ui.menu(f"backfill {len(chg)} book(s)? (Calibre closed; auto-backup)", [
+            ("1", "apply", "apply all", "write the promoted/aliased tags onto every book that proposed them"),
+            ("2", "step", "review 1-by-1", "walk each book; untick one to leave it untagged"),
+            ("3", "skip", "skip", "leave the books unchanged"),
+        ], default="apply")
+        if choice == "skip": return None
+        return promote.backfill_step(chg, adds, titles) if choice == "step" else chg
+
+    if promote.backfill(decide=decide):
+        ui.say("done ✓", "green")
+    else:
         ui.say("(backfill applies vocab-promoted tags to the books that first suggested them)", "dim")
-        ui.say("nothing to backfill ✓", "green"); return
-    con = ro_connect(); titles = common.titles(con); con.close()
-    choice = ui.menu(f"backfill {len(chg)} book(s)? (Calibre closed; auto-backup)", [
-        ("1", "apply", "apply all", "write the promoted/aliased tags onto every book that proposed them"),
-        ("2", "step", "review 1-by-1", "walk each book; untick one to leave it untagged"),
-        ("3", "skip", "skip", "leave the books unchanged"),
-    ], default="apply")
-    if choice == "skip":
-        ui.say("(skipped — nothing written)", "dim"); return
-    if choice == "step":
-        chg = promote.backfill_step(chg, adds, titles)   # SAME function as `promote --backfill --step`
-        if not chg:
-            ui.say("(nothing decided — nothing written)", "dim"); return
-        ui.say(f"{len(chg)} book(s) accepted", "dim")
-    common.run_writer([common.op_set_field("tags", chg)])
-    ui.say(f"backfilled {len(chg)} book(s) ✓", "green")
 
 
 def stage_overrides():
