@@ -1,6 +1,6 @@
 [project]
 name = "scourgify"
-dynamic = ["version"]
+version = "1.11.0"
 description = "Normalize and consolidate tags/fandoms/characters/genres in a FanFicFare-imported Calibre library"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,9 +41,6 @@ scourgify = "scourgify.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-
-[tool.hatch.version]
-path = "src/scourgify/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/scourgify"]
