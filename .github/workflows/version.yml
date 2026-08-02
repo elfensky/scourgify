@@ -16,4 +16,10 @@ jobs:
           base="origin/${{ github.base_ref }}"
           old=$(git show "$base:pyproject.toml" | grep -m1 '^version = ' | cut -d'"' -f2)
           new=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          # an EMPTY old or new passes "$old" != "$new" trivially. That is not hypothetical:
+          # when the version moved from __init__.py into pyproject.toml, main had no `version =`
+          # line, so old was "" and the guard waved through a release that shipped the previous
+          # version and then failed at publish (hash mismatch on an already-published file).
+          [ -n "$old" ] || { echo "::error::could not read version from $base:pyproject.toml"; exit 1; }
+          [ -n "$new" ] || { echo "::error::could not read version from pyproject.toml"; exit 1; }
           [ "$old" != "$new" ] || { echo "::error::Still $new — bump it"; exit 1; }
