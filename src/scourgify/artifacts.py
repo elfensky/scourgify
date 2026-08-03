@@ -145,8 +145,18 @@ def write_failures(rows: list, path: str | None = None) -> None:
 
 
 def _arch_path(path: str, kind: str) -> str:
-    """The <name>_<kind>_<ts>.csv archive name — the convention itself, in one place."""
-    return path.replace(".csv", f"_{kind}_{time.strftime('%Y%m%d-%H%M%S')}.csv")
+    """The <name>_<kind>_<ts>[_N].csv archive name — the convention itself, in one place.
+
+    The _N probe (same shape as common._backup_path) is load-bearing, not tidiness: an
+    *_applied_* archive IS state — classified_ids() reads it as the "already attempted" cursor.
+    The timestamp is whole-second, and two archives in one second are routine (`--apply --step`,
+    `promote --apply --backfill`); overwriting the first un-retires up to a batch of books, which
+    the next `--unclassified` run re-selects and re-bills against a paid API."""
+    base = path.replace(".csv", f"_{kind}_{time.strftime('%Y%m%d-%H%M%S')}")
+    p, n = base + ".csv", 2
+    while os.path.exists(p):
+        p = f"{base}_{n}.csv"; n += 1
+    return p
 
 
 def archive(path: str, kind: str) -> str:

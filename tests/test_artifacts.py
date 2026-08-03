@@ -89,6 +89,24 @@ def test_archive_rows_files_only_what_it_is_given():
             os.environ.pop("SCOURGIFY_HOME", None) if old is None else os.environ.__setitem__("SCOURGIFY_HOME", old)
 
 
+def test_archives_in_the_same_second_never_overwrite_each_other():
+    """*_applied_* archives are the classified_ids() cursor, not history. The name is stamped to
+    the second, and a `--step` apply or `promote --apply --backfill` writes two in one second —
+    losing the first un-retires those books, which the next --unclassified run re-bills."""
+    old = os.environ.get("SCOURGIFY_HOME")
+    with tempfile.TemporaryDirectory() as td:
+        _home(td)
+        try:
+            for i in (1, 2, 3):                                  # all in the same wall-clock second
+                artifacts.archive_rows([{"book_id": i, "title": f"b{i}",
+                                         "added_tags": ["T"], "proposed_new": []}], "applied")
+            files = artifacts.applied_proposals()                 # the glob must still see suffixed names
+            assert len(files) == 3 and files == sorted(files)
+            assert artifacts.classified_ids() == {1, 2, 3}        # the union, not just the last writer
+        finally:
+            os.environ.pop("SCOURGIFY_HOME", None) if old is None else os.environ.__setitem__("SCOURGIFY_HOME", old)
+
+
 def test_merge_failures_drops_books_that_have_since_succeeded():
     """The failure log means "failed and not since recovered". Gemini blocked 7 books; re-running
     them through openai succeeded — the documented recovery — but the log still listed all 7,
