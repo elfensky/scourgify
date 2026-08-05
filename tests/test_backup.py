@@ -2,7 +2,7 @@
 """Pins the write-path safety helpers touched by the calibre_open fail-closed fix and the
 backup-hardening/rollback work. No framework:  uv run tests/test_backup.py  (also pytest-collectable).
 No Calibre, no library, no network."""
-import os, sys, tempfile
+import os, sys, tempfile, types
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 from scourgify import common
@@ -20,6 +20,29 @@ def test_is_calibre_gui_ignores_cli_tools_and_our_own_helpers():
                  "555 python3 /home/u/calibre-tools/scourgify/wrangle.py apply --apply",
                  "444 python3 classify.py --incremental"):
         assert not common._is_calibre_gui(line), line
+
+
+def test_calibre_open_from_inside_the_gui():
+    """A Calibre plugin runs inside the GUI, and there the process scan LIES: measured from a
+    plugin, `pgrep -fl calibre` exits 0 listing only the calibre-parallel workers, with the GUI's
+    own line absent — so every line is correctly rejected and the guard answers "not running".
+    That is fail-open in the one place a second writer is certain to race a live library."""
+    fake = types.ModuleType("calibre.gui2.ui")
+    sys.modules["calibre.gui2.ui"] = fake
+    try:
+        assert common.calibre_open(), "guard fails OPEN inside the GUI — a plugin would shell out to a second writer"
+    finally:
+        del sys.modules["calibre.gui2.ui"]
+
+
+def test_calibre_open_does_not_see_a_gui_that_isnt_there():
+    """The other half: the in-process check must not make the guard permanently true. `calibre`
+    alone (what `calibre-debug -e _writer.py` imports) is not the GUI — only calibre.gui2 is."""
+    sys.modules.setdefault("calibre", types.ModuleType("calibre"))
+    try:
+        assert not any(m.startswith("calibre.gui2") for m in sys.modules)   # precondition
+    finally:
+        sys.modules.pop("calibre", None)
 
 
 def test_backup_path_never_collides_within_a_second():
@@ -97,6 +120,8 @@ def test_wipe_verdict_thresholds():
 if __name__ == "__main__":
     test_is_calibre_gui_matches_the_gui()
     test_is_calibre_gui_ignores_cli_tools_and_our_own_helpers()
+    test_calibre_open_from_inside_the_gui()
+    test_calibre_open_does_not_see_a_gui_that_isnt_there()
     test_backup_path_never_collides_within_a_second()
     test_prune_keeps_only_the_newest()
     test_prune_enforces_a_byte_budget_not_just_a_count()

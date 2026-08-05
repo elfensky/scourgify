@@ -296,11 +296,25 @@ def _is_calibre_gui(line):
         "pgrep", "wrangle", "_writer", "classify"))
 
 def calibre_open() -> bool:
-    """True if the Calibre GUI appears to be running (it locks metadata.db, so writes must wait).
-    Best-effort via pgrep, then ps. If NEITHER exists we cannot tell, so fail CLOSED (report open)
-    rather than let a write silently race a live library — the old code returned False (open the
-    gate) here, which disabled the guard entirely on any host without pgrep."""
-    import subprocess, shutil
+    """True if the Calibre GUI appears to be running (it holds metadata.db open, so writes must
+    wait). Two checks, in order: are we ourselves inside the GUI, then best-effort pgrep → ps.
+    If NEITHER binary exists we cannot tell, so fail CLOSED (report open) rather than let a write
+    silently race a live library — the old code returned False (open the gate) here, which
+    disabled the guard entirely on any host without pgrep.
+
+    Deliberately NOT a lock probe: measured 2026-08-05, `BEGIN IMMEDIATE` against metadata.db
+    succeeds while the GUI is running. Calibre keeps a connection open but holds no write lock at
+    rest, so SQLITE_BUSY would report "safe to write" — the exact answer this guard exists to
+    prevent. The hazard is a live GUI that may write at any moment, not a lock held right now."""
+    import subprocess, shutil, sys
+    # Are we running INSIDE the GUI (i.e. a Calibre plugin)? Then it is open by definition, and
+    # the scan below cannot tell us so: measured 2026-08-05 from a plugin, `pgrep -fl calibre`
+    # exits 0 and lists only the calibre-parallel workers — the GUI's own process line is absent,
+    # every remaining line is correctly rejected by _is_calibre_gui, and the answer comes back
+    # False. That is the fail-OPEN direction, in the one context where a second writer is
+    # guaranteed to be racing a live library. calibre.gui2 is imported only by the GUI (plain
+    # `calibre-debug -e` does not pull it in), so it identifies that context exactly.
+    if any(m == "calibre.gui2" or m.startswith("calibre.gui2.") for m in sys.modules): return True
     for cmd in (["pgrep", "-fl", "calibre"], ["ps", "-Ao", "command"]):
         if not shutil.which(cmd[0]): continue
         try:
