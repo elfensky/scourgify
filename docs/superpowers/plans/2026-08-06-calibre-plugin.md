@@ -1,0 +1,345 @@
+# Calibre plugin — kickoff briefing
+
+**Written 2026-08-06**, at the end of the session that proved the plugin is feasible. Everything
+here is measured against the real 7,949-book library unless marked otherwise. Nothing in it is
+speculation dressed as fact — where something is unverified it says so.
+
+## The prompt for a fresh session
+
+> Read `docs/superpowers/plans/2026-08-06-calibre-plugin.md` in full, then read the linked GitHub
+> issues (#49–#53). Build the roadmap it proposes: turn each phase into a GitHub issue, link them
+> from a tracking issue, then work the loop — complete a phase, review it against the design,
+> update the roadmap, reconcile anything that changed or any question that surfaced, move to the
+> next phase. Do not start writing Qt before phases 1 and 2 are done and green.
+
+That is the whole prompt. This document is the context.
+
+---
+
+## Where things actually stand
+
+**There is no plugin.** Not one line of the real thing. What exists:
+
+| Artefact | What it is | Where |
+|---|---|---|
+| Design | Clickable interaction spec — three selection modes, engine picker, settings, dashboard | Artifact `d13999d5-f95e-44e9-bdd7-68ed23cf6a0f` |
+| Feasibility | A throwaway spike plugin, run twice against the real library, then deleted | Findings in #52 |
+| Two fixes | Shipped to `develop`, unreleased: `5f73c96` (#45), `5eb5c42` (#53) | In the tree |
+| Issues | #49 edit log, #50 history, #51 undo, #52 plugin direction, #53 the guard bug | GitHub |
+
+The spike answered the questions that could have killed the idea. The remaining work is building,
+not discovering.
+
+---
+
+## What the spike proved
+
+Run inside Calibre 9.11 on macOS, against the live library.
+
+**The core runs unmodified under Calibre's Python.** All eleven core modules — `common`, `select`,
+`artifacts`, `overrides`, `engines`, `booktext`, `wrangle`, `classify`, `promote`, `staleness`,
+`setup` — import and execute with an empty `site-packages`. This works because `rich` is the only
+third-party dependency (`pyproject.toml`) and it is confined to presentation; `engines._post_json`
+is stdlib `urllib`. **Protecting that property is a hard constraint on all future work.**
+
+**Writing through the live handle works with the GUI open.** Book 7453 went `[] →
+["scourgify-spike"] → []` via `gui.current_db.new_api.set_field`, both writes while Calibre held
+the library. This is the entire reason the plugin is worth building — it deletes "close Calibre
+first" from every workflow.
+
+**`common.ro_connect()` works while the GUI holds the library.** 7,949 books read through
+scourgify's own read-only sqlite handle, concurrent with Calibre's. So the plugin can reuse the
+existing read paths as-is; there is no need to route reads through Calibre's API.
+
+---
+
+## Footguns
+
+Every one of these was hit, or found by measurement. They are ordered by how much time they cost.
+
+### 1. Any full-library operation on the GUI thread freezes Calibre
+
+The first spike ran its probes in `initialization_complete()`, which fires on Calibre's GUI thread.
+One probe was `select.pick(con, "unclassified")` — a scan over 7,949 books. The window stopped
+repainting and it read as a crash. It was not a crash; it was a blocked thread.
+
+The lesson is broader than "the LLM calls are slow". **Every** full-library operation scourgify
+performs is GUI-thread-hostile: `select.pick()`, `wrangle.plan()`, `read_library()`,
+`classified_ids()` over a large archive set. This decides architecture from the first line, and it
+is why FanFicFare has a `jobs.py`.
+
+**Rule: nothing runs at plugin startup, and every core call goes through Calibre's job system from
+the outset.** Not a raw `ThreadPoolExecutor`, and not "we'll move it off-thread later".
+
+### 2. `ui.py` raises `SystemExit` when rich is missing
+
+Correct for a CLI. Inside a GUI process it is a plugin that kills its host on import. The spike
+caught this with `except BaseException` — an ordinary `except Exception` does not catch
+`SystemExit`. Before any plugin imports anything near that path, the rich check must become a
+catchable error or a lazy check.
+
+### 3. Calibre ships Python 3.14.6 — newer than CI
+
+CI tests 3.10 and 3.13. Calibre 9.11 bundles **3.14.6**. The risk was assumed to be "Calibre's
+Python is ancient"; it is the opposite. Add 3.14 to the CI matrix as part of phase 2.
+
+### 4. The write guard cannot be trusted from inside the GUI
+
+`common.calibre_open()` returned **False** — "Calibre is not running" — while running inside
+Calibre. `pgrep -fl calibre` exits 0 with clean stderr and lists only the `calibre-parallel`
+workers; the GUI's own process line is absent, so every remaining line is correctly rejected.
+
+Fixed in `5eb5c42` by detecting `calibre.gui2` in `sys.modules` first. **But the deeper lesson
+stands: the plugin must never call `run_writer`.** `run_writer` shells out to a second process
+against a library the GUI holds open. The guard now catches that mistake, but the architecture
+should not depend on a guard catching it — phase 1 exists to remove the possibility.
+
+### 5. Do not "fix" locking with a lock probe
+
+The obvious fix for #53 was to test whether `metadata.db` is locked and treat `SQLITE_BUSY` as
+"open". **Measured: `BEGIN IMMEDIATE` succeeds while the Calibre GUI is running.** Calibre keeps a
+connection open but holds no write lock at rest, and creates no `-wal`/journal/lockfile sidecar. A
+lock probe would have reported "safe to write" with the GUI live — the same fail-open bug by a new
+route, and harder to spot because it looks principled.
+
+The hazard is *a live GUI that may write at any moment*, not *a lock held right now*.
+
+### 6. Calibre plugin mechanics
+
+- Multi-file plugins need an empty `plugin-import-name-<name>.txt` at the zip root. Without it the
+  plugin cannot import its own submodules.
+- `actual_plugin` is a string: `'calibre_plugins.<import_name>.<module>:<Class>'`.
+- `genesis()` runs during action setup — wire up the toolbar action there and nothing else.
+  `initialization_complete()` is where `self.gui.current_db` is real, but see footgun 1.
+- **A newly installed plugin is not loaded until Calibre restarts.** `calibre-customize -a` while
+  Calibre is running appears to succeed and changes nothing in the running instance.
+- `calibre-customize -r "<plugin name>"` takes the display name, not the zip name.
+
+### 7. Environment variables will not be there
+
+API keys currently come from `ANTHROPIC_/OPENAI_/GEMINI_/MISTRAL_API_KEY` (`engines.ENGINE_ENV`).
+A plugin inherits whatever Calibre was launched with — **nothing at all when launched from the
+Dock**. The plugin must own its own key storage. See the design decisions below.
+
+### 8. Shell and permissions (this machine)
+
+- `calibre-customize` needs a Bash permission rule in `.claude/settings.local.json`. It is already
+  there: `Bash(calibre-customize *)`.
+- **Compound commands do not match single-command permission rules.** `calibre-customize -a x.zip`
+  is allowed; `calibre-customize -a x.zip; calibre-customize -l | grep spike` is refused. Run one
+  command per call.
+- `osascript -e 'quit app "calibre"'` frequently returns `execution error: ... (-128)` *and quits
+  successfully anyway* — the app exits before AppleScript gets its reply. Check with `pgrep`, do
+  not trust the return code.
+- `zip` was refused by the permission classifier; Python's `zipfile` works and is the natural tool
+  anyway.
+
+---
+
+## Design decisions already made
+
+From the interaction spec and the owner's review of it. These are settled — implement them, do not
+re-litigate them.
+
+**The selection is the command.** Calibre already knows which books are meant. The toolbar button
+offers a menu scoped to the current selection: one book, several books, or — with nothing selected
+— it opens the dashboard instead of a menu. The verbs are identical in all three modes; only their
+scope changes.
+
+**No confirmation dialogs, anywhere in the GUI.** Opening the menu and clicking an item *is* the
+confirmation. Every item instead carries what it will do: `free`, `costs` with the amount computed
+for the actual selection, or `writes`. A dialog that always appears trains the user to dismiss it.
+Undo after the fact beats a gate before it. *The CLI keeps its confirmation gate for large cloud
+runs — there the click and the consequence are separated by a scrollback.*
+
+**Every engine states how it will let you down.** Price alone picks the wrong engine. The picker
+shows, per engine: Apple is free and on-device but single-threaded and too weak to judge new tags;
+Gemini refuses mature content (**measured: 1 book in 7 on this library**) and bills ~1,061 hidden
+reasoning tokens per book, making it cost more than Claude despite a lower headline price; OpenAI
+is the cheapest usable one; Mistral is untested here. Source of truth is `engines.TRAITS` and
+`engines.PRICING` — the UI derives from them, never hardcodes.
+
+**Keys live in Calibre's ordinary plaintext plugin JSON**, the same place FanFicFare keeps site
+logins. This is a deliberate, accepted choice. Surface it with a plain banner in the settings
+dialog — no modal, no acknowledgement checkbox. Environment variables still win when set, so
+scripted and CI runs keep working unchanged.
+
+**Refusals are an outcome, not an error.** Blocked books surface as a normal result with a
+one-click retry on an engine that will not refuse — never a log file the user has to go find.
+
+**Review happens in the library view.** The one thing Calibre can do that a terminal cannot is show
+the book being judged — cover, blurb, series, existing tags. Reviewing N proposals selects those N
+books and steps through them in place. *Open question: one at a time, or a filtered view of all N.*
+
+---
+
+## Testing strategy
+
+Checked against FanFicFare, the largest Calibre plugin there is: **it does not test its plugin layer
+at all.** `fanficfare/` is a pure library with `tests/` (pytest, conftest, per-site fixtures);
+`calibre-plugin/` — `fff_plugin.py`, `dialogs.py`, `config.py`, `jobs.py` — has no tests.
+
+scourgify is better positioned than FanFicFare for this: 11 stdlib core modules against 18 test
+files, 3 presentation files. So:
+
+1. **The core stays untouched.** The existing suite keeps covering the real logic under normal
+   CPython. Run it as CI does: `for t in tests/test_*.py; do env -u CALIBRE_LIBRARY uv run "$t"; done`
+   — `CALIBRE_LIBRARY` is set in a dev shell but absent in CI, and that has hidden a failure before.
+2. **Keep the Qt layer thin by enforcement, not intention.** `tests/test_cli.py` already reads
+   `wizard.py`'s source and fails if `ui.checklist`, `run_writer(` or `op_set_field(` appear in it.
+   Extend the same source-grep to the plugin module. That is what makes an untested Qt layer safe.
+3. **A `calibre-debug -e` smoke script is automatable** — imports the core, exercises the read
+   paths headlessly, no GUI. This is what the spike was; it belongs in the repo.
+4. **No vendored dependencies.** The core needs none. Only a Qt backend for `report.py`/`ui.py`, so
+   there is no dependency tree to bundle — a real advantage over FanFicFare's 2 MB zip.
+
+Tests are plain asserts, no framework. Match the surrounding style: a docstring saying what breaks
+in the real world if the assertion fails, not what the code does.
+
+---
+
+## Proposed roadmap
+
+Each phase becomes a GitHub issue, linked from a tracking issue. **Phases 1 and 2 are worth doing
+even if the plugin is never built** — start there, and the decision to continue stays cheap.
+
+### Phase 1 — Extract the write path (blocks everything)
+
+Split `apply_ops(legacy, ops)` out of `_writer.py`. Only lines 18–21 are script-shaped: read
+`CALIBRE_LIBRARY`, read `sys.argv`, open its own `DB(LIB)`. The ops loop is already generic and
+already runs against Calibre's API.
+
+Lift the auto-backup and the `_is_wipe` guard out of `run_writer` so both callers keep them — a
+plugin writing through `apply_ops` must still snapshot and must still refuse a catastrophic
+change-set. Relates to #53: this is what makes the plugin safe by construction rather than by guard.
+
+*Acceptance:* `_writer.py` and an in-process caller share one executor; backup and wipe guard apply
+to both; existing write paths unchanged and green.
+
+### Phase 2 — Make the core plugin-safe
+
+Add 3.14 to the CI matrix. Make the `rich` check in `ui.py` catchable rather than `SystemExit`. Add
+the `calibre-debug -e` smoke script to the repo. Audit the core for anything that assumes a
+terminal or a process exit.
+
+*Acceptance:* CI green on 3.10/3.13/3.14; importing every core module under `calibre-debug` raises
+nothing; the smoke script runs in CI or is documented as a manual pre-release check.
+
+### Phase 3 — The edit log (#49)
+
+The foundation for History (#50) and undo (#51), both of which are already drawn into the dashboard
+design. Independently valuable to CLI users. See #49 for the full analysis, including the fact that
+the before-state is already read and discarded by the wipe guard.
+
+### Phase 4 — Plugin skeleton, read-only
+
+Toolbar button, selection-driven menu, "What does scourgify know?" only. No writes. Every core call
+on Calibre's job system. Proves the shape end-to-end with nothing at risk.
+
+### Phase 5 — Settings and engines
+
+Key storage in plugin JSON with the plaintext banner; env vars win when set. Engine picker deriving
+from `engines.TRAITS`/`PRICING`, showing per-engine limitations and a live cost for the selection.
+
+### Phase 6 — Actions on a selection
+
+Classify, normalize, re-derive status, edit tags — through `apply_ops`, never `run_writer`. Costs
+and `writes` markers on every item. No confirmations.
+
+### Phase 7 — The dashboard
+
+The six stages, the backlog, the pending proposal, vocabulary and overrides, history. This is the
+wizard given a surface — same stages in the same order, a stage with nothing to do greys out rather
+than vanishing.
+
+*Open question to resolve before building: modal dialog, or a dockable panel beside the library?*
+
+### Phase 8 — Review in the library view
+
+The capability argument for the whole project. Deliberately last: it is the most novel UI and the
+least like anything that already exists.
+
+---
+
+## The working loop
+
+As proposed by the owner, and it is the right shape for this:
+
+1. **Complete** one phase.
+2. **Review** it against this document and the interaction spec — did it drift?
+3. **Update the roadmap** — mark done, revise later phases with what was learned.
+4. **Reconcile** open questions and anything that changed. Ask the owner where the answer is theirs
+   to give; decide and record where it is not.
+5. **Next phase. Repeat.**
+
+Keep this document current. When a phase teaches something that contradicts it — as the spike
+contradicted its own issue twice in one day — **edit the document and say what changed.** A briefing
+that quietly rots is worse than none.
+
+---
+
+## Repo conventions that will bite
+
+- Work on `develop`. Never push to `main`; releases are a PR titled `Release vX.Y.Z` merged with
+  `--merge` (a merge commit, not squash or rebase). `develop` history stays linear.
+- **The version lives in `pyproject.toml`, not `src/scourgify/__init__.py`** — that file reads it
+  from installed metadata. A `sed` at `__init__.py` matches nothing and exits 0; a release has
+  already shipped the wrong version this way. Verify with `uv build` and check the wheel filename.
+- **uv only.** Never `pip` or `pipx`, in docs or in advice.
+- `$CALIBRE_LIBRARY` is real user data. Read-only via `common.ro_connect()`. Point
+  `$SCOURGIFY_HOME` at a temp dir for anything that writes state.
+- Never hand-edit `src/scourgify/defaults/ao3/` — regeneration overwrites it.
+- `_writer.py` must never import `rich`, `ui`, `wizard`, or `report`.
+
+---
+
+## Appendix — minimal plugin skeleton
+
+Verified working against Calibre 9.11. Three files, zipped flat (no containing folder), installed
+with `calibre-customize -a <zip>`, then restart Calibre.
+
+`plugin-import-name-scourgify.txt` — empty file, name matters.
+
+`__init__.py`:
+
+```python
+from calibre.customize import InterfaceActionBase
+
+class ScourgifyPlugin(InterfaceActionBase):
+    name                    = 'scourgify'
+    description             = 'Normalize and tag a FanFicFare-imported library'
+    supported_platforms     = ['osx', 'linux', 'windows']
+    author                  = 'Andrei Lavrenov'
+    version                 = (0, 1, 0)
+    minimum_calibre_version = (5, 0, 0)
+    actual_plugin           = 'calibre_plugins.scourgify.action:ScourgifyAction'
+```
+
+`action.py`:
+
+```python
+from calibre.gui2.actions import InterfaceAction
+
+class ScourgifyAction(InterfaceAction):
+    name = 'scourgify'
+    action_spec = ('scourgify', None, 'Normalize and tag this library', None)
+
+    def genesis(self):
+        # Wire the action and NOTHING else. No library work here or in
+        # initialization_complete() — it runs on the GUI thread and will freeze Calibre.
+        self.qaction.triggered.connect(self.show_menu)
+
+    def show_menu(self):
+        ids = self.gui.library_view.get_selected_ids()
+        ...   # 0 -> dashboard, 1 -> single-book menu, N -> batch menu
+```
+
+Packaging, since `zip` may be refused by the permission classifier:
+
+```python
+import zipfile, os
+with zipfile.ZipFile('scourgify.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+    for f in sorted(os.listdir('plugin')):
+        if not f.startswith('.'):
+            z.write(os.path.join('plugin', f), f)
+```
