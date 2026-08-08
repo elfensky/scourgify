@@ -350,6 +350,20 @@ from `engines.TRAITS`/`PRICING`, showing per-engine limitations and a live cost 
 Classify, normalize, re-derive status, edit tags — through `apply_ops`, never `run_writer`. Costs
 and `writes` markers on every item. No confirmations.
 
+Two things phase 3 fixed the shape of:
+
+- **The post-action diff comes from the edit log, not a recompute.** The interaction spec's
+  single-book card promises "the result appears as a diff in the panel — the tags it wants to add,
+  with an undo", and NLSpec B1.3 makes diff-after + undo-always the GUI's whole audit-first
+  contract. The log already holds exactly that, per book, keyed by run id: render it, don't
+  re-derive it. A second derivation could disagree with what undo would replay.
+- **The tool modules' write functions still call `run_writer` directly**
+  (`wrangle.Plan.write`, `staleness.write`, `classify.apply_proposal`, `promote.backfill`), so a
+  job calling one would spawn a second writer process against a library the GUI holds open. The
+  phase-3 `SystemExit` sweep does not touch this. Those functions need an injected writer seam —
+  same shape as `Plan.run(ask=…)` — and that is phase 6 work, named here so it isn't discovered
+  at the keyboard.
+
 ### Phase 7 — The dashboard
 
 The six stages, the backlog, the pending proposal, vocabulary and overrides, history. This is the
