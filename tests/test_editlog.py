@@ -6,7 +6,7 @@ What breaks in the real world if these fail: scourgify writes to a live library 
 of what it did to which book — and the GUI's "no confirmation dialogs" stance (B1) stops being
 honest, because undo (#51) replays exactly these lines. A shape change here silently breaks
 history and undo, which read the file and cannot ask it what version it is."""
-import os, io, sys, json, time, sqlite3, tempfile, contextlib, subprocess
+import os, io, sys, json, time, shutil, sqlite3, tempfile, contextlib, subprocess
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -179,12 +179,18 @@ def test_a_failed_apply_closes_the_run_as_failed():
 
 
 def _stub_writer(rc=0):
-    """Stub the calibre-debug subprocess. The log is captured on THIS side of it, which is the
-    whole reason the seam exists (#49's testing note) — no Calibre needed to pin the shape."""
-    saved = (subprocess.run, common.calibre_open)
+    """Stub the calibre-debug subprocess AND the lookup that finds it — CI has no Calibre, and a
+    stub that only replaces subprocess.run passes on a developer's machine and dies on the runner.
+    The log is captured on THIS side of the subprocess, which is the whole reason the seam exists
+    (#49's testing note)."""
+    saved = (subprocess.run, shutil.which, common.calibre_open)
     subprocess.run = lambda *a, **k: type("P", (), {"returncode": rc})()
+    shutil.which = lambda name, *a, **k: "/bin/true" if "calibre" in name else saved[1](name, *a, **k)
     common.calibre_open = lambda: False
-    return lambda: (setattr(subprocess, "run", saved[0]), setattr(common, "calibre_open", saved[1]))
+
+    def restore():
+        subprocess.run, shutil.which, common.calibre_open = saved
+    return restore
 
 
 def test_run_writer_logs_around_the_subprocess():
