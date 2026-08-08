@@ -89,6 +89,16 @@ def ro_connect() -> sqlite3.Connection:
     return sqlite3.connect(f"file:{db_path()}?mode=ro", uri=True)
 
 
+class GuardrailError(Exception):
+    """A safety guard refused a change-set (wipe guard, failed backup, …).
+
+    Deliberately an ordinary Exception, not a SystemExit. The same guards have to stop two very
+    different runs: a CLI run, where run_writer() converts this straight back to SystemExit so
+    exit codes and messages are unchanged; and a Calibre job, where SystemExit would escape
+    ThreadedJob's `except Exception` and kill the worker thread SILENTLY — a guard that trips
+    invisibly is worse than no guard. wizard._stage_guard catches both."""
+
+
 # ---------------- interaction policy (the ONE answer to "is a human at the terminal") ----------------
 class ScriptError(Exception):
     """A scripted run's answers don't fit the flow (queue exhausted, or an answer that isn't on
@@ -376,42 +386,114 @@ def _is_wipe(n_before, n_after):
     return n_before >= WRITE_WIPE_FLOOR and n_after < n_before * (1 - WRITE_WIPE_FRAC)
 
 def _populated_books(con, field):
-    """Set of book ids currently holding a non-empty value for `field` (builtin tags or a custom column)."""
+    """Set of book ids currently holding a non-empty value for `field` (builtin tags or a custom column).
+    The read-only-sqlite half of the guard's before-read; populated_via_api() is the in-process twin."""
     if field == "tags":
         return {b for (b,) in con.execute("SELECT DISTINCT book FROM books_tags_link")}
     return set(read_custom_column(con, field) or {})
+
+def populated_via_api(api, field) -> set:
+    """The same set, read through Calibre's live new_api instead of a second sqlite handle.
+
+    In-process the guard MUST read here: the GUI's in-memory cache is the authoritative state,
+    and a raw read-only connection can be behind it by any number of unflushed GUI edits — the
+    guard would then judge a change-set against a library that no longer exists."""
+    return {b for b, v in api.all_field_for(field, list(api.all_book_ids())).items() if v}
+
+def check_wipe(ops: list[dict], populated) -> None:
+    """Raise GuardrailError if `ops` would catastrophically empty a populated column.
+
+    `populated` (field -> set of book ids currently holding a value) is INJECTED because the two
+    callers must read the before-state from different places — the CLI from read-only sqlite
+    (_populated_books), a plugin from the live handle (populated_via_api). The verdict itself
+    stays one function, so both writers refuse exactly the same change-sets."""
+    setf = collections.defaultdict(dict)
+    for o in ops:
+        if o.get("op") == "set_field": setf[o["field"]].update(o["values"])
+    for field, values in setf.items():
+        before = populated(field)
+        after = _predict_populated(before, values)
+        if _is_wipe(len(before), len(after)):
+            raise GuardrailError(f"ABORT: writing would empty '{field}' from {len(before)} populated books "
+                                 f"down to {len(after)} — a runaway change-set? Nothing was written. "
+                                 "Re-run with --force if this is intentional.")
+
+
+def backup_db(dst: str | None = None, src: str | None = None) -> str:
+    """Snapshot metadata.db (default: a fresh backups_dir() path) and return the snapshot's path.
+
+    Uses sqlite's **Online Backup API**, not shutil.copy2. In-process a Calibre plugin shares the
+    library with a GUI that may write at any moment, and a byte copy of a database being written
+    is a torn snapshot — a rollback point that silently isn't one. The backup API takes a
+    consistent copy under sqlite's own locking, so the one code path is correct for both callers.
+
+    Verified by reading the book count back out of the copy: the old size-equality check cannot
+    survive a page-level backup, and never proved the file was readable in the first place.
+    Any failure (I/O, full disk, unreadable result) raises GuardrailError — the write must not
+    proceed without a rollback point."""
+    src = src or db_path()
+    prune = dst is None
+    dst = dst or _backup_path()
+    try:
+        s = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+        try:
+            d = sqlite3.connect(dst)
+            try: s.backup(d)
+            finally: d.close()
+        finally: s.close()
+        con = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
+        try: n = con.execute("SELECT count(*) FROM books").fetchone()[0]
+        finally: con.close()
+    except Exception as e:
+        raise GuardrailError(f"backup failed ({dst}: {e}) — aborting before any write.")
+    if not n:
+        raise GuardrailError(f"backup verify failed ({dst} holds no books) — aborting before any write.")
+    if prune: _prune_backups()
+    return dst
+
+
+def write_ops(api, ops: list[dict], force: bool = False, out=print) -> None:
+    """Apply write-ops IN-PROCESS through Calibre's live handle — the plugin's write path.
+
+    This is why a plugin never needs run_writer(), which shells out to a SECOND process writing a
+    library the GUI holds open (#53 — and the process-scan guard reads False from inside the GUI,
+    so it cannot be relied on to catch that mistake; this function removes the possibility).
+
+    Same guards as the CLI, by construction: the wipe guard (read through new_api) and a snapshot
+    before any write, both shared functions. calibre_open() is skipped BY DESIGN — in-process
+    there is no second writer to detect; we are the writer it exists to keep alone."""
+    from scourgify.ops import apply_ops
+    ops = [o for o in ops if o.get("op") != "set_field" or o.get("values")]
+    if not ops: out("  (nothing to write)"); return
+    if not force: check_wipe(ops, lambda f: populated_via_api(api, f))
+    out(f"  backup: {backup_db()}   (restore: scourgify rollback)")
+    apply_ops(api, ops, out=out)
+
 
 def run_writer(ops: list[dict], force: bool = False) -> None:
     """Apply a list of write-ops through Calibre by shelling out to `calibre-debug -e _writer.py`.
     Automatically snapshots metadata.db to data/backups/ first — every write path gets a rollback
     point for free (restore with `scourgify rollback`). Refuses (before writing) a change-set that
-    would catastrophically empty a populated column; --force overrides."""
+    would catastrophically empty a populated column; --force overrides.
+
+    The guard and the snapshot are the SHARED functions (check_wipe / backup_db) an in-process
+    plugin writer uses too — see write_ops(). Only the process model differs. GuardrailError is
+    converted back to SystemExit here so CLI exit codes and messages are unchanged."""
     import json, time, tempfile, subprocess, shutil
     ops = [o for o in ops if o.get("op") != "set_field" or o.get("values")]
     if not ops: print("  (nothing to write)"); return
     if calibre_open(): raise SystemExit("Calibre is running — close it first (it locks metadata.db), then re-run.")
-    if not force:                                   # last-line wipe guard, before any backup/write
-        setf = collections.defaultdict(dict)
-        for o in ops:
-            if o.get("op") == "set_field": setf[o["field"]].update(o["values"])
-        if setf:
+    try:
+        if not force:                               # last-line wipe guard, before any backup/write
             con = ro_connect()
-            try:
-                for field, values in setf.items():
-                    before = _populated_books(con, field)
-                    after = _predict_populated(before, values)
-                    if _is_wipe(len(before), len(after)):
-                        raise SystemExit(f"ABORT: writing would empty '{field}' from {len(before)} populated books "
-                                         f"down to {len(after)} — a runaway change-set? Nothing was written. "
-                                         "Re-run with --force if this is intentional.")
+            try: check_wipe(ops, lambda f: _populated_books(con, f))
             finally: con.close()
-    cb = shutil.which("calibre-debug") or "/Applications/calibre.app/Contents/MacOS/calibre-debug"
-    if not (shutil.which("calibre-debug") or os.path.exists(cb)): raise SystemExit("calibre-debug not found (install Calibre's CLI tools).")
-    bak = _backup_path()
-    shutil.copy2(db_path(), bak)
-    if os.path.getsize(bak) != os.path.getsize(db_path()):
-        raise SystemExit(f"backup verify failed ({bak} size mismatch) — aborting before any write.")
-    _prune_backups()
+        cb = shutil.which("calibre-debug") or "/Applications/calibre.app/Contents/MacOS/calibre-debug"
+        if not (shutil.which("calibre-debug") or os.path.exists(cb)):
+            raise SystemExit("calibre-debug not found (install Calibre's CLI tools).")
+        bak = backup_db()
+    except GuardrailError as e:
+        raise SystemExit(str(e))
     print(f"  backup: {bak}   (restore: scourgify rollback)")
     f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False); json.dump(ops, f); f.close()
     print("  → writing via calibre-debug …")

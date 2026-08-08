@@ -503,7 +503,7 @@ def _stage_guard(fn):
     """Run one stage, absorbing its guardrail SystemExit / Ctrl-C so the menu survives. -> ok?"""
     try:
         fn(); return True
-    except SystemExit as e:                    # guardrails/aborts skip the stage, not the session
+    except (SystemExit, common.GuardrailError) as e:   # guardrails/aborts skip the stage, not the session
         if str(e): ui.error(str(e))
     except (KeyboardInterrupt, EOFError):
         ui.say("\n(cancelled — nothing written beyond what was already confirmed)", "dim")

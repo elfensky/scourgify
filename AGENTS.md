@@ -11,8 +11,10 @@ wizard is rich-first; `ui.py` raises a friendly install hint if missing). The co
 (`wrangle`/`classify`/`staleness`) render through **`report.py`** — the ONE owner of the rich-or-plain
 policy (`table`/`tree`/`say` + the live classify `Dashboard`); tools describe WHAT to show, report.py
 decides HOW, so no call site ever hand-writes a second plain renderer (scripting/CI without rich must
-keep working). `_writer.py` runs under `calibre-debug` (Calibre's bundled Python has empty
-site-packages) — never import rich (or `ui`/`wizard`/`report`) there.
+keep working). `_writer.py` and `ops.py` run under `calibre-debug` (Calibre's bundled Python has empty
+site-packages) — never import rich (or `ui`/`wizard`/`report`) there. The whole core must keep importing
+clean under Calibre's bundled Python 3.14.6 with empty site-packages: that is what makes a Calibre
+plugin possible at all (roadmap #62), and it is a hard constraint on every change, not a nice-to-have.
 
 ## Running it
 
@@ -102,15 +104,33 @@ reach for `os.getcwd()`). `$SCOURGIFY_HOME` also lets tests point the whole tree
 - **Writes** — the standalone tool computes the change-set, serializes it to JSON, and shells out **once** to
   `calibre-debug -e _writer.py -- ops.json` (Calibre's API is the only fast batch-write path; `calibredb set_metadata`
   is one book per process). `run_writer()` (in **common.py**; imported by wrangle/classify/staleness) does this,
-  **automatically snapshots metadata.db to `data/backups/ff_<ts>.db` first** (pruned to the last 20; `scourgify
-  rollback [--list]` restores one, and the current db is snapshotted before a restore so rollback is reversible), and
+  **automatically snapshots metadata.db to `data/backups/ff_<ts>.db` first** (`backup_db()` — sqlite's **Online
+  Backup API**, not a byte copy: a committed transaction can still be sitting in `metadata.db-wal`, and a
+  `shutil.copy2` of the db alone silently loses it. Pruned to the last 20; `scourgify rollback [--list]` restores
+  one, and the current db is snapshotted before a restore so rollback is reversible), and
   **refuses to run while Calibre is open** (`calibre_open()` detects via pgrep→ps and fails *closed* if neither
   exists — it locks the DB). It also **refuses, before writing, a change-set that would catastrophically empty a
-  populated column** (`_is_wipe`/`_predict_populated`: >90% of a ≥100-book column) — a coarse last-line net that
-  covers *every* writer (classify/promote/staleness/setup), not just wrangle's semantic guards; `--force` overrides.
-  The user never types `calibre-debug`. Master rollback = the full "Export all Calibre data" backup.
-- **`_writer.py`** is the only file that imports Calibre — a generic ops executor (`create_column` / `set_field` /
-  `stamp_now` / `set_pref`).
+  populated column** (`check_wipe`/`_is_wipe`/`_predict_populated`: >90% of a ≥100-book column) — a coarse last-line
+  net that covers *every* writer (classify/promote/staleness/setup), not just wrangle's semantic guards; `--force`
+  overrides. The user never types `calibre-debug`. Master rollback = the full "Export all Calibre data" backup.
+- **There is ONE ops executor, in `ops.py`** — `apply_ops(api, ops, legacy=…, reopen=…, now=…, out=…)`, handling
+  `create_column` / `set_field` / `stamp_now` / `set_pref`. **`_writer.py` is glue only** (resolve the library, read
+  the ops JSON, open a `DB`, call `apply_ops`). A second executor would be a second set of coercion rules, and the
+  two would eventually disagree about what "set tags on book 6585" means — `ops.coerce` is what makes a JSON
+  change-set (book ids arrive as *strings*) and an in-process one (ints) address the same books. `ops.py` imports
+  **nothing** from scourgify and nothing from Calibre at import time (`calibre.utils.date` is lazy, inside the one
+  branch that needs it): `calibre-debug -e` puts only the *script's own directory* on `sys.path`, so under that
+  interpreter there is no importable `scourgify` package.
+- **In-process writes go through `common.write_ops(api, ops)`** — the Calibre-plugin path (roadmap: #62). It runs
+  the *same* `check_wipe` and `backup_db` as `run_writer`, then the same `apply_ops`; it skips `calibre_open()` by
+  design (in-process there is no second writer to detect) and **never calls `run_writer`**, which would shell out to
+  a second process against a library the GUI holds open (#53). `create_column` is deliberately **out** of the
+  in-process contract — the legacy-DB reopen it needs would desync a live GUI's models, so it raises there; columns
+  are created by `scourgify setup` with Calibre closed.
+- **Guards raise `common.GuardrailError`, never `SystemExit`**, anywhere a Calibre job could reach them: Calibre's
+  `ThreadedJob` catches only `Exception`, so a `SystemExit` guard would kill the worker thread *silently*.
+  `run_writer` converts it back to `SystemExit` so CLI exit codes and messages are unchanged, and
+  `wizard._stage_guard` catches both.
 - **`common.py`** is the shared core: lazy `CALIBRE_LIBRARY` resolution (importing any module never exits),
   `ro_connect()`, link-table-aware `read_custom_column()`, `norm`/`ascii_fold`, the minimal TOML `load_config()`,
   and `run_writer()`. Don't re-implement any of these in a tool script.
@@ -343,3 +363,10 @@ Git-flow-lite (mirrors the sibling `lintle` repo):
 `main` was migrated to this shape once via a `git commit-tree` snapshot (tree = the released 1.0.0; parents =
 [repo root, develop tip]); `develop` kept the full granular history. To temporarily bypass protection for an
 emergency fix, edit the rule at *Settings → Branches* (or `gh api -X DELETE …/branches/main/protection`).
+
+## Life cockpit
+
+Tracked in the life-cockpit vault under `#personal` (tracker: `elfensky/scourgify`). The cockpit is
+the control plane (what to work on); this repo is where the work happens. Report progress by
+opening/closing issues and PRs as usual — the cockpit pulls from the tracker on its next `/sync`.
+Nothing to update in the vault; don't mirror cockpit state (milestones, due dates) here.
