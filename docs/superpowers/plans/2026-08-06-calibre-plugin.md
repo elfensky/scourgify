@@ -203,7 +203,11 @@ in the real world if the assertion fails, not what the code does.
 Each phase becomes a GitHub issue, linked from a tracking issue. **Phases 1 and 2 are worth doing
 even if the plugin is never built** — start there, and the decision to continue stays cheap.
 
-### Phase 1 — Extract the write path (blocks everything)
+Filed 2026-08-08: **#62** tracks phases **#54–#61**. The NLSpec
+(`docs/superpowers/specs/2026-08-06-calibre-plugin-nlspec.md`) is the acceptance authority; where
+it and this briefing differ, **the spec wins** — it is newer and carries the adversarial review.
+
+### Phase 1 — Extract the write path (blocks everything) — **DONE** (#54)
 
 Split `apply_ops(legacy, ops)` out of `_writer.py`. Only lines 18–21 are script-shaped: read
 `CALIBRE_LIBRARY`, read `sys.argv`, open its own `DB(LIB)`. The ops loop is already generic and
@@ -215,6 +219,41 @@ change-set. Relates to #53: this is what makes the plugin safe by construction r
 
 *Acceptance:* `_writer.py` and an in-process caller share one executor; backup and wipe guard apply
 to both; existing write paths unchanged and green.
+
+**What actually landed, and where it differs from the above:**
+
+- The signature is **`apply_ops(api, ops, legacy=None, reopen=None, now=None, out=print)`**, not
+  `apply_ops(legacy, ops)`. `api` (a Cache / `new_api`) leads because it is what *both* callers
+  have; `legacy` + `reopen` are the CLI writer's extras, needed only by `create_column`.
+- It lives in a **new module, `ops.py`** — it could not live in `common.py`. `calibre-debug -e`
+  inserts only the *script's own directory* on `sys.path`, so under Calibre's interpreter there is
+  no importable `scourgify` package: the executor has to stand alone and import nothing from
+  scourgify. Verified live against Calibre 9.11 (`calibre-debug -e src/scourgify/_writer.py` on a
+  throwaway library: `created #wrangled` / `WROTE.`, and idempotent on the second run).
+- **`create_column` is out of the in-process contract** (spec B2.6) — it raises without a `legacy`
+  handle. `set_field` / `stamp_now` / `set_pref` are in.
+- **`ops.coerce`** is the piece that turned out to matter most: ops JSON stringifies book ids
+  (JSON object keys) while an in-process caller passes ints. Without one coercion function the two
+  writers would address *different books* from the same change-set.
+- **The backup is now sqlite's Online Backup API for BOTH callers** — the spec allowed the CLI to
+  keep `shutil.copy2`, but keeping two mechanisms buys nothing and the copy is wrong in a way that
+  is invisible: a committed transaction can still be in `metadata.db-wal`, and copying the db alone
+  silently drops it. The old size-equality verify went with it (it cannot survive a page-level
+  backup and never proved the file was readable); the snapshot is now verified by reading its book
+  count back out. Any failure raises `GuardrailError` — no rollback point, no write.
+- **`GuardrailError`** landed here rather than in phase 2, because the lifted guard needed
+  something to raise. `run_writer` converts it straight back to `SystemExit`, so CLI exit codes and
+  messages are unchanged; `wizard._stage_guard` catches both. The broader
+  audit of `SystemExit` reachable from a job is still phase 2's job.
+- **Parity, honestly scoped.** The shadow replay that runs in CI (`tests/test_write_path.py`) drives
+  one ops list through the CLI shape (JSON round-trip + legacy handle) and the in-process shape
+  (live dicts) against a fake `api`, and diffs the resulting state whole — stamps pinned via `now=`.
+  That pins the half that can silently rot. A full-fidelity replay against a real cloned Calibre
+  library needs Calibre's own Cache and belongs to the `calibre-debug` smoke script in phase 2.
+- **The restore drill is a CI test** (`tests/test_restore_drill.py`), not a manual pre-release
+  ritual: snapshot → corrupt the library → `rollback --yes` → assert the restored db matches the
+  snapshot byte for byte *and* that the pre-restore state was itself snapshotted. It prints
+  wall-clock (200 books / 32 KiB: backup ~1 ms, restore ~6 ms).
 
 ### Phase 2 — Make the core plugin-safe
 
