@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from scourgify import booktext, engines as engines_mod, report, select
 from scourgify.booktext import strip_html                               # text extraction lives in booktext.py
 from scourgify.common import (HERE, data_dir, user_dir, ro_connect, custom_column_id, run_writer, library,
+                              GuardrailError,
                               current_tags, titles as book_titles, op_create_column, op_set_field, op_stamp_now,
                               interactive as _interactive, confirm as _confirm)
 from scourgify.overrides import ov_path, merge_vocab, read_aliases      # overrides/ paths + format readers live there
@@ -175,7 +176,7 @@ def apply_proposal(rows: list | None = None) -> None:
     from_file = rows is None
     if from_file:
         if not os.path.exists(prop()):
-            raise SystemExit(f"no proposal to apply ({os.path.basename(prop())} not found — run a classify pass first).")
+            raise GuardrailError(f"no proposal to apply ({os.path.basename(prop())} not found — run a classify pass first).")
         rows = read_proposal()
     con = ro_connect()
     cur = current_tags(con)
@@ -197,7 +198,10 @@ def apply_proposal(rows: list | None = None) -> None:
     ops.append(op_set_field("tags", chg))
     # stamp EVERY processed book, tagged or not — an unstamped no-tag book would be re-sent to the LLM forever
     ops.append(op_stamp_now("#wrangled", processed))
-    run_writer(ops)
+    # engine/model stay unset here: --apply is its own invocation and the proposal CSV does not
+    # carry the engine that produced it. The plugin's classify verb runs the pass and the write in
+    # one job and passes both (write_ops(engine=…, model=…)).
+    run_writer(ops, tool="classify", scope=f"{len(processed)} books")
     tail = ""
     if from_file:
         # archive so a later --apply can't re-add tags you've since hand-removed (stale rows never re-apply)
@@ -210,10 +214,10 @@ def apply_proposal_step() -> None:
     applied + the book stamped; rejected tags are dropped and logged (class=ai, a hallucination filter,
     NOT a rule bug). Skip/quit leave a book's row pending in the proposal for a later run."""
     if not os.path.exists(prop()):
-        raise SystemExit(f"no proposal to apply ({os.path.basename(prop())} not found — run a classify pass first).")
+        raise GuardrailError(f"no proposal to apply ({os.path.basename(prop())} not found — run a classify pass first).")
     from scourgify import ui
     if not ui.interactive():
-        raise SystemExit("--step needs an interactive terminal (omit it to apply the whole proposal).")
+        raise GuardrailError("--step needs an interactive terminal (omit it to apply the whole proposal).")
     from scourgify.common import log_rejects
     con = ro_connect()
     desc = {b: strip_html(t) for b, t in con.execute("SELECT book, text FROM comments")}
@@ -419,9 +423,9 @@ def spend_gate(n_books: int, engine: str, yes: bool) -> None:
     if is_free(engine) or n_books <= SPEND_GATE or yes: return
     msg = f"about to send {n_books} books to the {engine} API (costs money; --incremental/--batch shrink it)."
     if not _interactive():
-        raise SystemExit(f"  {msg}\n  non-interactive: re-run with --yes to confirm.")
+        raise GuardrailError(f"  {msg}\n  non-interactive: re-run with --yes to confirm.")
     if not _confirm(f"  {msg} proceed?"):
-        raise SystemExit("aborted (nothing sent).")
+        raise GuardrailError("aborted (nothing sent).")
 
 
 def classify_run(run) -> None:
@@ -513,7 +517,7 @@ def bakeoff_cli(a: argparse.Namespace) -> None:
 def main() -> None:
     a = normalize(build_parser().parse_args())
     if a.books is not None and a.apply:
-        raise SystemExit("--books scopes which books are CLASSIFIED, not which proposal rows are applied. "
+        raise GuardrailError("--books scopes which books are CLASSIFIED, not which proposal rows are applied. "
                          "Run `classify --books ...` first, then `classify --apply` to write the reviewed proposal.")
     if a.bakeoff: bakeoff_cli(a)
     elif a.apply: apply_proposal_step() if a.step else apply_proposal()

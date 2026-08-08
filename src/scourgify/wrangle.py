@@ -10,7 +10,7 @@ writes shell out to calibre-debug automatically):
 import os, sys, re, csv, collections
 from scourgify import report
 from scourgify.artifacts import read_rows as read_csv     # the ONE "DictReader or []" reader
-from scourgify.common import (DEFAULTS as DEFAULTS_DIR, norm, ascii_fold, load_config, library,
+from scourgify.common import (DEFAULTS as DEFAULTS_DIR, GuardrailError, norm, ascii_fold, load_config, library,
                               read_lines, ro_connect, read_custom_column, run_writer,
                               titles as book_titles, op_set_field)
 from scourgify.overrides import overrides_dir as _overrides_dir, _delim_of   # overrides.py owns dir + formats
@@ -290,7 +290,7 @@ def tag_loss_guard(tags_before: int, tags_after: int, force: bool) -> None:
     ponytail: heuristic ceiling — >25% shrink AND more than the scaled floor lost; --force overrides."""
     lost = tags_before - tags_after
     if tags_before and lost > max(_shrink_floor(tags_before), int(tags_before * TAG_SHRINK_FRACTION)) and not force:
-        raise SystemExit(f"ABORT: tags would shrink {tags_before} -> {tags_after} assignments (-{lost}). "
+        raise GuardrailError(f"ABORT: tags would shrink {tags_before} -> {tags_after} assignments (-{lost}). "
                          "Check junk.txt / overrides for an over-broad rule, or re-run with --force.")
 
 def data_loss_guard(lost_fandom: int, lost_char: int, force: bool) -> None:
@@ -298,7 +298,7 @@ def data_loss_guard(lost_fandom: int, lost_char: int, force: bool) -> None:
     transform() reports these only for a real value dropping to zero — a blocklist-route to tags
     is preserved and not counted. --force overrides (for a deliberate bulk deletion), like tag_loss_guard."""
     if (lost_fandom or lost_char) and not force:
-        raise SystemExit(f"ABORT: {lost_fandom} book(s) would lose their last fandom, {lost_char} their last "
+        raise GuardrailError(f"ABORT: {lost_fandom} book(s) would lose their last fandom, {lost_char} their last "
                          "character. Check your fandoms.csv aliases / decompose overrides for a rule that "
                          "empties a book, or re-run with --force if the deletion is intentional.")
 
@@ -318,6 +318,7 @@ class Plan:
         self.diffs = collections.defaultdict(dict)     # {book: {label: (gone, added)}} — what previews show
         self.before = {k: set() for k in self.cols}; self.after = {k: set() for k in self.cols}
         self.decisions = []                            # transform's own (kind, where, before, after) log
+        self.scope = "library"                         # narrowed by restrict(); named in the edit log
         self.lost = {}       # book -> (lost_fandom, lost_char), only for books with a loss
         self.tagn = {}       # book -> (tags_before, tags_after) — per-book so restrict() can re-derive
         for b in allb:
@@ -365,6 +366,7 @@ class Plan:
         the guards judge these books rather than the library. before/after/decisions are left whole
         — they feed the library-wide audit report, which is not scopeable (see main())."""
         keep = set(ids)
+        self.scope = f"{len(keep)} books"
         for lab in list(self.changes):
             kept = {b: v for b, v in self.changes[lab].items() if b in keep}
             if kept: self.changes[lab] = kept
@@ -393,7 +395,7 @@ class Plan:
         from this plan's changes and logged for `scourgify overrides`."""
         from scourgify import ui
         if not ui.interactive():
-            raise SystemExit("--step needs an interactive terminal (omit it for a bulk apply).")
+            raise GuardrailError("--step needs an interactive terminal (omit it for a bulk apply).")
         _, unique = _classify_edits(self.m, self.diffs)
         if not unique: return
         from scourgify.overrides import _step_walk   # lazy: breaks the wrangle<->overrides import cycle
@@ -409,7 +411,8 @@ class Plan:
     def write(self, force: bool = False) -> None:
         # pass force through: the plan's own data_loss/tag_loss guards already ran, so a deliberately
         # --forced deletion here must not be second-guessed by run_writer's coarse last-line wipe guard.
-        run_writer([op_set_field(lab, ch) for lab, ch in self.changes.items()], force=force)
+        run_writer([op_set_field(lab, ch) for lab, ch in self.changes.items()], force=force,
+                   tool="wrangle", scope=self.scope)
 
     def audit_report(self) -> None:
         """The full `scourgify audit` output: distinct-value deltas, SAFETY, and per-rule examples
@@ -563,10 +566,10 @@ def main() -> None:
     p.add_argument("--yes", "-y", action="store_true", help="non-interactive: take the recommended default for every prompt")
     a = p.parse_args()
     if (a.books is not None or a.last) and a.command != "apply":
-        raise SystemExit("--books/--last apply to `apply` only (audit is always library-wide: its report "
+        raise GuardrailError("--books/--last apply to `apply` only (audit is always library-wide: its report "
                          "reads the transform's decision log, which carries no book ids).")
     if a.books is not None and a.last:
-        raise SystemExit("--books and --last are two ways to name the same thing — pick one.")
+        raise GuardrailError("--books and --last are two ways to name the same thing — pick one.")
     if a.command is None:
         from scourgify.common import interactive
         if interactive():

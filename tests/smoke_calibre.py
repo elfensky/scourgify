@@ -45,7 +45,7 @@ def main():
         print("rich        ABSENT  (as inside Calibre)")
 
     print("\nimports")
-    for m in ("common", "ops", "select", "artifacts", "overrides", "engines", "booktext",
+    for m in ("common", "ops", "editlog", "select", "artifacts", "overrides", "engines", "booktext",
               "wrangle", "classify", "promote", "staleness", "setup", "report", "cli"):
         check(f"core  {m}", lambda m=m: __import__(f"scourgify.{m}", fromlist=[m]) and None)
 
@@ -78,6 +78,12 @@ def main():
             check("artifacts.classified_ids", lambda: len(artifacts.classified_ids()))
             check("wrangle.load_maps", lambda: sorted(wrangle.load_maps(common.load_config())))
             check("common.norm", lambda: common.norm("Fate/stay night"))
+            # the edit log's before-read, on the real library: the guard already reads these
+            # columns and discards the values, so this is the extra join undo depends on
+            check("common.library_uuid", lambda: common.library_uuid(con))
+            ids = select.pick(con, "last", 5)
+            check("common.column_values(tags)", lambda: len(common.column_values(con, "tags", ids)))
+            check("common.column_values(#status)", lambda: len(common.column_values(con, "#status", ids)))
         finally:
             con.close()
 

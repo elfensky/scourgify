@@ -6,7 +6,7 @@ No Calibre, no library, no network."""
 import os, sys, tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
-from scourgify import select
+from scourgify import common, select
 from fixture_db import build
 
 STAMP = "2026-06-26 20:43:39+00:00"           # the one classify-apply so far
@@ -107,8 +107,8 @@ def test_parse_books_rejects_garbage():
     for bad in ("x", "1,2x", "9-3", "1-", "@/nonexistent/ids.txt", f"@{nested}", f"@{binary}"):
         try:
             select.parse_books(bad)
-            assert False, f"expected SystemExit for {bad!r}"
-        except SystemExit:
+            assert False, f"expected a refusal for {bad!r}"
+        except common.GuardrailError:
             pass
 
 

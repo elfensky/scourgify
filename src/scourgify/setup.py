@@ -118,7 +118,7 @@ def setup(cfg: dict, yes: bool = False) -> None:
 
     if ops:
         print(f"\n[6] Applying {len(ops)} change(s) to Calibre (via calibre-debug)")
-        run_writer(ops)
+        run_writer(ops, tool="setup", scope="columns + prefs")
     print("\n" + "-" * 64)
     print("Setup complete. Next:")
     print("  scourgify audit          # read-only dry-run of all passes")

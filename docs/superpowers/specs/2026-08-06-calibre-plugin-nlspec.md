@@ -196,6 +196,24 @@ references them rather than redefining its own:
   > phase that makes each job-reachable — phase 4 for read paths, phase 6 for write verbs.
   > No job functions exist before phase 4, so a blanket sweep now would churn every tool
   > module and eight tests ahead of the need.
+  >
+  > **Phase-3 amendment (2026-08-09, #56) — the deferral above is CLOSED.** The owner
+  > overruled it: the sweep landed in phase 3 rather than per phase. All 29 sites in
+  > `classify`/`promote`/`staleness`/`wrangle`/`engines`/`select`/`overrides` now raise
+  > `common.GuardrailError`, as does `common.library()` — which every read path in the repo
+  > reaches, and which the deferral had missed entirely. **Two deliberate exemptions remain,
+  > and they are the contract, not leftovers**: `run_writer` and `rollback_cmd`, both CLI-only
+  > funnels a plugin can never enter (B2.1 forbids the first; B6.6 routes the second through
+  > close/restore/reopen). Enforced, not intended: `tests/test_plugin_safety.py` AST-walks
+  > every job-reachable module for `raise SystemExit` and fails on any site outside that
+  > exemption list — so a new one cannot be added silently.
+  >
+  > **Consequence for phase 6, recorded now:** the tool modules' write functions
+  > (`wrangle.Plan.write`, `staleness.write`, `classify.apply_proposal`,
+  > `promote.backfill`) still call `run_writer` directly, so a job calling one of them would
+  > reach the exempted funnel *transitively* and spawn a second writer process. The sweep does
+  > not fix that and was never going to — phase 6 needs a writer seam on those functions
+  > (injected `write=` / `write_ops`), the same shape as `Plan.run(ask=…)`.
 - **Edge cases**:
   - Worker exception → `job.failed` path shows the error dialog; `SystemExit` cannot occur
     (B2.4) — `ThreadedJob` only catches `Exception`, so any surviving `SystemExit` would be
@@ -323,6 +341,38 @@ references them rather than redefining its own:
      Records referencing books no longer in the library render as historical fact, flagged
      "book no longer present", and are excluded from undo. Records from a different
      library uuid never mix in.
+  > **Phase-3 amendment (2026-08-09, #56) — the log half is built** (`src/scourgify/editlog.py`,
+  > `data/edits.jsonl`, appended by `run_writer` and `write_ops` and by nothing else). Four
+  > things the contract above did not settle, decided and recorded rather than quietly
+  > satisfied:
+  >
+  > 1. **Op lines are written BEFORE the ops apply.** The contract implies capture *of* an
+  >    applied op; capturing it *after* means a run killed mid-write logs nothing at all —
+  >    exactly the case the missing-footer rule exists for. Logging first costs nothing,
+  >    because undo is conflict-aware by step 3: an op that never landed leaves the book
+  >    holding `before`, undo expects `after`, the predicate calls it a conflict, and the book
+  >    is skipped and reported. Pinned by a test.
+  > 2. **`stamp_now` is ONE line with a book count, not one line per book.** A strict reading
+  >    of "one line per applied `(book, field)` op" makes a full-library stamp 7,949 lines on
+  >    every wrangle run — multiplying the log by the library size to record something step 2
+  >    already excludes from replay. `set_pref`/`create_column` likewise get one line.
+  >    All carry `"undo": false` explicitly, so the history view states it rather than
+  >    inferring it.
+  > 3. **`--force` skips the wipe guard, not the log.** #49 left this open ("force the read
+  >    anyway, or log after-only?"). Forced runs are the most dangerous and the most likely to
+  >    need undo, so the before-read is unconditional — one column read, the same one the
+  >    guard was making.
+  > 4. **`engine`/`model` are header fields the caller supplies, and the CLI's
+  >    `classify --apply` cannot.** It is its own invocation and the proposal CSV does not
+  >    carry the engine that produced it. The seam exists (`write_ops(engine=…, model=…)`) and
+  >    the plugin's classify verb fills it in phase 6, because there the pass and the write are
+  >    one job. Adding an engine column to the shared proposal artifact was rejected as
+  >    out-of-phase churn to a CLI-shared format.
+  >
+  > Also: the log is **fail-closed like the backup** — header and op lines go down before any
+  > op applies, so a log that cannot be written means the library is untouched. And the
+  > before-read of `tags` costs 32 ms on the real 7,949-book library (measured under Calibre
+  > 9.11), i.e. it is a job-side read like every other (B3).
 - **Postconditions**: every GUI write is recoverable at run granularity without discarding
   later work; "no confirmations" (B1) is honest because this net exists.
 - **Edge cases**:

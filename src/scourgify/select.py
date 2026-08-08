@@ -18,7 +18,7 @@ books first instead of decade-old sparse ones.
 """
 import collections, os, sqlite3
 
-from scourgify.common import read_custom_column
+from scourgify.common import GuardrailError, read_custom_column
 
 STAMP = "#wrangled"        # per-book datetime: when classify last processed it (stamped on apply)
 
@@ -40,11 +40,11 @@ def _tokens(spec: str, depth: int = 0):
         if not t.startswith("@"):
             yield t; continue
         if depth:
-            raise SystemExit(f"--books: '@file' inside a file is not supported ({t})")
+            raise GuardrailError(f"--books: '@file' inside a file is not supported ({t})")
         path = os.path.expanduser(t[1:])
         try: text = open(path).read()
         except (OSError, UnicodeDecodeError) as e:
-            raise SystemExit(f"--books: cannot read {path}: {e}")
+            raise GuardrailError(f"--books: cannot read {path}: {e}")
         yield from _tokens(",".join(ln.split("#")[0] for ln in text.splitlines()), depth + 1)
 
 
@@ -57,15 +57,15 @@ def parse_books(spec: str) -> list[int]:
         if "-" in t:
             lo, _, hi = t.partition("-")
             try: lo, hi = int(lo), int(hi)
-            except ValueError: raise SystemExit(f"--books: bad range {t!r} (expected 'LOW-HIGH')")
-            if hi < lo: raise SystemExit(f"--books: empty range {t!r} (high is below low)")
+            except ValueError: raise GuardrailError(f"--books: bad range {t!r} (expected 'LOW-HIGH')")
+            if hi < lo: raise GuardrailError(f"--books: empty range {t!r} (high is below low)")
             out.extend(range(lo, hi + 1))
         else:
             try: out.append(int(t))
-            except ValueError: raise SystemExit(f"--books: {t!r} is not a book id")
+            except ValueError: raise GuardrailError(f"--books: {t!r} is not a book id")
     out = list(dict.fromkeys(out))          # de-dup, first-seen order
     if not out:
-        raise SystemExit(f"--books: {spec!r} names no book ids")
+        raise GuardrailError(f"--books: {spec!r} names no book ids")
     return out
 
 
