@@ -14,10 +14,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "src")
 sys.path.insert(0, SRC)
 
-# The eleven core modules the spike proved run under Calibre's interpreter, plus the two that
-# joined them since (ops, cli). report is here on purpose: it is the rich-or-plain OWNER, so it
+# The eleven core modules the spike proved run under Calibre's interpreter, plus the three that
+# joined them since (ops, editlog, cli). report is here on purpose: it is the rich-or-plain OWNER, so it
 # is the module most likely to acquire a hard rich import by accident.
-CORE = ["common", "ops", "select", "artifacts", "overrides", "engines", "booktext",
+CORE = ["common", "ops", "editlog", "select", "artifacts", "overrides", "engines", "booktext",
         "wrangle", "classify", "promote", "staleness", "setup", "report", "cli"]
 
 _BLOCK_RICH = """
@@ -106,6 +106,47 @@ def test_the_writer_never_imports_a_presentation_module():
         assert not mod.startswith("scourgify"), \
             f"ops.py imports {mod} — calibre-debug -e cannot resolve the scourgify package"
 
+
+# The modules a Calibre job function calls. Their refusals must be catchable: ThreadedJob catches
+# only `Exception`, so a SystemExit raised down here kills the worker thread SILENTLY — the job
+# never fails, never completes, and the user is told nothing.
+JOB_REACHABLE = ["common", "editlog", "select", "artifacts", "overrides", "engines", "booktext",
+                 "wrangle", "classify", "promote", "staleness", "setup", "ops"]
+
+# ...with two deliberate exceptions, both CLI-only funnels a plugin can never enter:
+#   run_writer  — shells out to calibre-debug; the plugin uses common.write_ops and a source-grep
+#                 test forbids run_writer in the plugin module (NLSpec B2.1).
+#   rollback_cmd — the GUI's restore flow closes the library first (NLSpec B6.6); a live restore
+#                 is the two-writers hazard by another name.
+SYSTEM_EXIT_OK = {"run_writer", "rollback_cmd"}
+
+
+def _system_exit_sites(path):
+    """-> [(function name, line)] for every `raise SystemExit(...)`. Parsed, not grepped: the
+    docstrings in these modules discuss SystemExit at length."""
+    import ast
+    tree = ast.parse(open(path).read())
+    owner = {}
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for c in ast.walk(n): owner[c] = n.name
+    return [(owner.get(n, "<module>"), n.lineno) for n in ast.walk(tree)
+            if isinstance(n, ast.Raise) and isinstance(n.exc, ast.Call)
+            and getattr(n.exc.func, "id", None) == "SystemExit"]
+
+
+def test_no_job_reachable_code_raises_systemexit():
+    """NLSpec B3: no SystemExit reachable from anything a job function calls. Enforced here rather
+    than left to discipline — the failure mode is invisible (a dead worker thread, no error
+    dialog, a progress bar that never finishes), so it would be found by a user, not by us.
+    Guards raise common.GuardrailError; cli.main converts it back at the ONE CLI boundary, so
+    exit codes and messages are unchanged."""
+    bad = []
+    for m in JOB_REACHABLE:
+        for fn, line in _system_exit_sites(os.path.join(SRC, "scourgify", f"{m}.py")):
+            if fn not in SYSTEM_EXIT_OK: bad.append(f"{m}.py:{line} in {fn}()")
+    assert not bad, ("raise SystemExit in job-reachable code (use common.GuardrailError):\n  "
+                     + "\n  ".join(bad))
 
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]

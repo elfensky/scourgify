@@ -77,9 +77,13 @@ def log_rejects(rows: list[dict]) -> int:
 
 # ---------------- library resolution (lazy — importing this module never exits) ----------------
 def library() -> str:
+    """The library folder. Raises GuardrailError (not SystemExit) when unset: every read path in
+    the repo reaches this function, so inside a Calibre job a SystemExit here would escape
+    ThreadedJob's `except Exception` and kill the worker thread silently. cli.main converts it
+    back, so the CLI message and exit code are unchanged."""
     lib = os.path.expanduser(os.environ.get("CALIBRE_LIBRARY", ""))
     if not lib:
-        raise SystemExit("Set CALIBRE_LIBRARY to your Calibre library folder (the one containing metadata.db).")
+        raise GuardrailError("Set CALIBRE_LIBRARY to your Calibre library folder (the one containing metadata.db).")
     return lib
 
 def db_path() -> str:
@@ -392,6 +396,47 @@ def _populated_books(con, field):
         return {b for (b,) in con.execute("SELECT DISTINCT book FROM books_tags_link")}
     return set(read_custom_column(con, field) or {})
 
+def column_is_multiple(con: sqlite3.Connection, field: str) -> bool:
+    """Is `field` multi-valued? From `custom_columns.is_multiple` — the schema's own answer, not a
+    guess from the storage shape (a SINGLE-value column may use a link table too, so the shape
+    proves nothing). `tags` is multi by definition."""
+    if field == "tags": return True
+    r = con.execute("SELECT is_multiple FROM custom_columns WHERE label=?", (field.lstrip("#"),)).fetchone()
+    return bool(r and r[0])
+
+
+def column_values(con: sqlite3.Connection, field: str, books=None) -> dict:
+    """{book_id: current value} — the edit log's before-read, off read-only sqlite.
+
+    The wipe guard reads the same column and throws the values away (`_populated_books` keeps
+    only the keys, and short-circuits `tags` to DISTINCT book); capturing them is the extra join.
+    `books=None` returns the whole column; a book with no value maps to None — a real
+    before-state ("nothing"), not a missing row."""
+    if field == "tags":
+        vals = {b: sorted(t) for b, t in current_tags(con).items()}
+    else:
+        vals = read_custom_column(con, field, multi=column_is_multiple(con, field)) or {}
+    return vals if books is None else {int(b): vals.get(int(b)) for b in books}
+
+
+def values_via_api(api, field, books) -> dict:
+    """The same read through Calibre's live new_api — the in-process twin of column_values().
+    In-process the GUI's in-memory cache is the authoritative state; a second sqlite handle can
+    be behind it by any number of unflushed edits."""
+    return {int(b): v for b, v in api.all_field_for(field, [int(b) for b in books]).items()}
+
+
+def library_uuid(con: sqlite3.Connection) -> str | None:
+    """Calibre's own library id, the edit log's per-library key (records from one library must
+    never mix into another's history). None if the table is absent — a hand-built fixture db is
+    not a reason to refuse a write."""
+    try:
+        r = con.execute("SELECT uuid FROM library_id").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return r[0] if r else None
+
+
 def populated_via_api(api, field) -> set:
     """The same set, read through Calibre's live new_api instead of a second sqlite handle.
 
@@ -452,42 +497,66 @@ def backup_db(dst: str | None = None, src: str | None = None) -> str:
     return dst
 
 
-def write_ops(api, ops: list[dict], force: bool = False, out=print) -> None:
+def write_ops(api, ops: list[dict], force: bool = False, out=print,
+              tool: str = "plugin", scope=None, engine=None, model=None) -> None:
     """Apply write-ops IN-PROCESS through Calibre's live handle — the plugin's write path.
 
     This is why a plugin never needs run_writer(), which shells out to a SECOND process writing a
     library the GUI holds open (#53 — and the process-scan guard reads False from inside the GUI,
     so it cannot be relied on to catch that mistake; this function removes the possibility).
 
-    Same guards as the CLI, by construction: the wipe guard (read through new_api) and a snapshot
-    before any write, both shared functions. calibre_open() is skipped BY DESIGN — in-process
-    there is no second writer to detect; we are the writer it exists to keep alone."""
+    Same guards as the CLI, by construction: the wipe guard (read through new_api), a snapshot
+    before any write, and the edit log — all shared functions. calibre_open() is skipped BY
+    DESIGN — in-process there is no second writer to detect; we are the writer it exists to keep
+    alone."""
+    from scourgify import editlog
     from scourgify.ops import apply_ops
     ops = [o for o in ops if o.get("op") != "set_field" or o.get("values")]
     if not ops: out("  (nothing to write)"); return
     if not force: check_wipe(ops, lambda f: populated_via_api(api, f))
+    before = editlog.before_values(lambda f, bs: values_via_api(api, f, bs), ops)
     out(f"  backup: {backup_db()}   (restore: scourgify rollback)")
-    apply_ops(api, ops, out=out)
+    rec = editlog.start(tool, ops, before, scope=scope, library=getattr(api, "library_id", None),
+                        engine=engine, model=model)
+    try:
+        apply_ops(api, ops, out=out)
+    except BaseException:
+        editlog.finish(rec, "failed"); raise
+    editlog.finish(rec, "ok")
 
 
-def run_writer(ops: list[dict], force: bool = False) -> None:
+def run_writer(ops: list[dict], force: bool = False, tool: str = "scourgify", scope=None) -> None:
     """Apply a list of write-ops through Calibre by shelling out to `calibre-debug -e _writer.py`.
     Automatically snapshots metadata.db to data/backups/ first — every write path gets a rollback
     point for free (restore with `scourgify rollback`). Refuses (before writing) a change-set that
-    would catastrophically empty a populated column; --force overrides.
+    would catastrophically empty a populated column; --force overrides. Appends the edit log.
 
-    The guard and the snapshot are the SHARED functions (check_wipe / backup_db) an in-process
-    plugin writer uses too — see write_ops(). Only the process model differs. GuardrailError is
-    converted back to SystemExit here so CLI exit codes and messages are unchanged."""
+    The guard, the snapshot and the log are the SHARED functions (check_wipe / backup_db /
+    editlog) an in-process plugin writer uses too — see write_ops(). Only the process model
+    differs. GuardrailError is converted back to SystemExit here so CLI exit codes and messages
+    are unchanged.
+
+    The log is captured on THIS side of the subprocess (before-values read from read-only sqlite,
+    lines written before `calibre-debug` is spawned), so a test can pin the record shape with the
+    subprocess stubbed and no Calibre installed. `tool` names the caller — run_writer cannot know
+    it, and a log that cannot say which pass made a change answers none of the questions it
+    exists for."""
     import json, time, tempfile, subprocess, shutil
+    from scourgify import editlog
     ops = [o for o in ops if o.get("op") != "set_field" or o.get("values")]
     if not ops: print("  (nothing to write)"); return
     if calibre_open(): raise SystemExit("Calibre is running — close it first (it locks metadata.db), then re-run.")
     try:
-        if not force:                               # last-line wipe guard, before any backup/write
-            con = ro_connect()
-            try: check_wipe(ops, lambda f: _populated_books(con, f))
-            finally: con.close()
+        con = ro_connect()
+        try:
+            if not force:                           # last-line wipe guard, before any backup/write
+                check_wipe(ops, lambda f: _populated_books(con, f))
+            # ...but the log's before-read is NOT conditional on the guard: --force means "skip
+            # the guard", not "write blind", and a forced run is the one most likely to need undo.
+            before = editlog.before_values(lambda f, bs: column_values(con, f, bs), ops)
+            lib_uuid = library_uuid(con)
+        finally:
+            con.close()
         cb = shutil.which("calibre-debug") or "/Applications/calibre.app/Contents/MacOS/calibre-debug"
         if not (shutil.which("calibre-debug") or os.path.exists(cb)):
             raise SystemExit("calibre-debug not found (install Calibre's CLI tools).")
@@ -495,6 +564,7 @@ def run_writer(ops: list[dict], force: bool = False) -> None:
     except GuardrailError as e:
         raise SystemExit(str(e))
     print(f"  backup: {bak}   (restore: scourgify rollback)")
+    rec = editlog.start(tool, ops, before, scope=scope, library=lib_uuid)
     f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False); json.dump(ops, f); f.close()
     print("  → writing via calibre-debug …")
     try:
@@ -503,9 +573,11 @@ def run_writer(ops: list[dict], force: bool = False) -> None:
         rc = subprocess.run([cb, "-e", os.path.join(HERE, "_writer.py"), "--", f.name],
                             env={**os.environ, "CALIBRE_LIBRARY": library()}, timeout=3600).returncode
     except subprocess.TimeoutExpired:
+        editlog.finish(rec, "timeout")
         raise SystemExit(f"writer timed out after 1h (calibre-debug wedged?) — library backup at {bak}")
     finally:
         os.unlink(f.name)
+    editlog.finish(rec, "ok" if rc == 0 else "failed")
     if rc != 0: raise SystemExit(f"writer failed (exit {rc}) — library backup at {bak}")
 
 

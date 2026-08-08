@@ -116,7 +116,7 @@ def test_apply_proposal_ops_union_stamp_archive():
                                   {"book_id": 2, "title": "b2", "added_tags": [], "proposed_new": []}])
         recorded = []
         saved = classify.run_writer
-        classify.run_writer = lambda ops, force=False: recorded.append(ops)
+        classify.run_writer = lambda ops, force=False, **kw: recorded.append(ops)
         try:
             classify.apply_proposal()
         finally:
@@ -142,7 +142,7 @@ def test_step_review_archives_only_the_books_it_applied():
         saved_w, saved_c, saved_i = classify.run_writer, ui.checklist, ui.interactive
         # book 1 accepted, book 2 skipped, book 3 never reached (quit)
         answers = iter([([0], [], "apply"), ([], [], "skip"), ([], [], "quit")])
-        classify.run_writer = lambda ops, force=False: None
+        classify.run_writer = lambda ops, force=False, **kw: None
         ui.checklist = lambda *a, **k: next(answers)
         ui.interactive = lambda: True
         try:
@@ -199,7 +199,7 @@ def test_apply_proposal_skips_rows_for_deleted_books():
                                   {"book_id": 99, "title": "gone", "added_tags": ["X"], "proposed_new": []}])
         recorded = []
         saved = classify.run_writer
-        classify.run_writer = lambda ops, force=False: recorded.append(ops)
+        classify.run_writer = lambda ops, force=False, **kw: recorded.append(ops)
         try:
             classify.apply_proposal()
         finally:

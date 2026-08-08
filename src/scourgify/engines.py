@@ -9,7 +9,7 @@ import os
 import subprocess
 import time
 
-from scourgify.common import HERE
+from scourgify.common import HERE, GuardrailError
 
 ERR_TRUNC = 140   # chars kept when recording an engine error (same width in bakeoff table and failures CSV)
 
@@ -73,7 +73,7 @@ class _Chat:
 
     def __init__(self, model, timeout):
         self.key = os.environ.get(self.ENV)
-        if not self.key: raise SystemExit(f"{self.NAME} engine needs {self.ENV}{self.KEY_HINT}.")
+        if not self.key: raise GuardrailError(f"{self.NAME} engine needs {self.ENV}{self.KEY_HINT}.")
         self.model = model or self.DEFAULT; self.timeout = timeout
 
     def _headers(self) -> dict:
@@ -117,7 +117,7 @@ class Gemini:
 
     def __init__(self, model, timeout):
         self.key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-        if not self.key: raise SystemExit("gemini engine needs GEMINI_API_KEY (or GOOGLE_API_KEY).")
+        if not self.key: raise GuardrailError("gemini engine needs GEMINI_API_KEY (or GOOGLE_API_KEY).")
         self.model = model or "gemini-2.5-flash"; self.timeout = timeout
 
     def ask(self, prompt):

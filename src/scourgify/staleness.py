@@ -8,7 +8,7 @@ Idempotent & self-correcting — re-run after an #updated refresh and the status
 Rule: <STALE yrs -> In-Progress | STALE..DEAD -> Hiatus | >=DEAD -> Abandoned. Tunable: --stale-years 2 --dead-years 5.
 Completed/Dropped/Rewritten and books without an #updated date are NEVER changed."""
 import argparse, datetime, collections
-from scourgify.common import (load_config, ro_connect, read_custom_column, run_writer,
+from scourgify.common import (GuardrailError, load_config, ro_connect, read_custom_column, run_writer,
                               op_set_field, titles as book_titles)
 from scourgify import select
 
@@ -34,7 +34,7 @@ def compute(stale_years: float = 2.0, dead_years: float = 5.0,
     updated = read_custom_column(con, "#updated")
     if status is None or updated is None:
         missing = [l for l, v in ((status_label, status), ("#updated", updated)) if v is None]
-        raise SystemExit(f"missing column(s): {', '.join(missing)} — run `scourgify setup` first.")
+        raise GuardrailError(f"missing column(s): {', '.join(missing)} — run `scourgify setup` first.")
     today = datetime.date.today()
     def age(b):
         try: return (today - datetime.date.fromisoformat(str(updated.get(b))[:10])).days / 365.25
@@ -67,7 +67,7 @@ def step(status_label: str, rows: list) -> list:
     function the subcommand does, so `staleness --apply --step` and the wizard share one path."""
     from scourgify import ui
     if not ui.interactive():
-        raise SystemExit("--step needs an interactive terminal (omit it to apply every change).")
+        raise GuardrailError("--step needs an interactive terminal (omit it to apply every change).")
     con = ro_connect(); titles = book_titles(con); con.close()
     acc, _, action = ui.checklist(f"{status_label} changes — untick to leave a book alone",
                                   [status_line(r, str(titles.get(r[0], ""))) for r in rows])
@@ -75,7 +75,8 @@ def step(status_label: str, rows: list) -> list:
 
 
 def write(status_label: str, rows: list) -> None:
-    run_writer([op_set_field(status_label, {b: n for b, o, n, _ in rows})])
+    run_writer([op_set_field(status_label, {b: n for b, o, n, _ in rows})],
+               tool="staleness", scope=f"{len(rows)} books")
 
 
 def show(label: str, rows: list) -> None:
@@ -102,7 +103,7 @@ def main() -> None:
     a = p.parse_args()
 
     if a.books is not None and a.last:
-        raise SystemExit("--books and --last are two ways to name the same thing — pick one.")
+        raise GuardrailError("--books and --last are two ways to name the same thing — pick one.")
     books = select.parse_books(a.books) if a.books is not None else None
     if a.last:
         from scourgify.common import ro_connect

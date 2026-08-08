@@ -209,7 +209,7 @@ def test_wrangle_stage_most_recent_n_narrows_the_write():
     recorded = []
     with dirty_lib():
         saved = wrangle.run_writer
-        wrangle.run_writer = lambda ops, force=False: recorded.append(ops)
+        wrangle.run_writer = lambda ops, force=False, **kw: recorded.append(ops)
         try:                                     # slot 3 = most recent N, then N=1
             with common.scripted_answers(["3", "1"]), transcript() as buf:
                 wizard.stage_wrangle()

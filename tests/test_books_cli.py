@@ -61,8 +61,8 @@ def argv(*args):
 def expect_exit(fn, *a, **kw):
     try:
         fn(*a, **kw)
-        assert False, f"expected SystemExit from {fn!r}"
-    except SystemExit:
+        assert False, f"expected a refusal from {fn!r}"
+    except common.GuardrailError:
         pass
 
 
@@ -70,7 +70,7 @@ def _intercept(mod):
     """Swap mod.run_writer for a recorder; returns (recorded_list, restore()) like test_classify_run.py."""
     recorded = []
     saved = mod.run_writer
-    mod.run_writer = lambda ops, force=False: recorded.append(ops)
+    mod.run_writer = lambda ops, force=False, **kw: recorded.append(ops)
     return recorded, lambda: setattr(mod, "run_writer", saved)
 
 

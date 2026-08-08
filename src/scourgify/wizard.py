@@ -61,7 +61,7 @@ def snapshot():
     candidates = 0
     if os.path.exists(artifacts.rank()):
         try: candidates = len(promote.candidates())          # new-tag candidates not yet adjudicated
-        except SystemExit: candidates = 0
+        except (SystemExit, common.GuardrailError): candidates = 0
     verdicts_pending = os.path.exists(artifacts.review())       # adjudicated promote verdicts awaiting apply
     rejects = sum(1 for r in artifacts.read_rows(common.rejects_path())
                   if r.get("stage") == "wrangle" and r.get("class") == "auto")

@@ -5,6 +5,7 @@ No Calibre, no library, no network."""
 import os, sys, tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
+from scourgify import common
 
 
 def test_ask_retry_success_and_block():
@@ -34,8 +35,8 @@ def test_mistral_registered_and_keyguard():
     assert "mistral" in classify.ENGINES and "mistral" in classify.PRICING
     os.environ.pop("MISTRAL_API_KEY", None)
     try:
-        classify.ENGINES["mistral"]("", 60); assert False, "expected SystemExit"
-    except SystemExit as e:
+        classify.ENGINES["mistral"]("", 60); assert False, "expected a refusal"
+    except common.GuardrailError as e:
         assert "MISTRAL_API_KEY" in str(e)
 
 
@@ -234,15 +235,15 @@ def test_run_raises_on_existing_review():
     review = os.path.join(d, "promote_review.csv")
     # pre-create the review file to simulate a pending review
     with open(review, "w") as f: f.write("existing content")
-    # without --yes, should raise SystemExit
+    # without --yes, should refuse
     a = promote.build_parser().parse_args([])
     raised = False
     try:
         promote.run(a, ranked_path=ranked, proposal_path=prop, review_path=review, ask=fake_ask)
-    except SystemExit as e:
+    except common.GuardrailError as e:
         raised = True
         assert "pending review" in str(e)
-    assert raised, "expected SystemExit when review file exists and --yes not set"
+    assert raised, "expected a refusal when review file exists and --yes not set"
     # with --yes, should overwrite without error
     a2 = promote.build_parser().parse_args(["--yes"])
     # candidates list is empty (prop has no rows), so run exits early with "nothing to do"

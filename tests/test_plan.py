@@ -6,7 +6,7 @@ import os, sys, tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 from fixture_db import build
-from scourgify import wrangle
+from scourgify import common, wrangle
 from scourgify.common import load_config, norm
 
 BEH = load_config(path="/nonexistent/config.toml")["behavior"]
@@ -145,7 +145,7 @@ def test_restrict_narrows_the_write_set_and_the_guards():
         assert full.n_books == 2 and full.lostF == 1
         try:
             full.guard(); assert False, "expected the data-loss guard to abort the full plan"
-        except SystemExit:
+        except common.GuardrailError:
             pass
 
         scoped = wrangle.plan(cfg, m).restrict([2])

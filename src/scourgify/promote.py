@@ -16,7 +16,7 @@ from scourgify.artifacts import (prop, rank, ledger, review, applied_proposals,
                                  append_ledger, read_rows, split_tags, write_review, archive)
 from scourgify.classify import existing_terms
 from scourgify.engines import ENGINES, ask_retry, max_workers as engine_workers
-from scourgify.common import (data_dir, library, norm, ro_connect, run_writer,
+from scourgify.common import (GuardrailError, data_dir, library, norm, ro_connect, run_writer,
                               current_tags, titles as book_titles, op_set_field, interactive, confirm)
 from scourgify.overrides import ov_path, append_lines, append_rows   # overrides/ formats live there
 
@@ -83,7 +83,7 @@ def _ledger_tags(path):
 def candidates(ranked_path: str | None = None, proposal_path: str | None = None, ledger_path: str | None = None) -> list:
     ranked_path, proposal_path, ledger_path = ranked_path or rank(), proposal_path or prop(), ledger_path or ledger()
     if not os.path.exists(ranked_path):
-        raise SystemExit(f"no candidates ({os.path.basename(ranked_path)} not found — run a classify pass first).")
+        raise GuardrailError(f"no candidates ({os.path.basename(ranked_path)} not found — run a classify pass first).")
     decided = _ledger_tags(ledger_path)
     examples = {}                                              # tag -> [titles]
     for r in read_rows(proposal_path):
@@ -148,7 +148,7 @@ def apply_decisions(review_path: str | None = None, vocab_path: str | None = Non
     from_file = rows is None                   # explicit rows = the --step path; the caller archives
     if from_file:
         if not os.path.exists(review_path):
-            raise SystemExit(f"no review to apply ({os.path.basename(review_path)} not found — run promote first).")
+            raise GuardrailError(f"no review to apply ({os.path.basename(review_path)} not found — run promote first).")
         rows = read_rows(review_path)
     n = {"promote": 0, "alias": 0, "reject": 0, "skipped": 0}
     for r in rows:
@@ -201,9 +201,9 @@ def apply_decisions_step(review_path: str | None = None) -> dict:
     from scourgify.artifacts import archive_rows
     review_path = review_path or review()
     if not os.path.exists(review_path):
-        raise SystemExit(f"no review to apply ({os.path.basename(review_path)} not found — run promote first).")
+        raise GuardrailError(f"no review to apply ({os.path.basename(review_path)} not found — run promote first).")
     if not interactive():
-        raise SystemExit("--step needs an interactive terminal (omit it to apply the whole review).")
+        raise GuardrailError("--step needs an interactive terminal (omit it to apply the whole review).")
     rows = read_rows(review_path)
     actionable = [r for r in rows if (r.get("verdict") or "").strip().lower() in VERDICTS]
     other = [r for r in rows if r not in actionable]          # errors: never applicable, stay pending
@@ -371,7 +371,7 @@ def backfill(yes: bool = False, step: bool = False, decide=None) -> int:
             print("(nothing decided — nothing written.)"); return 0
     elif step:                                 # the checklist IS the confirmation
         if not interactive():
-            raise SystemExit("--step needs an interactive terminal (omit it to apply the whole backfill).")
+            raise GuardrailError("--step needs an interactive terminal (omit it to apply the whole backfill).")
         con = ro_connect(); chg = backfill_step(chg, adds, book_titles(con)); con.close()
         if not chg:
             print("(nothing decided — nothing written.)"); return 0
@@ -381,7 +381,7 @@ def backfill(yes: bool = False, step: bool = False, decide=None) -> int:
             print("  non-interactive: re-run with --yes to write."); return 0
         if not confirm("apply this backfill? (Calibre closed)"):
             print("aborted (nothing written)."); return 0
-    run_writer([op_set_field("tags", chg)])
+    run_writer([op_set_field("tags", chg)], tool="promote", scope=f"backfill, {len(chg)} books")
     print(f"backfilled promoted tags onto {len(chg)} book(s).")
     return len(chg)
 
@@ -393,7 +393,7 @@ def run(a: argparse.Namespace, ranked_path: str | None = None, proposal_path: st
     callables directly (the same seam decide() already has) instead of faking the registry."""
     review_path = review_path or review()
     if os.path.exists(review_path) and not getattr(a, "yes", False):
-        raise SystemExit(f"a pending review exists at {review_path} — apply it (scourgify promote --apply), "
+        raise GuardrailError(f"a pending review exists at {review_path} — apply it (scourgify promote --apply), "
                          f"delete it, or re-run with --yes to overwrite.")
     cands = candidates(ranked_path, proposal_path)
     if a.limit: cands = cands[:a.limit]
@@ -463,7 +463,7 @@ def main() -> None:
         # follow-up run has none left and the backfill (which reads the ledger, not the review)
         # must still happen. It used to abort on the review and never reach the backfill.
         try: apply_decisions_step() if a.step else apply_decisions()
-        except SystemExit as e: print(f"{e}\n  (continuing to --backfill, which reads the ledger)")
+        except GuardrailError as e: print(f"{e}\n  (continuing to --backfill, which reads the ledger)")
         backfill(yes=a.yes or a.apply, step=a.step)
     elif a.apply:
         apply_decisions_step() if a.step else apply_decisions()

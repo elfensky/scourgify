@@ -5,7 +5,7 @@ branch keys off. No framework:  uv run tests/test_engines.py   (also pytest-coll
 import os, sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
-from scourgify import engines
+from scourgify import common, engines
 
 
 def _with_transport(resp, fn):
@@ -80,8 +80,8 @@ def test_missing_key_message_names_the_env_var():
                          (engines.Mistral, "MISTRAL_API_KEY")):
             os.environ.pop(env, None)
             try:
-                cls("", 60); assert False, f"expected SystemExit for {env}"
-            except SystemExit as e:
+                cls("", 60); assert False, f"expected a refusal for {env}"
+            except common.GuardrailError as e:
                 assert env in str(e)
     finally:
         _restore_env(saved)

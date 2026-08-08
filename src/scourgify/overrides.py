@@ -14,7 +14,7 @@ ones are logged to data/rejects.csv. `scourgify overrides` then turns the determ
 rejects into identity-override lines so the same wrong change never recurs."""
 import os, csv, time, collections
 from scourgify.artifacts import read_rows as read_csv
-from scourgify.common import DEFAULTS as DEF, load_config, user_dir, norm, read_lines, ro_connect
+from scourgify.common import DEFAULTS as DEF, GuardrailError, load_config, user_dir, norm, read_lines, ro_connect
 
 
 def overrides_dir(cfg: dict | None = None) -> str:
@@ -224,7 +224,7 @@ def step_pick(auto: dict) -> set | None:
     for "nothing decided". Shared by `overrides --apply --step` and the wizard stage."""
     from scourgify import ui
     if not ui.interactive():
-        raise SystemExit("--step needs an interactive terminal (omit it to write every line).")
+        raise GuardrailError("--step needs an interactive terminal (omit it to write every line).")
     pairs = [(fn, l) for fn in sorted(auto) for l in sorted(set(auto[fn]))]
     acc, _, action = ui.checklist("override rules — untick one you don't want",
                                   [f"[dim]{fn}[/]  {l}" for fn, l in pairs])

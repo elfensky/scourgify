@@ -293,11 +293,47 @@ tool module and eight tests for a need that is still speculative. The mechanism
 change. The alternative — one blanket sweep in phase 2 — is a real option if drift is the bigger
 worry.
 
-### Phase 3 — The edit log (#49)
+> **Overruled 2026-08-09.** The owner chose the blanket sweep, and it landed in phase 3 (#56). The
+> deferral was also wrong about its own scope: it counted ~30 sites in the tool modules and missed
+> `common.library()`, which every read path in the repo reaches. Details under phase 3.
+
+### Phase 3 — The edit log (#49) — **DONE** (#56)
 
 The foundation for History (#50) and undo (#51), both of which are already drawn into the dashboard
 design. Independently valuable to CLI users. See #49 for the full analysis, including the fact that
 the before-state is already read and discarded by the wipe guard.
+
+**What actually landed:**
+
+- **`editlog.py`** (~135 lines, stdlib-only) + `data/edits.jsonl`, appended by `run_writer` and
+  `write_ops` and by nothing else. The two readers it needs are `common.column_values` (read-only
+  sqlite) and `common.values_via_api` (the live handle) — injected, so the funnel that has a GUI
+  reads the authoritative in-memory state and the one that doesn't reads sqlite.
+- **Op lines are written BEFORE the ops apply.** Logging after a successful apply sounds more
+  honest and is strictly worse: a run killed mid-write would log *nothing*, which is the exact
+  case the missing-footer rule exists for. It is safe because undo is conflict-aware — an op that
+  never landed reads as a conflict, so the worst case is a book skipped and reported.
+- **A full-library `stamp_now` is one line with a count**, not 7,949 lines. Per-book stamp lines
+  would multiply the log by the library size on every wrangle run to record something already
+  excluded from undo.
+- **`--force` skips the wipe guard, not the log** (#49's open question). The forced runs are the
+  ones most likely to need undo.
+- **`tool=` is an explicit parameter**, as #49 predicted — six call sites, no `sys.argv` sniffing.
+  `scope=` rides along free (`wrangle.Plan` grew a `scope` attribute that `restrict()` narrows).
+- **`engine`/`model` are a seam the CLI cannot fill.** `classify --apply` is its own invocation and
+  the proposal CSV doesn't carry the engine; the plugin's classify verb fills it in phase 6, where
+  the pass and the write are one job.
+- **The `SystemExit` sweep landed here, not per phase** — the owner overruled phase 2's deferral.
+  29 sites converted across `classify`/`promote`/`staleness`/`wrangle`/`engines`/`select`/
+  `overrides`, plus `common.library()`, which the deferral had missed and which *every* read path
+  reaches. `run_writer` and `rollback_cmd` stay exempt by contract. `tests/test_plugin_safety.py`
+  AST-walks for `raise SystemExit` in job-reachable modules, so a new one can't creep back.
+- **Still open for phase 6, and the sweep does not fix it**: the tool modules' write functions call
+  `run_writer` *directly*, so a job calling `staleness.write()` would reach the exempt funnel
+  transitively and spawn a second writer process. Phase 6 needs a writer seam on those functions.
+- Smoke-verified under Calibre 9.11 / Python 3.14.6 against the real 7,949-book library,
+  read-only: `editlog` imports, `library_uuid` answers, and the tags before-read (the extra join
+  the guard doesn't make) costs **32 ms**.
 
 ### Phase 4 — Plugin skeleton, read-only
 

@@ -127,9 +127,26 @@ reach for `os.getcwd()`). `$SCOURGIFY_HOME` also lets tests point the whole tree
   a second process against a library the GUI holds open (#53). `create_column` is deliberately **out** of the
   in-process contract — the legacy-DB reopen it needs would desync a live GUI's models, so it raises there; columns
   are created by `scourgify setup` with Calibre closed.
+- **Every write is logged, in `editlog.py`** — `data/edits.jsonl`, appended by BOTH funnels and by nothing else.
+  One JSONL line per applied `(book, field)` `set_field` op (before + after), bracketed by a run-header (tool,
+  scope, library uuid, ts; engine+model for a classify run) and a run-footer (counts, outcome), all sharing a
+  **collision-proof run id** (`<ts>-<8 hex>` — a bare timestamp cost an archive in #45). **A missing footer marks
+  a partial run; its op lines are still real and still undoable.** Op lines are written *before* the ops apply —
+  the only ordering that survives a crash — which is safe because undo is conflict-aware: an op that never landed
+  reads as a conflict and is skipped, not clobbered. `editlog.conflict(current, expected, multi)` is THE shared
+  predicate (multi-value: sets differ, order-insensitive, raw values, no alias/case folding; single-value: string
+  inequality) — apply-time checks and undo must never disagree about what a conflict is. `stamp_now`/`set_pref`/
+  `create_column` are logged with `"undo": false` and excluded from replay (a full-library stamp is ONE line with
+  a count, not 7,949 lines). **`--force` skips the wipe guard, NOT the log** — a forced run is the one most likely
+  to need undo. Capture is on the near side of the `calibre-debug` subprocess, so `tests/test_editlog.py` pins the
+  record shape with the subprocess stubbed and no Calibre installed. Retention: unbounded (it is tiny; the backups
+  prune, and a log outliving its snapshots is the point).
 - **Guards raise `common.GuardrailError`, never `SystemExit`**, anywhere a Calibre job could reach them: Calibre's
-  `ThreadedJob` catches only `Exception`, so a `SystemExit` guard would kill the worker thread *silently*.
-  `run_writer` converts it back to `SystemExit` so CLI exit codes and messages are unchanged, and
+  `ThreadedJob` catches only `Exception`, so a `SystemExit` guard would kill the worker thread *silently* — no
+  error dialog, no completion, a progress bar that never finishes. This is now repo-wide, not per-guard: **no
+  job-reachable module raises `SystemExit`**, and `tests/test_plugin_safety.py` AST-checks it. The only two
+  exemptions are `run_writer` and `rollback_cmd` — CLI-only funnels a plugin can never enter. `cli.main()` is the
+  ONE place `GuardrailError` becomes a process exit, so CLI messages and exit codes are unchanged;
   `wizard._stage_guard` catches both.
 - **`common.py`** is the shared core: lazy `CALIBRE_LIBRARY` resolution (importing any module never exits),
   `ro_connect()`, link-table-aware `read_custom_column()`, `norm`/`ascii_fold`, the minimal TOML `load_config()`,
@@ -145,7 +162,9 @@ this repo's floor, not older.) `uv run tests/test_plugin_safety.py` pins the con
 plugin possible — every core module imports with **rich blocked** (Calibre's site-packages is empty),
 and `ui`/`wizard` refuse with a catchable `GuardrailError` rather than a `SystemExit` that would take
 the host process down. `uv run tests/test_write_path.py` shadow-replays one ops list through both
-write shapes; `uv run tests/test_restore_drill.py` is the snapshot→corrupt→restore drill.
+write shapes; `uv run tests/test_editlog.py` pins the edit-log record shape (and the conflict
+predicate) with the `calibre-debug` subprocess stubbed; `uv run tests/test_restore_drill.py` is
+the snapshot→corrupt→restore drill.
 **`calibre-debug -e tests/smoke_calibre.py`** is the manual pre-release check for what CI cannot
 assert — the core actually running under Calibre's own interpreter. Read-only (`ro_connect()`), safe
 with Calibre open; set `CALIBRE_LIBRARY` to also exercise the read paths. `uv run tests/test_wizard_flow.py` drives the real

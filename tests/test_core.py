@@ -328,7 +328,7 @@ def test_synth_identity_override_is_a_noop_in_transform():
 def _guard_fires(before, after, force=False):
     try:
         tag_loss_guard(before, after, force); return False
-    except SystemExit:
+    except common.GuardrailError:
         return True
 
 
@@ -362,8 +362,8 @@ def test_data_loss_guard_aborts_on_last_value_lost():
     for lf, lc in ((1, 0), (0, 1), (2, 3)):
         try:
             data_loss_guard(lf, lc, force=False)
-            assert False, f"expected SystemExit for lost_fandom={lf} lost_char={lc}"
-        except SystemExit as e:
+            assert False, f"expected a refusal for lost_fandom={lf} lost_char={lc}"
+        except common.GuardrailError as e:
             assert "lose their last" in str(e)
         data_loss_guard(lf, lc, force=True)                            # --force overrides the abort
 
@@ -442,7 +442,7 @@ def test_step_apply_preserves_pending_rows_when_writer_refuses():
         raised = False
         try:
             classify.apply_proposal_step()
-        except SystemExit:
+        except (SystemExit, common.GuardrailError):
             raised = True
         assert raised                                   # the refusal still surfaces
         assert store["rows"] == rows, "the on-disk proposal must be untouched when the writer refuses"
