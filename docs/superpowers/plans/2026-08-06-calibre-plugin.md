@@ -255,7 +255,7 @@ to both; existing write paths unchanged and green.
   snapshot byte for byte *and* that the pre-restore state was itself snapshotted. It prints
   wall-clock (200 books / 32 KiB: backup ~1 ms, restore ~6 ms).
 
-### Phase 2 — Make the core plugin-safe
+### Phase 2 — Make the core plugin-safe — **DONE** (#55)
 
 Add 3.14 to the CI matrix. Make the `rich` check in `ui.py` catchable rather than `SystemExit`. Add
 the `calibre-debug -e` smoke script to the repo. Audit the core for anything that assumes a
@@ -263,6 +263,35 @@ terminal or a process exit.
 
 *Acceptance:* CI green on 3.10/3.13/3.14; importing every core module under `calibre-debug` raises
 nothing; the smoke script runs in CI or is documented as a manual pre-release check.
+
+**What actually landed:**
+
+- `ui.py` raises `common.GuardrailError` instead of `SystemExit`, and `cli.main()` converts that
+  back at the **one** CLI boundary — so a partial install still shows the same message with the
+  same non-zero exit, and a plugin can catch it. Converting at one boundary instead of ~30 raise
+  sites is what kept this from being a repo-wide rewrite.
+- `tests/test_plugin_safety.py` is the CI-runnable half of the constraint: every core module
+  imported in a subprocess with **rich blocked** (`sys.modules['rich'] = None`), plus an AST check
+  that `_writer.py`/`ops.py` import no presentation module and that `ops.py` imports nothing from
+  `scourgify` at all. Guarded against vacuity — one test asserts the block itself still bites.
+- `tests/smoke_calibre.py` is the manual pre-release check. Run 2026-08-08 under **Calibre 9.11 /
+  Python 3.14.6, empty site-packages**, against the real 7,949-book library, read-only: all 14 core
+  modules import, `ui`/`wizard` refuse catchably, and every read path answers.
+
+**Measured, and it settles an argument:** `wrangle.load_maps()` takes **870 ms**;
+`select.pick("unclassified")` 21 ms, `select.sendable()` 16 ms, `book_count` 6 ms. Even the *cheap*
+reads are tens of milliseconds, and the map load alone is a visible stutter. This is direct evidence
+for the rule, not just the LLM calls: **reads go on the job system too.**
+
+**Deferred, deliberately — the owner may want to overrule this.** The spec's "no `SystemExit`
+reachable from anything a job function will call" is not fully satisfied. ~30 sites remain across
+`classify`/`promote`/`staleness`/`wrangle`/`engines`/`select`. They are converted *per phase, as
+each becomes job-reachable* (phase 4 for read paths, phase 6 for the write verbs), rather than in
+one repo-wide sweep now: no job functions exist yet, so a blanket conversion would churn every
+tool module and eight tests for a need that is still speculative. The mechanism
+(`GuardrailError` + the single CLI converter) is in place, so each conversion is now a one-line
+change. The alternative — one blanket sweep in phase 2 — is a real option if drift is the bigger
+worry.
 
 ### Phase 3 — The edit log (#49)
 

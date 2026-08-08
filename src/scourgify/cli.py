@@ -10,6 +10,20 @@ from scourgify import __version__
 
 
 def main():
+    """The CLI boundary — and the ONE place GuardrailError becomes a process exit.
+
+    Guards raise a catchable GuardrailError so a Calibre job can handle them (a SystemExit would
+    escape ThreadedJob's `except Exception` and kill the worker thread silently). On the CLI that
+    error must still read as a plain refusal with a non-zero exit, exactly as it always has —
+    converted here rather than at 30 raise sites."""
+    from scourgify.common import GuardrailError
+    try:
+        return _dispatch()
+    except GuardrailError as e:
+        raise SystemExit(str(e))
+
+
+def _dispatch():
     argv = sys.argv[1:]
     if argv and argv[0] in ("-V", "--version"):
         print(f"scourgify {__version__}")
