@@ -25,7 +25,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.13"] # requires-python floor + current
+        # requires-python floor + current + the one Calibre actually bundles. 3.14 is not
+        # speculative future-proofing: Calibre 9.11 ships Python 3.14.6 (measured 2026-08-06),
+        # so the plugin's interpreter is NEWER than this repo's, not older as was assumed.
+        python-version: ["3.10", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6.0.2
 

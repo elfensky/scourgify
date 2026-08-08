@@ -183,6 +183,19 @@ references them rather than redefining its own:
   on the GUI thread — enforced by construction (all core entry points reached only from job
   functions) and checked by the smoke script, which runs each menu action's dispatch path
   headlessly and asserts the GUI-thread portion completes in **<100 ms**.
+  > **Phase-2 amendment (2026-08-08, #55).** Measured under Calibre 9.11 / Python 3.14.6
+  > against the real 7,949-book library: `wrangle.load_maps()` **870 ms**,
+  > `select.pick("unclassified")` 21 ms, `select.sendable()` 16 ms, `common.book_count` 6 ms.
+  > Even the cheap reads exceed a frame; the map load alone is a visible stutter. The
+  > <100 ms budget is therefore a *dispatch* budget, and no core read qualifies.
+  >
+  > **Deferral, stated rather than quietly satisfied:** "no `SystemExit` reachable from
+  > anything a job function will call" is *not* met repo-wide. ~30 raise sites remain in
+  > `classify`/`promote`/`staleness`/`wrangle`/`engines`/`select`. The mechanism is in place
+  > (`GuardrailError` + a single converter at `cli.main`), and sites are converted in the
+  > phase that makes each job-reachable — phase 4 for read paths, phase 6 for write verbs.
+  > No job functions exist before phase 4, so a blanket sweep now would churn every tool
+  > module and eight tests ahead of the need.
 - **Edge cases**:
   - Worker exception → `job.failed` path shows the error dialog; `SystemExit` cannot occur
     (B2.4) — `ThreadedJob` only catches `Exception`, so any surviving `SystemExit` would be

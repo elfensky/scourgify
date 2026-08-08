@@ -15,9 +15,14 @@ try:
     from rich.prompt import Prompt, Confirm
     from rich.table import Table
 except ImportError:
-    raise SystemExit("the wizard needs the `rich` package (a declared dependency, so this means a "
-                     "partial install):\n  uv tool install --force scourgify   "
-                     "— or from a checkout:  uv run scourgify")
+    # GuardrailError, not SystemExit. Measured 2026-08-06: a Calibre plugin importing anything on
+    # this path takes its HOST down — Calibre's bundled Python has an empty site-packages, so rich
+    # is always absent there, and `except Exception` does not catch SystemExit (the spike needed
+    # `except BaseException` to survive it). A caller that can't use rich must be able to say so.
+    raise common.GuardrailError(
+        "the wizard needs the `rich` package (a declared dependency, so this means a "
+        "partial install):\n  uv tool install --force scourgify   "
+        "— or from a checkout:  uv run scourgify")
 
 console = Console()
 

@@ -139,7 +139,16 @@ Verification: `uv run tests/test_core.py` (plain asserts, pytest-compatible, no 
 pure core — `transform`, trope-chain resolution, `parse_resp`, the TOML reader — and
 `uv run tests/test_selection.py` pins the selection semantics against a throwaway sqlite `metadata.db` built
 by `tests/fixture_db.py` (covers both custom-column storage shapes). CI runs every `tests/test_*.py`
-by glob — a new test file is in CI by existing. `uv run tests/test_wizard_flow.py` drives the real
+by glob, on **3.10 / 3.13 / 3.14** — a new test file is in CI by existing. (3.14 is not
+future-proofing: Calibre 9.11 bundles Python **3.14.6**, so the plugin's interpreter is *newer* than
+this repo's floor, not older.) `uv run tests/test_plugin_safety.py` pins the constraint that makes a
+plugin possible — every core module imports with **rich blocked** (Calibre's site-packages is empty),
+and `ui`/`wizard` refuse with a catchable `GuardrailError` rather than a `SystemExit` that would take
+the host process down. `uv run tests/test_write_path.py` shadow-replays one ops list through both
+write shapes; `uv run tests/test_restore_drill.py` is the snapshot→corrupt→restore drill.
+**`calibre-debug -e tests/smoke_calibre.py`** is the manual pre-release check for what CI cannot
+assert — the core actually running under Calibre's own interpreter. Read-only (`ro_connect()`), safe
+with Calibre open; set `CALIBRE_LIBRARY` to also exercise the read paths. `uv run tests/test_wizard_flow.py` drives the real
 wizard stages in-process with canned answers (`common.scripted_answers`) against a fixture library —
 the interaction flows (no-write paths, classify scope-skip spending nothing, a skip-all step review
 leaving the proposal byte-identical) are pinned in CI in milliseconds. The same seam drives the wizard
