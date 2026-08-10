@@ -216,6 +216,7 @@ class ScourgifyAction(InterfaceAction):
         and initialization_complete() is no better (footgun 1: a library scan there froze Calibre
         and read as a crash)."""
         self.menu = QMenu(self.gui)
+        self.menu.setToolTipsVisible(True)      # else every item's hint is invisible dead text
         self.menu.aboutToShow.connect(self.build_menu)
         self.qaction.setMenu(self.menu)
 
