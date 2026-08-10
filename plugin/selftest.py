@@ -60,7 +60,8 @@ class Harness(object):
         self.heart = QTimer(self.gui)
         self.heart.timeout.connect(self._beat)
         self.heart.start(16)
-        self.steps = [self.step_menu_0, self.step_inspect,        # library scope (the heavy read)
+        self.steps = [self.step_popup,
+                      self.step_menu_0, self.step_inspect,        # library scope (the heavy read)
                       self.step_menu_1, self.step_menu_n, self.step_inspect,
                       self.step_identity, self.step_smoke, self.finish]
         QTimer.singleShot(2000, self.next)
@@ -89,6 +90,19 @@ class Harness(object):
         for a in self.action.menu.actions():
             self.say('    %s%s' % ('[ ] ' if not a.isEnabled() else '[x] ',
                                    a.text() or '---- separator ----'))
+        QTimer.singleShot(200, self.next)
+
+    def step_popup(self):
+        """The wiring a click actually uses: the toolbar action's menu emits aboutToShow, which is
+        what builds it. Every other step calls build_menu() directly and would pass with that
+        connection missing. popup() rather than a real click — QToolButton.showMenu() spins a
+        nested event loop and does not return until the menu closes."""
+        from qt.core import QPoint
+        self.action.menu.clear()
+        self.action.menu.popup(QPoint(0, 0))
+        n = len(self.action.menu.actions())
+        self.action.menu.close()
+        self.say('menu.aboutToShow built %d items (0 means the toolbar click is dead)' % n)
         QTimer.singleShot(200, self.next)
 
     def step_menu_0(self):
