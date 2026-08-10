@@ -62,7 +62,7 @@ class Harness(object):
         self.heart.start(16)
         self.steps = [self.step_menu_0, self.step_inspect,        # library scope (the heavy read)
                       self.step_menu_1, self.step_menu_n, self.step_inspect,
-                      self.step_smoke, self.finish]
+                      self.step_identity, self.step_smoke, self.finish]
         QTimer.singleShot(2000, self.next)
 
     def next(self):
@@ -126,6 +126,22 @@ class Harness(object):
             self.say('result: %r' % (self.captured,))
             QTimer.singleShot(10, self.next)
         self._run_verb('What does scourgify know?', done)
+
+    def step_identity(self):
+        """B1.1: a job whose captured library is no longer the open one must abort cleanly. Faked
+        by dispatching with a uuid that was never this library's — the same branch a real switch
+        between click and job takes, and the only way to exercise it without two libraries."""
+        self.captured = None
+        self.action.inspect((self.gui.current_db.library_path, 'not-this-library', self.ids(1)))
+
+        def poll(n=[0]):
+            n[0] += 1
+            if self.captured is None and n[0] < 100:
+                return QTimer.singleShot(100, poll)
+            ok = self.captured and 'library changed' in (self.captured[1] or '')
+            self.say('identity mismatch aborts cleanly: %s -> %r' % (bool(ok), self.captured))
+            QTimer.singleShot(10, self.next)
+        QTimer.singleShot(100, poll)
 
     def step_smoke(self):
         def done(elapsed):
