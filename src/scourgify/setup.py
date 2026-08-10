@@ -13,6 +13,15 @@ from scourgify.common import (user_dir, library, ro_connect, interactive, confir
 
 OK, WARN, BAD = "✓", "⚠", "✗"     # status glyphs (plain; no color dependency)
 
+# The columns a healthy library has: the engine's 5 + the two datetime markers staleness and
+# classify --incremental key off. Module-level because "column health" is a NUMBER other surfaces
+# quote (the wizard header, the plugin's Inspect, B6.1's dashboard) and they must all count the
+# same 7 things — the source function is named, never re-listed at the call site.
+REC = [("#fandoms", "Fandoms", "text", True), ("#characters", "Characters", "text", True),
+       ("#relationships", "Relationships", "text", True), ("#genres", "Genres", "text", True),
+       ("#status", "Status", "text", False), ("#updated", "Updated", "datetime", False),
+       ("#wrangled", "Wrangled", "datetime", False)]
+
 
 def write_config(colmap: dict, beh: dict | None = None) -> None:
     b = beh or {}                                     # preserve existing toggles on re-run; defaults on first run
@@ -86,10 +95,6 @@ def setup(cfg: dict, yes: bool = False) -> None:
     # [3] columns: the engine's 5 + the datetime markers staleness/classify need
     print("\n[3] Columns")
     have = {"#" + l for (l,) in con.execute("SELECT label FROM custom_columns")} | {"tags"}
-    REC = [("#fandoms", "Fandoms", "text", True), ("#characters", "Characters", "text", True),
-           ("#relationships", "Relationships", "text", True), ("#genres", "Genres", "text", True),
-           ("#status", "Status", "text", False), ("#updated", "Updated", "datetime", False),
-           ("#wrangled", "Wrangled", "datetime", False)]
     for label, name, dt, mult in REC:
         if label in have: print(f"  {OK} {label}"); continue
         why = "  (staleness + classify --incremental need this)" if label in ("#updated", "#wrangled") else ""
