@@ -54,6 +54,15 @@ def load_maps(cfg: dict, defaults_dir: str | None = None, overrides_dir: str | N
     The dirs are parameters with production defaults so tests pass temp layers instead of
     reassigning module globals."""
     DEF = defaults_dir or DEFAULTS_DIR
+    if not os.path.isdir(DEF):
+        # Fail closed instead of normalizing against nothing. Every layer here is read through
+        # read_csv/read_lines, which answer [] for a path that doesn't exist — so an unreadable
+        # defaults/ produces maps that are EMPTY rather than absent, and a run against them is
+        # silently wrong (junk tags kept, fandoms unaliased) instead of loudly broken. Found in
+        # phase 4: inside the plugin zip, common.HERE points at a path inside the zip, so
+        # os.path.exists() is False for every bundled CSV. Phase 6 gives DEFAULTS a resource seam.
+        raise GuardrailError(f"scourgify's data layer is unreadable ({DEF}) — refusing to normalize "
+                             "against an empty taxonomy.")
     odir = overrides_dir or _overrides_dir(cfg)   # the one dir resolution (overrides.py owns it)
     ao3 = os.path.join(DEF, "ao3")               # generated AO3 layer (build_ao3_layer.py) — loaded FIRST, everything overrides it
     def ao3_pairs(fn):                           # master,name,rel pair rows -> {name: master}; {} if the layer is absent

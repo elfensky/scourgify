@@ -76,12 +76,38 @@ def log_rejects(rows: list[dict]) -> int:
 
 
 # ---------------- library resolution (lazy — importing this module never exits) ----------------
+_LIBRARY = None      # in-process override; None means "read $CALIBRE_LIBRARY" (the CLI's world)
+
+
+def set_library(path: str | None) -> None:
+    """Point the whole core at `path` — the ONE seam a Calibre plugin needs.
+
+    In-plugin the library is whatever `gui.current_db` has open, and the environment cannot say:
+    a Calibre launched from the Dock inherits no environment at all, and a $CALIBRE_LIBRARY that
+    *is* set may name a different library than the one the GUI holds. So the injected path WINS
+    over the env var — the opposite of B5's key rule, and deliberately so: a key is user config,
+    the library path is a fact about the host process.
+
+    os.environ is never mutated (B5.2's reasoning applies to the path as much as to keys — a
+    concurrent job or a CLI running alongside must not observe this), and the 15-odd call sites of
+    library()/db_path() need no change.
+
+    ponytail: a process global, because Calibre has one open library per GUI, every job re-asserts
+    it at its first line, and the uuid captured at click time is validated against it. If
+    concurrent jobs against *different* libraries ever become real, this becomes a ContextVar —
+    same call sites, same seam. Pass None to hand the process back to $CALIBRE_LIBRARY.
+    """
+    global _LIBRARY
+    _LIBRARY = os.path.expanduser(path) if path else None
+
+
 def library() -> str:
-    """The library folder. Raises GuardrailError (not SystemExit) when unset: every read path in
+    """The library folder — set_library() if a host injected one, else $CALIBRE_LIBRARY.
+    Raises GuardrailError (not SystemExit) when unset: every read path in
     the repo reaches this function, so inside a Calibre job a SystemExit here would escape
     ThreadedJob's `except Exception` and kill the worker thread silently. cli.main converts it
     back, so the CLI message and exit code are unchanged."""
-    lib = os.path.expanduser(os.environ.get("CALIBRE_LIBRARY", ""))
+    lib = _LIBRARY or os.path.expanduser(os.environ.get("CALIBRE_LIBRARY", ""))
     if not lib:
         raise GuardrailError("Set CALIBRE_LIBRARY to your Calibre library folder (the one containing metadata.db).")
     return lib

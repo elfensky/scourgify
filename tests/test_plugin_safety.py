@@ -148,6 +148,41 @@ def test_no_job_reachable_code_raises_systemexit():
     assert not bad, ("raise SystemExit in job-reachable code (use common.GuardrailError):\n  "
                      + "\n  ".join(bad))
 
+def test_set_library_redirects_the_core_without_touching_the_environment():
+    """The seam a plugin cannot work without (phase 4). A Calibre launched from the Dock inherits
+    NO environment, so $CALIBRE_LIBRARY cannot answer "which library" — the answer is
+    gui.current_db, injected here. Two things this pins:
+
+      the injected path WINS over the env var — a $CALIBRE_LIBRARY that IS set may name a
+      different library than the one the GUI holds open, and silently reading the wrong library is
+      the worst outcome available;
+      os.environ is never mutated — the plugin's jobs and a CLI running alongside must not be able
+      to observe each other's library (NLSpec B5.2's reasoning, applied to the path)."""
+    import scourgify.common as common
+    saved = os.environ.get("CALIBRE_LIBRARY")
+    try:
+        os.environ["CALIBRE_LIBRARY"] = "/tmp/from-the-env"
+        assert common.library() == "/tmp/from-the-env"
+        common.set_library("/tmp/from-the-gui")
+        assert common.library() == "/tmp/from-the-gui", "the injected path must win"
+        assert common.db_path() == "/tmp/from-the-gui/metadata.db", "db_path must follow the seam"
+        assert os.environ["CALIBRE_LIBRARY"] == "/tmp/from-the-env", "os.environ must be untouched"
+        common.set_library(None)
+        assert common.library() == "/tmp/from-the-env", "None hands the process back to the env"
+        del os.environ["CALIBRE_LIBRARY"]
+        try:
+            common.library()
+            raise AssertionError("unset library must refuse")
+        except common.GuardrailError:
+            pass
+        common.set_library("/tmp/from-the-gui")
+        assert common.library() == "/tmp/from-the-gui", "no env var is the plugin's normal case"
+    finally:
+        common.set_library(None)
+        if saved is None: os.environ.pop("CALIBRE_LIBRARY", None)
+        else: os.environ["CALIBRE_LIBRARY"] = saved
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
