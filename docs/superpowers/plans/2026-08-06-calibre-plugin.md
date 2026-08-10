@@ -400,6 +400,14 @@ on Calibre's job system. Proves the shape end-to-end with nothing at risk.
 a `ThreadedJob` worker. Against the real library the same verb **refused** — `>50 books is not a
 throwaway` — which is the fail-closed guard working, and the only write phase 4 contains.
 
+**A guard that could not fire, caught by reviewing the phase against B1 rather than by a test.**
+B1.1's identity check must compare the captured uuid against **`gui.current_db`**. The first
+implementation re-read the uuid out of the db at the captured *path* — comparing the captured
+library to itself, so a library switch would sail straight past it. The job now calls back for
+`gui.current_db.new_api.library_id` (an attribute read from the worker, not a Qt call), and
+`selftest.py` dispatches with a uuid that was never this library's to prove the branch runs. A
+guard that cannot fire is worse than none — it reads as covered.
+
 **Two findings worth more than the code they came from:**
 
 1. **`load_maps()` was silently building EMPTY maps inside the zip.** `common.HERE` resolves to a

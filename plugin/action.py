@@ -37,24 +37,29 @@ SOON = 'not built yet'                    # the honest reason a phase-6/7 slot i
 # Everything below this line runs OFF the GUI thread. It may import scourgify; it may not touch a
 # Qt object. Results are plain data handed back to a Dispatcher-wrapped callback.
 
-def _open(lib_path, lib_uuid):
-    """Bind the core to the library the click was made against, and prove it is still that one.
+def _open(lib_path, lib_uuid, now_uuid=None):
+    """Bind the core to the library the click was made against, and prove the GUI still has that
+    one open. Returns (con, None) or (None, message).
 
-    Returns (con, None) or (None, message). The identity check is the whole point: Calibre is
-    multi-library, and between the click and the job the user may have switched. Aborting with a
-    sentence beats reading library B's ids out of library A (NLSpec B1.1)."""
+    `now_uuid` is a callable the action supplies; it reads `gui.current_db` — deliberately, and it
+    is the only version of this check that can ever fire. Re-reading the uuid out of the db at
+    `lib_path` compares the captured library to ITSELF: after a switch that path still exists and
+    still holds the same uuid, so the guard would pass while the user is looking at another
+    library (NLSpec B1.1). It is a plain attribute read, not a Qt call."""
     from scourgify import common
     common.set_library(lib_path)                     # the one seam; os.environ is never touched
-    con = common.ro_connect()
-    now = common.library_uuid(con)
-    if lib_uuid and now and now != lib_uuid:
-        con.close()
-        return None, ('The library changed since you clicked, so nothing was read.\n'
-                      'Open the scourgify menu again.')
-    return con, None
+    if lib_uuid and now_uuid is not None:
+        try:
+            current = now_uuid()
+        except Exception:
+            current = None
+        if current and current != lib_uuid:
+            return None, ('The library changed since you clicked, so nothing was read.\n'
+                          'Open the scourgify menu again.')
+    return common.ro_connect(), None
 
 
-def job_inspect(lib_path, lib_uuid, ids, abort=None, log=None, notifications=None):
+def job_inspect(lib_path, lib_uuid, ids, now_uuid=None, abort=None, log=None, notifications=None):
     """"What does scourgify know?" — stamp state, proposal/archive rows, failures, rejects.
 
     Read-only, off common.ro_connect() (the spike proved a second read-only sqlite handle is fine
@@ -63,7 +68,7 @@ def job_inspect(lib_path, lib_uuid, ids, abort=None, log=None, notifications=Non
     NLSpec B6.1."""
     from scourgify import artifacts, common, select, setup as setup_mod
 
-    con, err = _open(lib_path, lib_uuid)
+    con, err = _open(lib_path, lib_uuid, now_uuid)
     if err:
         return {'title': 'scourgify', 'msg': err, 'det': ''}
     try:
@@ -164,7 +169,7 @@ def _archives_by_book(artifacts):
     return out
 
 
-def job_db_smoke(lib_path, lib_uuid, api, abort=None, log=None, notifications=None):
+def job_db_smoke(lib_path, lib_uuid, api, now_uuid=None, abort=None, log=None, notifications=None):
     """NLSpec B3.3 — prove the db-from-worker boundary instead of assuming it.
 
     Reads through `new_api` AND performs a scratch write (a tag added and removed again) from
@@ -174,7 +179,7 @@ def job_db_smoke(lib_path, lib_uuid, api, abort=None, log=None, notifications=No
     from scourgify import common
     if not os.environ.get('SCOURGIFY_SMOKE'):
         return {'title': 'scourgify smoke', 'msg': 'Set SCOURGIFY_SMOKE=1 and restart Calibre.', 'det': ''}
-    con, err = _open(lib_path, lib_uuid)
+    con, err = _open(lib_path, lib_uuid, now_uuid)
     if err:
         return {'title': 'scourgify smoke', 'msg': err, 'det': ''}
     try:
@@ -276,15 +281,21 @@ class ScourgifyAction(InterfaceAction):
         return a
 
     # ---- dispatch: build a job, hand it to Calibre, return. Nothing waits here. ----
+    def current_uuid(self):
+        """Which library does the GUI have open RIGHT NOW — called from the job, so it can notice
+        a switch that happened after the click. An attribute read, not a Qt call."""
+        db = self.gui.current_db
+        return getattr(db.new_api, 'library_id', None) if db is not None else None
+
     def inspect(self, scope):
         lib, uuid, ids = scope
         self._run('scourgify: what do I know about %s' % _these(len(ids)),
-                  job_inspect, (lib, uuid, ids))
+                  job_inspect, (lib, uuid, ids, self.current_uuid))
 
     def db_smoke(self, scope):
         lib, uuid, _ids = scope
         self._run('scourgify: db-from-worker smoke', job_db_smoke,
-                  (lib, uuid, self.gui.current_db.new_api))
+                  (lib, uuid, self.gui.current_db.new_api, self.current_uuid))
 
     def _run(self, description, func, args):
         t0 = time.monotonic()

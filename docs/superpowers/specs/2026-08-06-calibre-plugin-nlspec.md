@@ -120,6 +120,15 @@ references them rather than redefining its own:
   >    appearing later. That is the fixed-slot rule taken literally, and it is what makes the
   >    menu's shape testable before its verbs exist.
   >
+  > **And a correction to step 1, found by re-reading this behavior against the code.** "Validates
+  > that identity against `gui.current_db`" has to mean *literally that*. The first implementation
+  > re-read the uuid out of the db at the captured path — which compares the captured library to
+  > ITSELF: after a switch that path still exists and still holds the same uuid, so the guard could
+  > never fire. The job now calls back into the action for `gui.current_db.new_api.library_id`
+  > (a plain attribute read from the worker, not a Qt call) and compares that. Exercised in
+  > `plugin/selftest.py` by dispatching with a uuid that was never this library's — the same branch
+  > a real switch takes. A guard that cannot fire is worse than no guard: it reads as covered.
+  >
   > Also: the interaction spec's "Add to the backlog" is rendered as B1's corrected
   > **"Classify the never-classified here"**; the backlog is derived state and the menu never
   > implies a queue.
