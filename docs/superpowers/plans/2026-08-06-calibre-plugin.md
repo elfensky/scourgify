@@ -335,10 +335,91 @@ the before-state is already read and discarded by the wipe guard.
   read-only: `editlog` imports, `library_uuid` answers, and the tags before-read (the extra join
   the guard doesn't make) costs **32 ms**.
 
-### Phase 4 — Plugin skeleton, read-only
+### Phase 4 — Plugin skeleton, read-only — **DONE** (#57)
 
 Toolbar button, selection-driven menu, "What does scourgify know?" only. No writes. Every core call
 on Calibre's job system. Proves the shape end-to-end with nothing at risk.
+
+**Two blockers were settled before any menu code, neither of them in #57's text:**
+
+- **The core could not resolve the library inside a plugin.** `common.library()` read
+  `$CALIBRE_LIBRARY`, and a Calibre launched from the Dock has no environment at all (footgun 7);
+  in-plugin the path is `gui.current_db.library_path`. **`common.set_library(path)`** is the one
+  seam — the injected value **wins** over the env var (a key is user config and env wins per B5.2;
+  the library path is a *fact about the host process*, and a stale `$CALIBRE_LIBRARY` naming a
+  different library is the worst outcome available), `os.environ` is never mutated, and the ~15
+  call sites of `library()`/`db_path()` are untouched. A process global, because Calibre has one
+  open library per GUI and every job re-asserts it then validates the uuid captured at click time;
+  a `ContextVar` is the upgrade if concurrent cross-library jobs ever exist.
+- **Absolute imports inside a plugin.** Checked FanFicFare before inventing anything: it ships
+  `fanficfare/` at the **zip root** as a plain top-level package and imports it as `import
+  fanficfare`. That works because Calibre's `Plugin.__enter__` **appends the plugin zip to
+  `sys.path`** (disassembled from 9.11 — the source isn't shipped), so zipimport resolves it.
+  scourgify does the same: `scourgify/` at the zip root, `import scourgify` inside `with self:` in
+  `load_actual_plugin`, and **every absolute `from scourgify.common import …` in the core keeps
+  working unchanged**. No import rewrite, no `calibre_plugins.scourgify.scourgify` prefix.
+  Verified under Calibre's Python 3.14.6, empty site-packages: the whole core imports from inside
+  the zip.
+
+**What actually landed:**
+
+- `plugin/` — `plugin-import-name-scourgify.txt` (empty), `__init__.py` (`InterfaceActionBase`,
+  `actual_plugin` as a string), `action.py` (the Qt layer + the job functions), `selftest.py`.
+- **`build_plugin.py`** — `uv run build_plugin.py` → `dist/scourgify-plugin-<version>.zip`
+  (43 files, 1.6 MB, mostly `defaults/ao3/`). One source tree, one version: read from
+  `pyproject.toml`, stamped into the plugin wrapper's `version` tuple **and** into
+  `scourgify/_plugin_version.py`. Calibre's own Preferences → Plugins shows that version today;
+  phase 5's settings dialog shows it in scourgify's own surface.
+- **`tests/test_plugin_source.py`** — the Qt layer stays thin by enforcement, not intention
+  (FanFicFare tests its plugin layer not at all, and neither can this one). Eight checks:
+  no `run_writer(`/`subprocess`/`multiprocessing`/`ThreadPoolExecutor`; **no core import at module
+  level** (every one lives inside a `job_*` function, so the GUI thread cannot reach a library read
+  by accident); every `ThreadedJob` callback is `Dispatcher(...)`-wrapped; job functions take
+  `abort`/`log`/`notifications`; `genesis()` wires and nothing else; `initialization_complete()`
+  does nothing unless the test hook is armed; the import-name marker exists and is empty;
+  `actual_plugin` is a string; the built zip carries the core, the marker at its root, and a real
+  version. Docstrings and comments are stripped before the grep — this file's own subject matter
+  would otherwise fail it.
+- **`plugin/selftest.py`** — phase 4's GUI acceptance *driven* rather than clicked, behind
+  `$SCOURGIFY_SMOKE` (a test hook, not a user feature — the same deal as `$SCOURGIFY_SCRIPT`).
+  It builds the menu at 0/1/N, runs Inspect at both scopes, runs the db-from-worker smoke, and
+  runs a **16 ms heartbeat on the GUI thread throughout**, so "the window never stops repainting"
+  is a measured longest-gap number instead of an impression.
+
+**Measured in the real GUI (Calibre 9.11), against the real 7,949-book library:**
+
+| | |
+|---|---|
+| menu built (0 / 1 / 5 selected) | 0.3 / 0.3 / 0.7 ms |
+| dispatch returned | 0.1–0.3 ms |
+| longest GUI-thread heartbeat gap during a job | **22.8 ms** (16 ms timer) |
+| library-scope inspect | 7,949 books · 7,666 never classified · 136 attempted · 18 pending · 7/7 columns |
+
+**db-from-worker proof (B3.3), against a 6-book throwaway library:** `new_api.all_book_ids()` and
+`field_for` read, `set_field` wrote `scourgify-smoke` onto book 1 and reverted it, all from inside
+a `ThreadedJob` worker. Against the real library the same verb **refused** — `>50 books is not a
+throwaway` — which is the fail-closed guard working, and the only write phase 4 contains.
+
+**Two findings worth more than the code they came from:**
+
+1. **`load_maps()` was silently building EMPTY maps inside the zip.** `common.HERE` resolves to a
+   path *inside* the zip, so `os.path.exists()` is False for every bundled CSV and every layer read
+   returns `[]` — no error, just a taxonomy of nothing. A phase-6 wrangle run would have normalized
+   against it. Now a named `GuardrailError`; **phase 6 needs a resource seam for `DEFAULTS`**
+   (`get_resources()`, or extract-once to a cache dir keyed by version).
+2. **Cross-library artifact bleed is real, not theoretical.** Inspect on the throwaway library
+   reported book 1 as "applied from classify_proposal_applied_20260726…" — the *real* library's
+   archive, because `user_dir()` is global. The NLSpec Constraint (operational state namespaced by
+   library uuid) is unbuilt, and the first read-only feature already tripped over it.
+
+**Deviation from B1, deliberate:** 0 ids is supposed to open the dashboard. The dashboard is phase
+7, so 0 ids opens the same menu at **library scope** with `Open dashboard…` present and greyed
+(fixed slots), and Inspect answers with the dashboard's header numbers — each naming its source
+function per B6.1. That is the phase-7 stub, not a new mode.
+
+**Not verified by eye:** this machine's shell has no screen-recording permission, so no screenshot
+was taken and no human clicked the button. What replaces it is the driven transcript above, from
+inside the real GUI process, with the menu's real labels and enabled/disabled state printed.
 
 ### Phase 5 — Settings and engines
 

@@ -98,6 +98,28 @@ reads that same central location. `common.HERE` is the package dir (use it only 
 files); anything user-writable keys off `common.user_dir()` (the single owner — never re-derive it or
 reach for `os.getcwd()`). `$SCOURGIFY_HOME` also lets tests point the whole tree at a temp dir.
 
+**The Calibre plugin** lives in **`plugin/`** (roadmap #62; phase 4 = the read-only skeleton) and is built
+by **`uv run build_plugin.py`** → `dist/scourgify-plugin-<version>.zip`, whose version is read from
+`pyproject.toml` — one source tree, one version for wheel and zip. Layout: the empty
+`plugin-import-name-scourgify.txt` **at the zip root** (without it a multi-file plugin can't import its own
+submodules), `__init__.py` (`InterfaceActionBase`; `actual_plugin` is a **string**), `action.py`, and the
+core copied in as a plain top-level **`scourgify/`** package — FanFicFare's layout. That works because
+Calibre's `Plugin.__enter__` appends the plugin zip to `sys.path`, so zipimport resolves
+`from scourgify.common import …` **unchanged**; Calibre's bundled Python has an empty site-packages, so an
+installed wheel is invisible to it and the core must ship inside the zip. Two consequences: files bundled
+beside the code are **not** readable there (`common.HERE` points inside the zip — `load_maps()` refuses
+rather than silently loading empty maps; a `DEFAULTS` resource seam is phase-6 work), and the library path
+cannot come from the environment — **`common.set_library(path)`** is the one injection seam
+(`gui.current_db.library_path`; the injected value wins over `$CALIBRE_LIBRARY`, `os.environ` is never
+mutated). **Nothing runs at plugin startup**, every core call — reads included — goes through a
+`ThreadedJob`, and every job callback is `Dispatcher`-wrapped. That is enforced, not intended:
+`tests/test_plugin_source.py` reads the plugin's source (the mechanism `tests/test_cli.py` uses on
+`wizard.py`) and fails on `run_writer(`/`subprocess`/`multiprocessing`/`ThreadPoolExecutor`, on any core
+import at module level (they belong inside `job_*` functions), on an unwrapped callback, and on work in
+`genesis()`/`initialization_complete()`. `SCOURGIFY_SMOKE=1 calibre --with-library <throwaway>` runs
+`plugin/selftest.py`, which drives the menu at 0/1/N and measures the GUI thread's longest stall — a test
+hook, not a user feature.
+
 **Everything runs under normal CPython** — the installed `scourgify` command, `uv run scourgify`, or plain
 `python3` with rich installed. The core operating rule is about *reads vs writes*, not which interpreter:
 - **Reads** (audit, classify proposal, setup health check) — read-only `sqlite3 ... mode=ro`; fine while Calibre is open.
