@@ -101,6 +101,28 @@ references them rather than redefining its own:
   - Library switched before click → identity check aborts with a plain message.
   - A verb that doesn't apply is greyed out with its reason, not hidden — a slot never
     changes meaning (mirrors the wizard's fixed-slot rule).
+  > **Phase-4 amendment (2026-08-10, #57) — the menu exists, read-only.** Three things the
+  > behavior did not settle, decided and recorded rather than quietly satisfied:
+  >
+  > 1. **The core needed a library seam before any of this could run.** `common.library()` read
+  >    `$CALIBRE_LIBRARY`; in-plugin the path is `gui.current_db.library_path`, and a Calibre
+  >    launched from the Dock has no environment at all. `common.set_library(path)` is the one
+  >    injection point (~15 call sites of `library()`/`db_path()` unchanged), and the **injected
+  >    path wins over the env var** — the opposite of B5.2's key rule, deliberately: a key is user
+  >    config, the library path is a fact about the host process, and silently reading a *different*
+  >    library because a stale `$CALIBRE_LIBRARY` was exported is the worst outcome available.
+  >    `os.environ` is never mutated, so B5.2's concurrency reasoning holds for the path too.
+  > 2. **0 ids does not open the dashboard yet** (step 2), because the dashboard is phase 7. It
+  >    opens the same menu at **library scope**, with `Open dashboard…` on its fixed slot, greyed,
+  >    reason shown; Inspect at that scope answers with B6.1's header numbers, each naming its
+  >    source function. The slot is the stub — no new mode was invented.
+  > 3. **Every phase-6/7 verb ships now, greyed, with the reason "not built yet"** rather than
+  >    appearing later. That is the fixed-slot rule taken literally, and it is what makes the
+  >    menu's shape testable before its verbs exist.
+  >
+  > Also: the interaction spec's "Add to the backlog" is rendered as B1's corrected
+  > **"Classify the never-classified here"**; the backlog is derived state and the menu never
+  > implies a queue.
 
 ### B2: One write path — in-process `apply_ops` with the guards attached
 - **Trigger**: any plugin action that writes; any CLI write (via `_writer.py`, unchanged).
@@ -214,6 +236,28 @@ references them rather than redefining its own:
   > reach the exempted funnel *transitively* and spawn a second writer process. The sweep does
   > not fix that and was never going to — phase 6 needs a writer seam on those functions
   > (injected `write=` / `write_ops`), the same shape as `Plan.run(ask=…)`.
+  > **Phase-4 amendment (2026-08-10, #57) — B3 is met, and measured.** In the real GUI under
+  > Calibre 9.11 against the real 7,949-book library: the menu builds in **0.3–0.7 ms**, dispatch
+  > returns in **0.1–0.3 ms**, and a 16 ms heartbeat running on the GUI thread through each job
+  > shows a longest gap of **22.8 ms** — i.e. the GUI thread never blocked. The <100 ms
+  > postcondition is checked this way rather than by a headless smoke script: "the GUI-thread
+  > portion of a dispatch" is only meaningful inside a real event loop, so `plugin/selftest.py`
+  > drives the actual menu inside the actual process (armed by `$SCOURGIFY_SMOKE`, a test hook,
+  > not a user feature) and reports the longest gap. A number beats an impression, and no human
+  > has to watch a window.
+  >
+  > **B3.3 is discharged.** From inside a `ThreadedJob` worker, against a 6-book throwaway
+  > library: `new_api.all_book_ids()` and `field_for` read, `set_field` wrote a scratch tag onto
+  > book 1 and reverted it, final state equal to initial. The same verb refused the real library
+  > (`>50 books is not a throwaway`) — fail-closed, and the only write in phase 4.
+  >
+  > **Enforced, not intended** (`tests/test_plugin_source.py`, the mechanism `tests/test_cli.py`
+  > uses on `wizard.py`): no core import may sit at module level in the plugin — every one lives
+  > inside a `job_*` function, so the GUI thread cannot reach a library read by accident;
+  > every `ThreadedJob` callback is `Dispatcher(...)`-wrapped (`start_work` calls it from the
+  > worker thread — disassembled, 9.11); job functions take `abort`/`log`/`notifications`;
+  > `genesis()` wires and nothing else; `initialization_complete()` does nothing unless the test
+  > hook is armed; `run_writer`/`subprocess`/`multiprocessing`/`ThreadPoolExecutor` appear nowhere.
 - **Edge cases**:
   - Worker exception → `job.failed` path shows the error dialog; `SystemExit` cannot occur
     (B2.4) — `ThreadedJob` only catches `Exception`, so any surviving `SystemExit` would be
@@ -424,6 +468,20 @@ references them rather than redefining its own:
   **Version coherence**: the plugin zip is built from the same source tree and release as
   the PyPI wheel, embeds the core version, and shows it in settings; the zip build joins
   the release flow so GUI and CLI cannot drift.
+  > **Phase-4 amendment (2026-08-10, #57).** `build_plugin.py` reads the version from
+  > `pyproject.toml` — the same string the wheel is built from — and stamps it into the plugin
+  > wrapper's `version` tuple and into `scourgify/_plugin_version.py`. Calibre's own
+  > Preferences → Plugins renders that version today; the settings dialog that renders it in
+  > scourgify's own surface is phase 5. The core ships **at the zip root as a plain top-level
+  > `scourgify/` package** (FanFicFare's layout for `fanficfare/`): Calibre's `Plugin.__enter__`
+  > appends the plugin zip to `sys.path`, so zipimport resolves it and the core's absolute imports
+  > need **no rewrite**. Verified under Calibre's Python 3.14.6 with empty site-packages.
+  >
+  > **A gap this exposed, and phase 6 owns it:** files bundled beside the code are NOT readable —
+  > `common.HERE` points inside the zip, so `open()`/`os.path.exists()` fail for every
+  > `defaults/*.csv`. `wrangle.load_maps()` was building *empty* maps rather than failing, so a
+  > wrangle run would have been silently wrong; it now raises `GuardrailError`. Phase 6 gives
+  > `DEFAULTS` a resource seam (`get_resources()`, or extract-once to a version-keyed cache dir).
 - **Scale**: 7,949 books today; every listed operation is full-library-capable (backlog
   7,799); classify runs are chunked/resumable; the edit log is per-op lines (bounded record
   size at any scale).
@@ -431,6 +489,12 @@ references them rather than redefining its own:
   interpretation, config/column map — is **namespaced by library uuid** (the `user_dir()`
   tree gains a per-library level; the CLI keeps working for the single-library case by
   resolving the same way). Keys and UI preferences are global.
+  > **Phase-4 note (2026-08-10, #57): this is unbuilt, and the first read-only feature already
+  > tripped over it.** Inspect against a 6-book throwaway library reported book 1 as "applied from
+  > `classify_proposal_applied_20260726-…csv`" — an archive belonging to the *real* library,
+  > because `user_dir()` is global and book ids collide across libraries. Nothing was written and
+  > nothing is at risk today, but every artifact-reading feature from phase 6 on is wrong across
+  > two libraries until the namespacing lands. It is now a scheduling question, not a hypothesis.
 
 ## Dependencies
 
