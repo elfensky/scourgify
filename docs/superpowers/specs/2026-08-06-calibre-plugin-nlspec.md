@@ -267,6 +267,35 @@ references them rather than redefining its own:
   > worker thread — disassembled, 9.11); job functions take `abort`/`log`/`notifications`;
   > `genesis()` wires and nothing else; `initialization_complete()` does nothing unless the test
   > hook is armed; `run_writer`/`subprocess`/`multiprocessing`/`ThreadPoolExecutor` appear nowhere.
+  >
+  > **Phase-5 amendment (2026-08-11, #58) — step 6's taxonomy exists.** It did not: `ask_retry`
+  > classified exactly two things (`RuntimeError` = content block, everything else = retry) and
+  > recorded `f"{type(e).__name__}: {e}"`, which cannot tell a 401 from a rate limit. Now
+  > `engines.classify_error(exc)` returns one of **refusal / auth / permission / quota / timeout /
+  > parse / error**, read off `HTTPError.code` where those actually live.
+  >
+  > **Where it is recorded, and why not a new column.** `artifacts.FAIL_COLS` is a CLI-shared CSV
+  > format, so adding a `class` column is a cross-surface change — the same call phase 3 made
+  > *against* adding an engine column to the proposal. Instead `ask_retry` **prefixes the reason
+  > with its class** (`"auth: HTTPError: HTTP Error 401: Unauthorized"`), and
+  > `engines.failure_class(reason)` reads it back. One column, one writer, one reader, no migration;
+  > a row written before this taxonomy has no prefix and reads as `error` — unknown, deliberately
+  > not `refusal`, so an old row never gets offered the cross-engine retry it was never classified
+  > for. B1's "Retry on <engine>" keys off this, and only `refusal` earns it.
+  >
+  > **A behaviour change worth stating**: only `quota`/`timeout`/`parse`/`error` back off now. A bad
+  > key used to cost ~14 s of retries arriving at the same 401.
+  >
+  > **And the redaction that had to come with it**: an `HTTPError` message can echo request context,
+  > and a reason lands in a CSV, a job log and an error dialog. `engines.redact` strips the key at
+  > the one place every reason is built, not at each of those three (B5 postcondition).
+  >
+  > **One more source-grep invariant** (`tests/test_plugin_source.py`, MODULES now includes
+  > `config.py`): **exactly one module builds a `ThreadedJob`** — `action._run` — and every other
+  > plugin module dispatches through it with an optional `done=` callback that `_run` wraps. That
+  > turns "every callback is Dispatcher-wrapped" into a property of one function rather than a rule
+  > each new dialog has to remember. All four new source guards were forced to fail before being
+  > trusted.
 - **Edge cases**:
   - Worker exception → `job.failed` path shows the error dialog; `SystemExit` cannot occur
     (B2.4) — `ThreadedJob` only catches `Exception`, so any surviving `SystemExit` would be
@@ -328,6 +357,48 @@ references them rather than redefining its own:
 - **Edge cases**:
   - Key present in both env and JSON → env wins, the row says so.
   - No keys at all → Apple remains usable; cloud rows grey out rather than vanish.
+  > **Phase-5 amendment (2026-08-11, #58) — settings ship.** `plugin/config.py`, hung off
+  > `InterfaceActionBase` (`is_customizable`/`config_widget`/`save_settings`), widget imported
+  > INSIDE `config_widget()` so Qt stays out of every command-line use of the plugin. Five things
+  > this behavior did not settle, decided and recorded rather than quietly satisfied:
+  >
+  > 1. **A constructor key seam had to exist before any of this meant anything.** Step 2 says keys
+  >    are "passed into `engines` explicitly", and that was impossible: `_Chat.__init__` did
+  >    `os.environ.get(self.ENV)` and `Gemini.__init__` read its two names the same way, so the only
+  >    way a stored key could reach an engine was to mutate `os.environ` — which step 2 forbids.
+  >    Every engine constructor now takes **`env=None`**, an injected mapping, defaulting to
+  >    `os.environ` so the CLI is unchanged. It is deliberately the same shape as
+  >    `usable_engines(env=…)`, which already took one, so ONE mapping feeds availability and
+  >    construction and they cannot disagree. `engines.resolve_keys(stored, env=None) -> {ENV_VAR: key}`
+  >    is that mapping's single producer and the pure function step 2 asks for; `key_source()` is what
+  >    lets a row say *which* one is winning instead of silently ignoring what was typed. The four
+  >    existing construction sites (`classify.py` ×2, `promote.py` ×2) are untouched — threading a
+  >    resolved mapping through a classify run is phase 6, where the GUI first bills one.
+  > 2. **The masked field needed `unmask`.** The row shows the mask (B5.3), which makes the obvious
+  >    save-what-is-typed store twelve bullets as the API key the first time someone clicks OK
+  >    without retyping — an auth failure surfacing much later, far from its cause. `engines.unmask`
+  >    is the rule: mask untouched → keep, empty → clear, anything else → the new key.
+  > 3. **"Verified" is a live fact, not stored state.** The interaction spec's rows carry a
+  >    persistent `✓ verified`; a stored flag is a lie the moment a key is revoked. A configured but
+  >    unprobed row reads **"saved — not verified"**, and `✓ verified` appears only after a probe
+  >    answers in this session. Deviation from the mockup, on purpose.
+  > 4. **No price in the settings dialog** — matching the mockup, and now also *required*: see the
+  >    Constraints amendment below, `est_cost` silently under-quotes inside the plugin zip.
+  > 5. **Apple is refused by the probe, not skipped quietly.** Constructing it spawns a subprocess
+  >    pipe; `usable_engines` already answers the only question there is about it. The button is
+  >    disabled *and* `job_verify` refuses before constructing — the second layer forced in the
+  >    harness, since the first makes it unreachable.
+  >
+  > **Measured in the real GUI** (Calibre 9.11, driven by `plugin/selftest.py`, throwaway library):
+  > all five engines get a row (order derived from `PRICING`: openai, mistral, gemini, claude, then
+  > the keyless apple); a key saved through the widget lands in `JSONConfig` with the file at
+  > **0600**; `resolve_keys` gives the env key when both exist and the stored one when it doesn't;
+  > `usable_engines` reflects the stored key; a reopened widget shows `sk-fake-••••••••••••0000`;
+  > the probe runs **as a job** (0.4–2.3 s, longest GUI-thread heartbeat gap 16.7–17.8 ms, i.e. never
+  > blocked); a fake key classifies as `auth` and renders "✗ rejected — wrong or revoked key"; and
+  > the key appears nowhere in the transcript. One **real** OpenAI probe (owner-authorized, one
+  > request) returned `✓ verified` — so both the success and the auth-failure paths are proven
+  > against a live endpoint, not just the failure one.
 
 ### B6: Dashboard — the wizard given a surface
 - **Trigger**: toolbar click with nothing selected, or explicit "Open dashboard".
@@ -491,6 +562,18 @@ references them rather than redefining its own:
   > `defaults/*.csv`. `wrangle.load_maps()` was building *empty* maps rather than failing, so a
   > wrangle run would have been silently wrong; it now raises `GuardrailError`. Phase 6 gives
   > `DEFAULTS` a resource seam (`get_resources()`, or extract-once to a version-keyed cache dir).
+  >
+  > **Phase-5 amendment (2026-08-11, #58) — the same gap has a second, worse mouth.**
+  > `classify.load_vocab()` reads two bundled files through `_read_vocab_file`, which returns `[]`
+  > for a missing path by design. Inside the zip that is *every* path, so `load_vocab()` returns an
+  > empty vocabulary silently — and `classify.est_cost` prices a run from
+  > `len(", ".join(load_vocab()))`, so **inside the plugin it under-quotes**. B4.3 makes the
+  > displayed number the only gate on irreversible spend, and under-quoting is the dangerous
+  > direction (the same failure the flat-80 `out_tokens` estimate made, which is why
+  > `TRAITS['out_tokens']` exists). Phase 5 is unaffected — its settings dialog shows no price,
+  > matching the interaction spec — but **phase 6 must land the `DEFAULTS` resource seam BEFORE the
+  > engine picker shows a cost**, not merely before a wrangle run. Found by reading, not by a
+  > failure.
 - **Scale**: 7,949 books today; every listed operation is full-library-capable (backlog
   7,799); classify runs are chunked/resumable; the edit log is per-op lines (bounded record
   size at any scale).
@@ -504,6 +587,12 @@ references them rather than redefining its own:
   > because `user_dir()` is global and book ids collide across libraries. Nothing was written and
   > nothing is at risk today, but every artifact-reading feature from phase 6 on is wrong across
   > two libraries until the namespacing lands. It is now a scheduling question, not a hypothesis.
+  >
+  > **Answered 2026-08-11 (owner, at phase 5's start): folded into phase 6**, alongside the writer
+  > seam and the `DEFAULTS` resource seam — the first phase whose correctness depends on it. No new
+  > issue, no reordering. Phase 5 is unaffected by design (keys and UI preferences are global), and
+  > the bleed was observed again unchanged in phase 5's throwaway-library run: book 1 still reports
+  > "applied from `classify_proposal_applied_20260726-…csv`".
 
 ## Dependencies
 

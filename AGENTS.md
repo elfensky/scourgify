@@ -98,7 +98,7 @@ reads that same central location. `common.HERE` is the package dir (use it only 
 files); anything user-writable keys off `common.user_dir()` (the single owner — never re-derive it or
 reach for `os.getcwd()`). `$SCOURGIFY_HOME` also lets tests point the whole tree at a temp dir.
 
-**The Calibre plugin** lives in **`plugin/`** (roadmap #62; phase 4 = the read-only skeleton) and is built
+**The Calibre plugin** lives in **`plugin/`** (roadmap #62; phase 4 = the read-only skeleton, phase 5 = settings) and is built
 by **`uv run build_plugin.py`** → `dist/scourgify-plugin-<version>.zip`, whose version is read from
 `pyproject.toml` — one source tree, one version for wheel and zip. Layout: the empty
 `plugin-import-name-scourgify.txt` **at the zip root** (without it a multi-file plugin can't import its own
@@ -115,10 +115,17 @@ mutated). **Nothing runs at plugin startup**, every core call — reads included
 `ThreadedJob`, and every job callback is `Dispatcher`-wrapped. That is enforced, not intended:
 `tests/test_plugin_source.py` reads the plugin's source (the mechanism `tests/test_cli.py` uses on
 `wizard.py`) and fails on `run_writer(`/`subprocess`/`multiprocessing`/`ThreadPoolExecutor`, on any core
-import at module level (they belong inside `job_*` functions), on an unwrapped callback, and on work in
-`genesis()`/`initialization_complete()`. `SCOURGIFY_SMOKE=1 calibre --with-library <throwaway>` runs
-`plugin/selftest.py`, which drives the menu at 0/1/N and measures the GUI thread's longest stall — a test
-hook, not a user feature.
+import at module level (they belong inside `job_*` functions), on an unwrapped callback, on work in
+`genesis()`/`initialization_complete()`, and on a second `ThreadedJob` call site — there is exactly ONE
+(`action._run`, which wraps an optional `done=` callback), so every other plugin module dispatches through
+it and cannot forget the `Dispatcher`. **Settings** (`plugin/config.py`, hung off `InterfaceActionBase`
+via `is_customizable`/`config_widget`/`save_settings`, the widget imported INSIDE `config_widget()` so Qt
+stays out of command-line use) keep API keys in `JSONConfig('plugins/scourgify')`, chmod 0600, with a
+plaintext banner. **For KEYS the environment WINS over the stored value** (`engines.resolve_keys`) — the
+opposite of the library path's rule, deliberately: a key is user config, the library path is a fact about
+the host process. Do not harmonize them. `SCOURGIFY_SMOKE=1 calibre --with-library <throwaway>` runs
+`plugin/selftest.py`, which drives the menu at 0/1/N, saves and probes a key, and measures the GUI
+thread's longest stall — a test hook, not a user feature.
 
 **Everything runs under normal CPython** — the installed `scourgify` command, `uv run scourgify`, or plain
 `python3` with rich installed. The core operating rule is about *reads vs writes*, not which interpreter:
@@ -294,7 +301,17 @@ into the numbered Series field, and aggressive franchise unification (e.g. all F
 The LLM engine adapters + retry + availability live in **`engines.py`** (one seam: `_post_json` is the
 HTTP transport tests monkeypatch; `ENGINES`/`ENGINE_ENV`/`PRICING`/`TRAITS`/`usable_engines(env=…)`/
 `ask_retry` are the single source the tools and the wizard derive from — traits (`is_free`/
-`max_workers`/`trait`) replace name string-tests, so adding an engine is one row). The cross-tool CSV formats (proposal /
+`max_workers`/`trait`) replace name string-tests, so adding an engine is one row, and a capability claim a
+UI wants to make becomes a trait first: `role`/`limits`/`refuses` are what the plugin's settings dialog and
+engine picker render). **Keys reach an engine by injection, never the environment**: every constructor takes
+`env=<mapping>` (defaulting to `os.environ`, so the CLI is unchanged) and `resolve_keys(stored, env=)`
+produces that mapping with **env winning over stored**; `key_source()` says which won, `mask`/`unmask` are
+the settings field's display and edit rules. Engine failures are classified — `classify_error(exc)` →
+refusal/auth/permission/quota/timeout/parse/error off `HTTPError.code` — and `ask_retry` **prefixes the
+recorded reason with that class** (read it back with `failure_class()`, never by hand-splitting) so the one
+shared `reason` column carries the taxonomy without a new column in the CLI-shared failures CSV; only
+`refusal` earns a cross-engine retry, and only quota/timeout/parse/error back off. `redact()` strips keys
+where every reason is built — no key may reach a log, artifact, or dialog. The cross-tool CSV formats (proposal /
 ranked / review / ledger / failures, the `"; "` delimiter, timestamped archiving) live in
 **`artifacts.py`** — never hand-read/write those files elsewhere. The user's overrides dir (config
 `[overrides] dir`) and its file formats (headers, delimiter sniffing, append-if-absent, the vocab

@@ -17,7 +17,10 @@ def test_ask_retry_success_and_block():
     class Blocked:
         def ask(self, p): raise RuntimeError("blocked:PROHIBITED")
     out, err = ask_retry(Blocked(), "x")
-    assert out == "" and err.startswith("blocked:")
+    # the reason now carries its normalized class as a prefix (engines.failure_class reads it back);
+    # only a refusal earns the GUI's "Retry on <other engine>", so the class has to survive the CSV
+    from scourgify import engines
+    assert out == "" and engines.failure_class(err) == engines.REFUSAL and "blocked:" in err
 
     class Flaky:                                 # fails once, then succeeds — but tries=1 gives up immediately
         def __init__(self): self.n = 0

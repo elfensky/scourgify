@@ -298,9 +298,15 @@ class ScourgifyAction(InterfaceAction):
         self._run('scourgify: db-from-worker smoke', job_db_smoke,
                   (lib, uuid, self.gui.current_db.new_api, self.current_uuid))
 
-    def _run(self, description, func, args):
+    def _run(self, description, func, args, done=None):
+        """`done` lets a caller own its own completion (the settings dialog shows a probe result
+        inline instead of in a dialog). It is wrapped here, so a caller cannot forget to — an
+        unwrapped callback runs on the WORKER thread and touches Qt from it.
+
+        `description` shows in Calibre's job list: never put a key in it."""
         t0 = time.monotonic()
-        job = ThreadedJob('scourgify', description, func, args, {}, Dispatcher(self._done))
+        job = ThreadedJob('scourgify', description, func, args, {},
+                          Dispatcher(done or self._done))
         self.gui.job_manager.run_threaded_job(job)
         prints('scourgify: dispatched in %.1f ms' % ((time.monotonic() - t0) * 1000))
 
