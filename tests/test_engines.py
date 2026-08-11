@@ -64,7 +64,7 @@ def test_gemini_blocked_content_is_a_no_retry_runtimeerror():
         class G:
             def ask(self, p): raise RuntimeError("blocked:PROHIBITED_CONTENT")
         out, err = engines.ask_retry(G(), "p")
-        assert out == "" and err.startswith("blocked:")
+        assert out == "" and engines.failure_class(err) == engines.REFUSAL and "blocked:" in err
         # empty candidates -> nocontent
         out, _ = _with_transport({"candidates": [{"content": {"parts": [{"text": "ok"}]}}]},
                                  lambda: engines.Gemini("", 60).ask("p"))
@@ -104,6 +104,126 @@ def test_traits_free_workers_judge():
     assert engines.trait("claude", "judge") is True
     for e in engines.ENGINES:                             # every engine has both hint halves
         assert engines.trait(e, "hint") and engines.trait(e, "unusable")
+
+
+def test_every_engine_states_a_role_and_how_it_will_let_you_down():
+    """The settings dialog and the engine picker DERIVE their rows from TRAITS (NLSpec B4.2), so a
+    newly registered engine with no `role`/`limits` would render a blank row that reads as "nothing
+    to say about this one" rather than "nobody wrote it down"."""
+    for e in engines.ENGINES:
+        assert engines.trait(e, "role"), f"{e} has no role line"
+        assert len(engines.trait(e, "limits")) > 30, f"{e} does not say how it will let you down"
+    assert engines.trait("gemini", "refuses") is True     # the one the menu reads as behaviour
+    assert engines.trait("openai", "refuses") is False
+
+
+def test_env_beats_stored_keys_and_the_row_can_say_so():
+    """NLSpec B5.2 / B5 edge case. This is the OPPOSITE of the library path's rule
+    (common.set_library beats $CALIBRE_LIBRARY): a key is user config, so an exported one must keep
+    a scripted run working; the library path is a fact about the host process. Do not harmonize."""
+    stored = {"openai": "sk-stored-openai-key", "claude": "sk-stored-claude-key"}
+    keys = engines.resolve_keys(stored, env={"OPENAI_API_KEY": "sk-env-openai-key"})
+    assert keys["OPENAI_API_KEY"] == "sk-env-openai-key"          # env wins where both exist
+    assert keys["ANTHROPIC_API_KEY"] == "sk-stored-claude-key"    # stored fills in where env is silent
+    assert "MISTRAL_API_KEY" not in keys                          # neither -> absent, not empty
+    assert engines.key_source("openai", stored, env={"OPENAI_API_KEY": "x"}) == "env"
+    assert engines.key_source("claude", stored, env={}) == "stored"
+    assert engines.key_source("mistral", stored, env={}) == ""
+    # gemini's second env name resolves onto the name every constructor reads first
+    assert engines.resolve_keys({}, env={"GOOGLE_API_KEY": "g-t"})["GEMINI_API_KEY"] == "g-t"
+
+
+def test_stored_keys_make_an_engine_usable_exactly_as_env_keys_do():
+    """#58's first acceptance line. usable_engines already took an injected mapping; resolve_keys
+    is what produces that mapping from a settings store, so the GUI and a shell agree."""
+    assert "claude" not in engines.usable_engines(env=engines.resolve_keys({}, env={}))
+    keys = engines.resolve_keys({"claude": "sk-stored"}, env={})
+    assert "claude" in engines.usable_engines(env=keys)
+
+
+def test_a_key_reaches_an_engine_without_touching_the_environment():
+    """The seam that makes the settings dialog more than decoration: before this, every constructor
+    read os.environ directly, so "keys from plugin JSON" was impossible without mutating the
+    environment — which two concurrent jobs and a CLI alongside would then observe (B5.2)."""
+    saved = _saved_env()
+    try:
+        for k in _KEYS: os.environ.pop(k, None)
+        keys = engines.resolve_keys({"openai": "sk-from-the-settings-dialog"}, env={})
+        out, calls = _with_transport({"choices": [{"message": {"content": "hi"}}]},
+                                     lambda: engines.OpenAI("", 60, env=keys).ask("p"))
+        assert out == "hi" and calls[0][1]["Authorization"] == "Bearer sk-from-the-settings-dialog"
+        assert os.environ.get("OPENAI_API_KEY") is None, "the environment must be left alone"
+        assert engines.Gemini("", 60, env={"GOOGLE_API_KEY": "g-t"}).key == "g-t"
+        assert engines.ENGINES["mistral"]("", 60, env={"MISTRAL_API_KEY": "m"}).key == "m"
+    finally:
+        _restore_env(saved)
+
+
+def test_failures_are_classified_so_the_menu_knows_which_retry_to_offer():
+    """NLSpec B3.6. B1 offers "Retry on <other engine>" ONLY for a refusal — every other class is
+    the same engine's problem, and retrying a 401 elsewhere is the same 401 plus a wasted click."""
+    import urllib.error
+    def http(code):
+        return urllib.error.HTTPError("https://api.example/v1", code, "nope", {}, None)
+    assert engines.classify_error(http(401)) == engines.AUTH
+    assert engines.classify_error(http(403)) == engines.PERMISSION
+    assert engines.classify_error(http(429)) == engines.QUOTA
+    assert engines.classify_error(http(500)) == engines.ERROR
+    assert engines.classify_error(TimeoutError("timed out")) == engines.TIMEOUT
+    assert engines.classify_error(urllib.error.URLError(TimeoutError("timed out"))) == engines.TIMEOUT
+    assert engines.classify_error(RuntimeError("blocked:PROHIBITED_CONTENT")) == engines.REFUSAL
+    assert engines.classify_error(KeyError("choices")) == engines.PARSE       # _extract on a shape it didn't expect
+    # ... and it survives the round trip through the one shared `reason` column
+    class Boom:
+        def __init__(self, exc): self.exc = exc
+        def ask(self, p): raise self.exc
+    for exc, want in ((http(401), engines.AUTH), (http(403), engines.PERMISSION),
+                      (RuntimeError("blocked:x"), engines.REFUSAL), (KeyError("choices"), engines.PARSE)):
+        _, reason = engines.ask_retry(Boom(exc), "p", tries=1)
+        assert engines.failure_class(reason) == want, reason
+    assert engines.failure_class("HTTPError: something old") == engines.ERROR   # pre-taxonomy row
+    assert engines.failure_class("") == engines.ERROR
+
+
+def test_a_bad_key_fails_fast_instead_of_backing_off_four_times():
+    """A behaviour change worth stating: ask_retry used to retry everything but a RuntimeError, so a
+    401 cost ~14 s of backoff to arrive at the same answer. Only RETRYABLE classes back off now."""
+    import urllib.error
+    tries = []
+    class Boom:
+        def ask(self, p):
+            tries.append(1)
+            raise urllib.error.HTTPError("https://api.example/v1", 401, "nope", {}, None)
+    engines.ask_retry(Boom(), "p", tries=4)
+    assert len(tries) == 1, "a 401 must not be retried"
+    assert engines.REFUSAL not in engines.RETRYABLE and engines.AUTH not in engines.RETRYABLE
+    assert engines.QUOTA in engines.RETRYABLE and engines.TIMEOUT in engines.RETRYABLE
+
+
+def test_no_key_ever_reaches_a_recorded_failure_reason():
+    """NLSpec B5 postcondition. A failure reason lands in a CSV, a job log and an error dialog, and
+    an HTTPError's message can echo request context — so the redaction is at the one place every
+    reason is built, not at each of those three."""
+    secret = "sk-proj-supersecret-key-value-1234"
+    class Leaky:
+        key = secret
+        def ask(self, p): raise ValueError(f"request failed with Authorization: Bearer {secret}")
+    _, reason = engines.ask_retry(Leaky(), "p", tries=1)
+    assert secret not in reason and "<key>" in reason
+    assert engines.redact("nothing to hide", None, "") == "nothing to hide"   # no secret, no damage
+    assert engines.mask(secret) == "sk-proj-••••••••••••1234" and secret not in engines.mask(secret)
+    assert engines.mask("") == ""
+
+
+def test_an_untouched_settings_field_keeps_its_key_and_an_emptied_one_clears_it():
+    """The settings field shows the MASK, so the obvious save-what-is-typed would store twelve
+    bullets as the API key the first time someone clicks OK without retyping — a silent break that
+    only shows up as an auth failure much later."""
+    stored = "sk-proj-supersecret-key-value-1234"
+    assert engines.unmask(engines.mask(stored), stored) == stored     # untouched -> unchanged
+    assert engines.unmask("", stored) == ""                           # cleared -> cleared
+    assert engines.unmask("  sk-new-key  ", stored) == "sk-new-key"   # retyped -> the new key
+    assert engines.unmask("", "") == ""
 
 
 def test_est_cost_prices_a_reasoning_engine_by_its_thinking_tokens():

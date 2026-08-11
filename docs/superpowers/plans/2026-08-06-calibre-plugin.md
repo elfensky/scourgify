@@ -429,10 +429,75 @@ function per B6.1. That is the phase-7 stub, not a new mode.
 was taken and no human clicked the button. What replaces it is the driven transcript above, from
 inside the real GUI process, with the menu's real labels and enabled/disabled state printed.
 
-### Phase 5 — Settings and engines
+### Phase 5 — Settings and engines — **DONE** (#58)
 
 Key storage in plugin JSON with the plaintext banner; env vars win when set. Engine picker deriving
 from `engines.TRAITS`/`PRICING`, showing per-engine limitations and a live cost for the selection.
+
+**Two blockers were settled before any dialog code, neither of them in #58's text:**
+
+- **The engines read `os.environ` in their constructors, so "pass keys in explicitly" was
+  impossible.** B5.2 forbids mutating `os.environ`, which left exactly one honest option: every
+  engine constructor now takes **`env=None`**, an injected mapping defaulting to `os.environ` (the
+  CLI is unchanged). It is deliberately the same shape as `usable_engines(env=…)`, which already
+  took one — so **one mapping feeds availability and construction** and they cannot disagree.
+  `engines.resolve_keys(stored, env=None) -> {ENV_VAR: key}` produces it, **env winning over
+  stored**, which is the *opposite* of the library path's rule and stays that way on purpose.
+  The four existing construction sites are untouched; threading a resolved mapping through a
+  classify run is phase 6, where the GUI first bills one.
+- **The auth taxonomy B3.6/B5.4 needs did not exist.** `ask_retry` knew two things: `RuntimeError`
+  = content block, everything else = retry. `engines.classify_error` now returns **refusal / auth /
+  permission / quota / timeout / parse / error** off `HTTPError.code`. It is recorded by
+  **prefixing the existing `reason` column** (`"auth: HTTPError: HTTP Error 401: Unauthorized"`)
+  and read back with `failure_class()` — *not* by adding a column to the CLI-shared failures CSV,
+  the same call phase 3 made against an engine column on the proposal. Old unprefixed rows read as
+  `error`, deliberately not `refusal`, so they never get offered a cross-engine retry.
+  Side effect worth knowing: **a bad key now fails fast** instead of spending ~14 s on backoff.
+
+**What actually landed:**
+
+- **`plugin/config.py`** — the settings dialog, hung off `InterfaceActionBase`
+  (`is_customizable`/`config_widget`/`save_settings`), widget imported **inside** `config_widget()`
+  so Qt stays out of every command-line use of the plugin. Banner, five derived rows, masked keys,
+  a Verify button per cloud engine. `JSONConfig('plugins/scourgify')`, **chmod 0600 on save**.
+- **`engines.mask` / `engines.unmask`** — the row shows the mask, so the obvious
+  save-what-is-typed would store twelve bullets as the API key the first time someone clicked OK
+  without retyping. `unmask` is the rule: mask untouched → keep, empty → clear, else → new key.
+- **`engines.redact`**, applied where every failure reason is built rather than at each of the
+  three places one lands (CSV, job log, error dialog).
+- **`TRAITS` grew `role` / `limits` / `refuses`** — the dialog and phase 6's picker derive their
+  prose from there, so a capability claim is a trait row first. A test fails if a new engine ships
+  without them.
+- **`action._run` grew `done=`** and wraps it, so a dialog owning its own completion cannot forget
+  the `Dispatcher`. `tests/test_plugin_source.py` now enforces **exactly one `ThreadedJob` call
+  site** across the plugin, plus `config.py` in MODULES and the lazy-Qt rule on `__init__.py`.
+  All four new guards were forced to fail before being trusted.
+
+**Measured in the real GUI (Calibre 9.11), driven by `plugin/selftest.py` against a throwaway
+library:** rows for all five engines in `PRICING` order (openai, mistral, gemini, claude, apple);
+key saved through the widget → file mode **0600**; env beats stored, stored fills in when env is
+silent, `usable_engines` reflects the stored key; a reopened widget shows
+`sk-fake-••••••••••••0000`; the probe runs **as a job** in 0.4–2.3 s with a longest GUI-thread
+heartbeat gap of **16.7–17.8 ms** (never blocked); a fake key classifies as `auth` and renders
+"✗ rejected — wrong or revoked key"; the key appears nowhere in the transcript. **One real OpenAI
+probe** (owner-authorized, single request) returned `✓ verified`, so the success path is proven
+against a live endpoint too — not just the failure one.
+
+**Three deliberate deviations:**
+
+1. **"Verified" is not persisted.** The mockup's rows carry a standing `✓ verified`; a stored flag
+   is a lie the moment a key is revoked. Configured-but-unprobed reads **"saved — not verified"**.
+2. **No `sk-ant-`-style prefix hint** in the empty-field placeholder. It would be a fifth TRAITS row
+   maintained forever to hint at something the row's own name already says, and it validates
+   nothing.
+3. **No price in the settings dialog** — matching the mockup, and now *required*: see below.
+
+**A finding worth more than the code it came from.** `classify.load_vocab()` reads bundled files
+through `_read_vocab_file`, which returns `[]` for a missing path by design — and inside the zip
+that is every path. So `load_vocab()` is silently empty there, and **`est_cost` under-quotes inside
+the plugin**. Same root as phase 4's `load_maps()` finding, but with a worse mouth: B4.3 makes the
+displayed number the only gate on irreversible spend. Phase 6 must land the `DEFAULTS` resource seam
+**before the engine picker shows a cost**, not merely before a wrangle run.
 
 ### Phase 6 — Actions on a selection
 
@@ -452,6 +517,19 @@ Two things phase 3 fixed the shape of:
   phase-3 `SystemExit` sweep does not touch this. Those functions need an injected writer seam —
   same shape as `Plan.run(ask=…)` — and that is phase 6 work, named here so it isn't discovered
   at the keyboard.
+
+Three more, added by phase 5:
+
+- **Multi-library uuid namespacing lands here** (owner's call, 2026-08-11) — folded in alongside the
+  writer seam rather than getting its own phase. Phase 6 is the first phase whose correctness
+  depends on it; the bleed was observed again unchanged in phase 5's throwaway-library run.
+- **The `DEFAULTS` resource seam must land before the engine picker shows a cost**, not merely
+  before a wrangle run — `est_cost` reads `load_vocab()`, which is silently empty inside the zip.
+- **Thread the resolved key mapping through classify/promote.** The constructor seam exists
+  (`ENGINES[name](model, timeout, env=…)`) and the plugin's probe uses it, but the four call sites in
+  `classify.py`/`promote.py` still default to `os.environ`. Phase 6's classify verb passes
+  `engines.resolve_keys(config.stored_keys())`, which is also what makes keys entered in the GUI
+  reach a run at all.
 
 ### Phase 7 — The dashboard
 

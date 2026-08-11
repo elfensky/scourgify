@@ -36,3 +36,17 @@ class ScourgifyPlugin(InterfaceActionBase):
         with self:                           # sys.path gains the zip for the duration
             import scourgify                 # noqa: F401 — caches the core under its plain name
         return InterfaceActionBase.load_actual_plugin(self, gui)
+
+    # ---- settings (NLSpec B5). These hang off the BASE, not the action — Calibre asks the plugin
+    # object, not the toolbar button. The widget is imported INSIDE config_widget() on purpose:
+    # at module level it would drag Qt into every command-line use of this plugin, which is the
+    # same reason `actual_plugin` above is a string.
+    def is_customizable(self):
+        return True
+
+    def config_widget(self):
+        from calibre_plugins.scourgify.config import ConfigWidget
+        return ConfigWidget(self.actual_plugin_)
+
+    def save_settings(self, config_widget):
+        config_widget.save_settings()

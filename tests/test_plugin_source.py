@@ -18,7 +18,8 @@ import os
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLUGIN = os.path.join(ROOT, "plugin")
-MODULES = ["__init__.py", "action.py", "selftest.py"]
+MODULES = ["__init__.py", "action.py", "config.py", "selftest.py"]
+QT_MODULES = ["action.py", "config.py"]        # the ones a user's click reaches
 
 BANNED = ["run_writer(", "subprocess", "multiprocessing", "ThreadPoolExecutor", "os.system"]
 
@@ -85,8 +86,15 @@ def test_no_core_import_can_run_on_the_gui_thread():
     budget, and no core read qualifies. __init__.py is the one exception: its `import scourgify`
     is what puts the bundled core on sys.path, and it imports the package only, never a module
     that reads."""
+    for name in QT_MODULES:
+        for module, func in _core_imports(_tree(name)):
+            assert func is not None, \
+                "%s imports %s at module level — that runs on the GUI thread" % (name, module)
+
+    # action.py is stricter: nothing there needs the core except a job, so an import anywhere else
+    # is a library read one refactor away from the GUI thread. config.py legitimately reads
+    # TRAITS/PRICING to build its rows, which is a dict lookup, not a library read.
     for module, func in _core_imports(_tree("action.py")):
-        assert func is not None, "action.py imports %s at module level — that runs on the GUI thread" % module
         assert func.startswith("job_") or func.startswith("_"), \
             "%s imported in %s(): core imports belong in job_* functions" % (module, func)
 
@@ -125,13 +133,41 @@ def test_every_job_callback_is_dispatcher_wrapped():
 def test_job_functions_accept_abort_log_and_notifications():
     """ThreadedJob injects these three as kwargs. A job function missing them raises TypeError the
     first time a user clicks — and a job that ignores `abort` cannot be cancelled (B3.4)."""
-    jobs = [n for n in ast.walk(_tree("action.py"))
+    jobs = [n for name in MODULES for n in ast.walk(_tree(name))
             if isinstance(n, ast.FunctionDef) and n.name.startswith("job_")]
     assert jobs, "no job_* functions found"
     for fn in jobs:
         names = [a.arg for a in fn.args.args]
         for need in ("abort", "log", "notifications"):
             assert need in names, "%s() must accept %s" % (fn.name, need)
+
+
+def test_only_one_module_dispatches_jobs():
+    """There is exactly ONE ThreadedJob call site, in action.py's `_run`, and every other module
+    goes through it. That is what makes "every callback is Dispatcher-wrapped" a property of one
+    function instead of a rule each new dialog has to remember — the settings dialog passes
+    `done=` and gets the wrapping for free."""
+    for name in MODULES:
+        if name == "action.py":
+            continue
+        assert "ThreadedJob" not in _code(name), \
+            "%s must dispatch through action._run, not build its own ThreadedJob" % name
+
+
+def test_the_settings_dialog_hangs_off_the_plugin_base_and_imports_qt_lazily():
+    """Calibre asks the InterfaceActionBase for its config widget, not the toolbar action. And the
+    widget import must live INSIDE config_widget(): at module level it drags Qt into every
+    command-line use of the plugin, which is the same reason `actual_plugin` is a string."""
+    tree = _tree("__init__.py")
+    fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    for need in ("is_customizable", "config_widget", "save_settings"):
+        assert need in fns, "__init__.py must define %s() for Preferences → Plugins" % need
+    assert "config" in ast.unparse(fns["config_widget"])
+    top = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+    for node in top:
+        name = getattr(node, "module", "") or node.names[0].name
+        assert not name.startswith("qt.") and "config" not in name, \
+            "__init__.py imports %s at module level — that drags Qt into calibredb" % name
 
 
 def test_the_import_name_marker_exists_and_is_empty():

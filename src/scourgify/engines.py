@@ -24,12 +24,32 @@ PRICING = {"apple": (0.0, 0.0), "claude": (1.00, 5.00), "openai": (0.15, 0.60), 
 # real library books (2026-07-30, 5-book sample), gemini-2.5-flash returns ~50 answer tokens on top of
 # ~1061 THINKING tokens. Assuming the visible 80 made the wizard quote gemini at a fifth of its real
 # price right before the user spends money. Re-measure when a default model changes.
+# `role` (a settings row's sub-label) and `limits` (the picker's "how this engine will let you down"
+# sentence) are TRAITS rather than UI strings on purpose: the plugin's settings dialog and engine
+# picker DERIVE every row from here, so a capability claim a surface wants to make has to become a
+# row first. `refuses` is the one the menu reads as behaviour, not prose — only a refusal-class
+# failure earns B1's "Retry on <other engine>" (see classify_error below).
 _TRAIT_DEFAULTS = {"parallel": True, "judge": True, "hint": "key set ✓", "unusable": "no API key in env",
-                   "out_tokens": 80}
+                   "out_tokens": 80, "refuses": False, "role": "", "limits": ""}
 TRAITS = {"apple": {"parallel": False,               # one subprocess pipe — not thread-safe
                     "judge": False,                  # too weak for promote's adversarial refereeing
-                    "hint": "free, on-device", "unusable": "needs the afm binary or a swift toolchain"},
-          "gemini": {"out_tokens": 1111}}            # ~50 answer + ~1061 thinking (measured)
+                    "hint": "free, on-device", "unusable": "needs the afm binary or a swift toolchain",
+                    "role": "on-device",
+                    "limits": "Single-threaded — a handful of books is fine, thousands take hours. "
+                              "Weakest tagging, and cannot judge new tags."},
+          "openai": {"role": "cheapest usable",
+                     "limits": "Cheapest engine that is actually good here. No content refusals observed."},
+          "mistral": {"role": "cheap, untested here",
+                      "limits": "Never tested against this library — quality unknown."},
+          "claude": {"role": "best judge for new tags",
+                     "limits": "Best judge for new-tag candidates. Several times OpenAI's price for "
+                               "ordinary tagging."},
+          "gemini": {"out_tokens": 1111,             # ~50 answer + ~1061 thinking (measured)
+                     "refuses": True,
+                     "role": "refuses mature content",
+                     "limits": "Refuses mature content — 1 book in 7 on this library, measured. Bills "
+                               "~1,061 hidden reasoning tokens per book, so it costs MORE than claude "
+                               "despite a lower headline price."}}
 
 
 def trait(e: str, k: str):
@@ -55,8 +75,8 @@ def _post_json(url: str, headers: dict, payload: dict, timeout: int) -> dict:
 
 
 class Apple:
-    def __init__(self, model, timeout):
-        exe = f"{HERE}/afm" if os.path.exists(f"{HERE}/afm") else None
+    def __init__(self, model, timeout, env=None):     # env: on-device, no key — accepted so every
+        exe = f"{HERE}/afm" if os.path.exists(f"{HERE}/afm") else None   # engine constructs alike
         cmd = [exe] if exe else ["swift", f"{HERE}/afm.swift"]
         self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
 
@@ -71,8 +91,8 @@ class _Chat:
     NAME = URL = ENV = DEFAULT = ""
     KEY_HINT = ""    # appended to the missing-key message
 
-    def __init__(self, model, timeout):
-        self.key = os.environ.get(self.ENV)
+    def __init__(self, model, timeout, env=None):
+        self.key = (os.environ if env is None else env).get(self.ENV)
         if not self.key: raise GuardrailError(f"{self.NAME} engine needs {self.ENV}{self.KEY_HINT}.")
         self.model = model or self.DEFAULT; self.timeout = timeout
 
@@ -115,8 +135,9 @@ class Gemini:
             ("HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
              "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT")]
 
-    def __init__(self, model, timeout):
-        self.key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    def __init__(self, model, timeout, env=None):
+        env = os.environ if env is None else env
+        self.key = env.get("GEMINI_API_KEY") or env.get("GOOGLE_API_KEY")
         if not self.key: raise GuardrailError("gemini engine needs GEMINI_API_KEY (or GOOGLE_API_KEY).")
         self.model = model or "gemini-2.5-flash"; self.timeout = timeout
 
@@ -140,6 +161,46 @@ ENGINE_ENV = {"claude": ("ANTHROPIC_API_KEY",), "openai": ("OPENAI_API_KEY",),
               "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"), "mistral": ("MISTRAL_API_KEY",)}
 
 
+def resolve_keys(stored: dict | None = None, env=None) -> dict:
+    """{ENV_VAR: key} for every cloud engine that has one — the mapping to hand `usable_engines(env=)`
+    and every engine constructor's `env=`. `stored` is {engine: key} from a settings store.
+
+    **The environment WINS over stored** (NLSpec B5.2), which is the opposite of the library path's
+    rule (`common.set_library` beats $CALIBRE_LIBRARY) and deliberately so: a key is user config, so
+    a scripted or CI run that exports one must keep working unchanged, while the library path is a
+    fact about the host process. Nothing here mutates os.environ, so two jobs and a CLI running
+    alongside can never observe each other's keys."""
+    env = os.environ if env is None else env
+    out = {}
+    for e, names in ENGINE_ENV.items():
+        val = next((env[n] for n in names if env.get(n)), None) or (stored or {}).get(e)
+        if val: out[names[0]] = val          # names[0] is the name every constructor reads first
+    return out
+
+
+def key_source(e: str, stored: dict | None = None, env=None) -> str:
+    """"env" | "stored" | "" — where this engine's key comes from, so a settings row can SAY that
+    the environment is winning instead of silently ignoring what the user typed."""
+    env = os.environ if env is None else env
+    if any(env.get(n) for n in ENGINE_ENV.get(e, ())): return "env"
+    return "stored" if (stored or {}).get(e) else ""
+
+
+def mask(key: str) -> str:
+    """A key rendered for display and NOTHING else: head, bullets, last 4. Short enough to be
+    unusable, long enough to tell two keys apart. No caller may render a raw key (B5 postcondition)."""
+    if not key: return ""
+    return key[:8] + "•" * 12 + key[-4:] if len(key) > 16 else "•" * len(key)
+
+
+def unmask(typed: str, stored: str) -> str:
+    """What a settings field's text MEANS -> the key to store. The mask left untouched keeps the
+    stored key; empty clears it; anything else is a new key. Without this the obvious editable field
+    saves the literal bullets as the key the first time someone clicks OK without retyping."""
+    typed = (typed or "").strip()
+    return stored if typed == mask(stored) else typed
+
+
 def usable_engines(env=None) -> list:
     """Engines runnable here right now: apple needs the afm binary or a swift toolchain, cloud
     engines a key. `env` defaults to os.environ — tests pass a dict instead of juggling it."""
@@ -153,16 +214,66 @@ def usable_engines(env=None) -> list:
     return out
 
 
+# The normalized failure taxonomy (NLSpec B3.6). It exists because the GUI derives a RECOVERY VERB
+# from it: only a refusal is another engine's problem, so only a refusal earns B1's "Retry on
+# <engine>" — a 401 retried on gemini is the same 401 plus a wasted click. `f"{type(e).__name__}: {e}"`
+# could not tell those apart, which is why this is a function and not a string.
+REFUSAL, AUTH, PERMISSION, QUOTA, TIMEOUT, PARSE, ERROR = (
+    "refusal", "auth", "permission", "quota", "timeout", "parse", "error")
+CLASSES = (REFUSAL, AUTH, PERMISSION, QUOTA, TIMEOUT, PARSE, ERROR)
+# Retrying a bad key or a blocked prompt just spends 14 s of backoff arriving at the same answer.
+RETRYABLE = frozenset({QUOTA, TIMEOUT, PARSE, ERROR})
+
+
+def classify_error(exc: BaseException) -> str:
+    """One of CLASSES for an engine exception. urllib raises HTTPError carrying `.code`, which is
+    where auth/permission/quota actually live; a RuntimeError is this module's own convention for a
+    deterministic content block (Gemini's blocked:/nocontent:)."""
+    import json as _json
+    import urllib.error
+    if isinstance(exc, RuntimeError): return REFUSAL
+    if isinstance(exc, urllib.error.HTTPError):
+        return {401: AUTH, 403: PERMISSION, 429: QUOTA,
+                408: TIMEOUT, 504: TIMEOUT}.get(exc.code, ERROR)
+    if isinstance(exc, TimeoutError): return TIMEOUT           # socket.timeout is an alias since 3.10
+    if isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, (TimeoutError, OSError)) \
+            and "timed out" in str(exc.reason): return TIMEOUT
+    if isinstance(exc, (KeyError, IndexError, TypeError, _json.JSONDecodeError)): return PARSE
+    return ERROR
+
+
+def failure_class(reason: str) -> str:
+    """The class back out of a recorded failure reason. Rows written before this taxonomy existed
+    carry no prefix and read as ERROR — unknown, deliberately NOT refusal, so an old row never gets
+    offered a cross-engine retry it was never classified for."""
+    head = (reason or "").split(":", 1)[0].strip()
+    return head if head in CLASSES else ERROR
+
+
+def redact(msg: str, *secrets) -> str:
+    """Strip API keys out of anything about to be recorded. An HTTPError's message can echo request
+    context, and a failure reason ends up in a CSV, a job log and an error dialog — NLSpec B5
+    postcondition: no key ever appears in any of them. The length floor keeps an empty or toy
+    secret from blanking a whole message; real keys are all far longer."""
+    for s in secrets:
+        if s and len(s) >= 8: msg = msg.replace(s, "<key>")
+    return msg
+
+
 def ask_retry(eng, prompt: str, tries: int = 4) -> tuple:
     """Call eng.ask(prompt) with backoff. -> (text, "") on success; ("", reason) on failure.
-    RuntimeError = deterministic content block (no retry); other errors retry with 2**k backoff."""
+
+    The reason is PREFIXED with its normalized class ("auth: HTTPError: HTTP Error 401: …") so the
+    one shared `reason` column carries the taxonomy without a new column in the CLI-shared failures
+    CSV — read it back with `failure_class()`, never by hand-splitting. Only RETRYABLE classes get
+    the 2**k backoff."""
+    key = getattr(eng, "key", None)
     err = ""
     for k in range(tries):
         try: return eng.ask(prompt), ""
-        except RuntimeError as e:
-            return "", str(e)[:ERR_TRUNC]
         except Exception as e:
-            err = f"{type(e).__name__}: {e}"[:ERR_TRUNC]
-            if k == tries - 1: return "", err
+            cls = classify_error(e)
+            err = redact(f"{cls}: {type(e).__name__}: {e}", key)[:ERR_TRUNC]
+            if cls not in RETRYABLE or k == tries - 1: return "", err
             time.sleep(2 ** k)
     return "", err
