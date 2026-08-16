@@ -48,10 +48,9 @@ def snapshot():
         changed = len(select.changed(con)) if "#updated" not in missing and "#wrangled" not in missing else None
         # the largest single piece of outstanding work in most libraries, and it used to be
         # invisible here — the header cheerfully said "up to date" with thousands never attempted.
-        # text_fallback=True because the wizard always samples book text, so the count matches the
-        # scope the classify stage will actually resolve. ~0.03s on a 7,949-book library.
-        try: unclassified = len(select.pick(con, "unclassified", seen=artifacts.classified_ids(),
-                                            text_fallback=True))
+        # Bare pick: seen (classified_ids) and text-fallback live in select now, so this header,
+        # the plugin, and the classify stage measure the same way. ~0.03s on a 7,949-book library.
+        try: unclassified = len(select.pick(con, "unclassified"))
         except Exception: unclassified = 0
         con.close()
     except Exception as e:
@@ -247,8 +246,8 @@ def _engine_options(engs: list, n_todo: int) -> list:
 def stage_classify():
     con = ro_connect(); ch = select.changed(con)
     total = common.book_count(con)
-    # the wizard always samples book text, so the outstanding count must be measured the same way
-    outstanding = len(select.pick(con, "unclassified", seen=artifacts.classified_ids(), text_fallback=True))
+    # bare pick = the wizard's own measure: text-fallback on, seen owned by select
+    outstanding = len(select.pick(con, "unclassified"))
     con.close()
     if not ch:
         ui.say("no new or changed books since the last classify.", "dim")

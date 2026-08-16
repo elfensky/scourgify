@@ -27,8 +27,7 @@ from scourgify.common import (HERE, data_dir, user_dir, ro_connect, custom_colum
                               interactive as _interactive, confirm as _confirm)
 from scourgify.overrides import ov_path, merge_vocab, read_aliases      # overrides/ paths + format readers live there
 from scourgify.artifacts import (prop, rank, fail,                      # artifact paths + formats live in artifacts.py
-                                 read_proposal, write_proposal, write_ranked, archive, archive_rows,
-                                 classified_ids)
+                                 read_proposal, write_proposal, write_ranked, archive, archive_rows)
 # the engine seam lives in engines.py; re-exported here so `classify.ENGINES` / `classify.ask_retry`
 # stay valid for promote, the wizard, and existing tests
 from scourgify.engines import ENGINES, ENGINE_ENV, PRICING, usable_engines, ask_retry, is_free, max_workers as engine_workers
@@ -269,7 +268,8 @@ def gather(a: argparse.Namespace) -> tuple:
     elif a.all:       ids, scope = select.pick(con, "all"), "whole library"
     elif a.incremental: ids, scope = select.pick(con, "incremental"), "new/changed since last classify"
     elif a.unclassified:                          # the advancing scope: never attempted, and sendable
-        ids = select.pick(con, "unclassified", seen=classified_ids(), text_fallback=a.text_fallback)
+        # seen defaults to classified_ids() inside pick; text_fallback is this run's actual flag
+        ids = select.pick(con, "unclassified", text_fallback=a.text_fallback)
         scope = f"never classified ({len(ids)} outstanding)"
     elif a.last:      ids, scope = select.pick(con, "last", n=a.last), f"last {a.last} added"
     elif a.since:     ids, scope = select.pick(con, "since", since=a.since), f"added/updated since {a.since}"

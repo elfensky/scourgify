@@ -169,6 +169,30 @@ def test_unclassified_batches_are_disjoint_and_the_set_shrinks():
     assert select.pick(con, "unclassified", seen=seen) == []        # the set EMPTIES
 
 
+def test_unclassified_defaults_own_the_invariant():
+    """Bare pick("unclassified") is the CORRECT call: seen defaults to artifacts.classified_ids()
+    and text_fallback to True inside select, so every counter (wizard header, plugin popup,
+    smoke_calibre) shows the same number without composing the invariant by hand — the plugin
+    once diverged by forgetting text_fallback, and smoke_calibre by forgetting seen."""
+    from scourgify import artifacts
+    old = os.environ.get("SCOURGIFY_HOME")
+    os.environ["SCOURGIFY_HOME"] = tempfile.mkdtemp()
+    try:
+        os.makedirs(common.data_dir(), exist_ok=True)
+        con = _ucon()
+        con.execute("INSERT INTO data VALUES(?,?,?)", (4, "EPUB", "book4"))
+        con.commit()
+        # no artifacts yet: every sendable book is backlog — including 4, thin-blurbed
+        # but sampleable (text_fallback defaults ON, matching a wizard-driven run)
+        assert select.pick(con, "unclassified") == [4, 3, 2, 1]
+        # a pending proposal row counts as attempted (classified_ids), read by DEFAULT
+        artifacts.write_proposal([{"book_id": 2, "title": "t", "added_tags": [], "proposed_new": []}])
+        assert select.pick(con, "unclassified") == [4, 3, 1]
+    finally:
+        os.environ.pop("SCOURGIFY_HOME", None)
+        if old is not None: os.environ["SCOURGIFY_HOME"] = old
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
