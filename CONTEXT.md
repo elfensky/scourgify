@@ -58,3 +58,8 @@ concept.
   rich twin for wizard surfaces.
 - **Stamp** (`#wrangled`) — the per-book datetime marker meaning "classify processed this book";
   state lives in the library, so selection (`select.py`) needs no external file.
+- **Backlog** — the books classify has never *attempted* and could actually *send*: everything
+  minus the attempted (classified_ids: applied archives + pending proposal + failure log) minus
+  the unsendable (thin text with no file to sample). Owned by `select.pick("unclassified")`,
+  defaults included — every surface asks bare, so no two counters can disagree.
+  _Avoid_: outstanding, unclassified count, never-classified (as the number's name).

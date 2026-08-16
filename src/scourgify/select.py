@@ -113,12 +113,12 @@ def sendable(con: sqlite3.Connection, text_fallback: bool = False) -> set:
 
 def pick(con: sqlite3.Connection, mode: str = "incremental", n: int = 0,
          since: str = "", min_tags: int = 2, ids: list[int] | None = None,
-         seen: set | None = None, text_fallback: bool = False) -> list[int]:
+         seen: set | None = None, text_fallback: bool = True) -> list[int]:
     """[book_id ...] newest-added-first for one scope:
       incremental — changed() books only            last   — the n most recently added
       since       — added OR site-updated >= date   sparse — fewer than min_tags tags
       all         — everything                      ids    — exactly these (absent ones dropped)
-      unclassified — never attempted (`seen`) and sendable (see below)"""
+      unclassified — never attempted and sendable; both defaults live HERE (see below)"""
     added, upd, stamped = _clocks(con)
     newest = sorted(added, key=lambda b: (_key(added[b]), b), reverse=True)
     if mode == "unclassified":
@@ -127,8 +127,18 @@ def pick(con: sqlite3.Connection, mode: str = "incremental", n: int = 0,
         # excludes books gather() would drop for thin text, which would otherwise sit in "never
         # classified" forever, re-selected at the head of every batch and never able to leave.
         # A book with no usable text is not outstanding work, it is unclassifiABLE.
+        #
+        # Both defaults live HERE, not at the call sites: seen=None means classified_ids(), and
+        # text_fallback defaults to True — the scope a wizard-driven run actually resolves. Every
+        # counter (wizard header, plugin, smoke check, a future dashboard) gets the same number by
+        # asking bare; composing the invariant by hand is what let the plugin's count silently
+        # diverge from the wizard's. Pass seen= to override (tests pin the filter logic that way),
+        # or text_fallback=False to price a run that won't sample book text.
+        if seen is None:
+            from scourgify.artifacts import classified_ids
+            seen = classified_ids()
         ok = sendable(con, text_fallback)
-        return [b for b in newest if b not in (seen or set()) and b in ok]
+        return [b for b in newest if b not in seen and b in ok]
     if mode == "incremental":
         ch = changed_pure(added, upd, stamped)
         return [b for b in newest if b in ch]

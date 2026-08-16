@@ -127,7 +127,8 @@ def job_inspect(lib_path, lib_uuid, ids, now_uuid=None, abort=None, log=None, no
 def _library_scope(con, seen, proposal, failures, artifacts, common, select, setup_mod):
     """The whole-library answer — the dashboard header's numbers, each from its named source."""
     books = common.book_count(con)
-    backlog = select.pick(con, 'unclassified', seen=seen)
+    backlog = select.pick(con, 'unclassified')      # bare: seen + text-fallback live in select,
+                                                    # so this number matches the wizard header
     changed = select.changed(con)
     have = {'#' + l for (l,) in con.execute('SELECT label FROM custom_columns')} | {'tags'}
     cols = [label for label, _, _, _ in setup_mod.REC if label in have]
