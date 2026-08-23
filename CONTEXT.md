@@ -20,9 +20,19 @@ concept.
 - **Report** — `report.py`, the ONE owner of the rich-or-plain rendering policy for the core tools
   (`table`/`tree`/`say` + the live `Dashboard`). `ui.py` stays rich-required (wizard only);
   `_writer.py` imports neither.
-- **Booktext** — `booktext.py`, the text extractor behind `--text-fallback`: `paths(con)` picks each
-  book's best format (EPUB preferred), `extract(path)` samples prose (EPUB-as-zip, else
+- **Booktext** — `booktext.py`, the text extractor behind the [[Synopsis pass]]: `paths(con)` picks
+  each book's best format (EPUB preferred), `extract(path, limit=)` reads prose (EPUB-as-zip, else
   `ebook-convert`).
+- **Synopsis pass** — `synopsis.py`, the pass that gives every book a spoiler-safe back-cover
+  description in Calibre's built-in `comments`. A good existing blurb is judged in one call and
+  KEPT (author voice preserved); only a bad one is generated, from the book's own prose in
+  ≤`MAX_CHUNKS` slabs sized to the apple engine's measured 4,096-token window. Free, on-device,
+  slow by design. _Avoid_: "summarize pass", "description pass".
+- **Settled** (`#synopsized`) — the per-book datetime meaning "this book's synopsis is settled",
+  earned by generating one OR by inspecting and keeping an adequate blurb. One stamp, three jobs:
+  queue membership (unstamped = outstanding), provenance, and the refresh clock (`#updated` newer
+  than the stamp ⇒ the fic grew chapters, re-settle it; no `#updated` ⇒ never auto-refresh).
+  _Avoid_: "summarized", "synopsis count" (as the number's name).
 - **Classify** — LLM content tagging from the **controlled vocabulary**; produces the **proposal**.
 - **Engine** — one LLM adapter (apple/claude/openai/gemini/mistral) behind the seam in
   `engines.py`. `_post_json` is the transport; a fake engine or a monkeypatched transport stands in
@@ -37,6 +47,9 @@ concept.
   - **Ledger** (`promote_ledger.csv`) — every decided candidate; feeds backfill and skip-on-rerun.
   - **Failures** (`classify_failures.csv`) — books an engine errored on (retry with another
     engine); written and read via `artifacts.py` like every other artifact.
+  - **Synopsis failures** (`synopsis_failures.csv`) — books the [[Synopsis pass]] could not settle
+    (unreadable file, refusal, unparseable verdict); the same FAIL_COLS shape and the same
+    self-clearing merge, so the sweep is finite on the failure side too.
   - **Archiving** — a consumed artifact is renamed `*_applied_*` / `*_discarded_*` so stale rows
     can never re-apply.
 - **Override files** — the user's overrides dir (config `[overrides] dir`, resolved ONCE by
@@ -60,6 +73,12 @@ concept.
   state lives in the library, so selection (`select.py`) needs no external file.
 - **Backlog** — the books classify has never *attempted* and could actually *send*: everything
   minus the attempted (classified_ids: applied archives + pending proposal + failure log) minus
-  the unsendable (thin text with no file to sample). Owned by `select.pick("unclassified")`,
-  defaults included — every surface asks bare, so no two counters can disagree.
+  the unsendable (a description under `MIN_DESC`). A thin-blurb book is **not** in the backlog —
+  it is [[Synopsis pass]] work, and re-enters the backlog by itself once it has a real
+  description (`select.sendable` is the query; there is no stored thin-blurb flag to go stale).
+  Owned by `select.pick("unclassified")`, defaults included — every surface asks bare, so no two
+  counters can disagree.
   _Avoid_: outstanding, unclassified count, never-classified (as the number's name).
+- **Queue** (synopsis) — the books awaiting a [[Settled]] synopsis: unstamped or stale, with a
+  text source (`sendable | has_file`), minus the failure log. Owned by
+  `select.pick("unsynopsized")`. Three exits, all needed for the sweep to terminate.

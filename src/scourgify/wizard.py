@@ -50,7 +50,7 @@ def snapshot():
         changed = len(select.changed(con)) if "#updated" not in missing and "#wrangled" not in missing else None
         # the largest single piece of outstanding work in most libraries, and it used to be
         # invisible here — the header cheerfully said "up to date" with thousands never attempted.
-        # Bare pick: seen (classified_ids) and text-fallback live in select now, so this header,
+        # Bare pick: the whole invariant (seen, sendable) lives in select now, so this header,
         # the plugin, and the classify stage measure the same way. ~0.03s on a 7,949-book library.
         try: unclassified = len(select.pick(con, "unclassified"))
         except Exception: unclassified = 0
