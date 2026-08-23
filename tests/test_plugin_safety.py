@@ -18,7 +18,7 @@ sys.path.insert(0, SRC)
 # joined them since (ops, editlog, cli). report is here on purpose: it is the rich-or-plain OWNER, so it
 # is the module most likely to acquire a hard rich import by accident.
 CORE = ["common", "ops", "editlog", "select", "artifacts", "overrides", "engines", "booktext",
-        "wrangle", "classify", "promote", "staleness", "setup", "report", "cli"]
+        "wrangle", "classify", "synopsis", "promote", "staleness", "setup", "report", "cli"]
 
 _BLOCK_RICH = """
 import sys
