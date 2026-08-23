@@ -143,14 +143,16 @@ def test_unclassified_excludes_attempted_and_unsendable():
     assert 5 not in select.pick(con, "unclassified", seen=set())
 
 
-def test_unclassified_widens_when_text_fallback_can_rescue_a_book():
-    """--text-fallback samples the book's prose, so a thin/absent description is no longer
-    disqualifying — but only for a book that actually has a file to sample."""
+def test_a_thin_blurb_book_is_synopsis_work_not_classify_work():
+    """The retirement of --text-fallback, pinned. A book with a file used to WIDEN the classify
+    backlog (sample its prose at tag time); now it leaves the classify backlog entirely and
+    appears in the synopsis queue instead, graduating back once it has a real description."""
     con = _ucon()
     con.execute("INSERT INTO data VALUES(?,?,?)", (4, "EPUB", "book4"))
     con.commit()
-    assert 4 in select.pick(con, "unclassified", seen=set(), text_fallback=True)
-    assert 5 not in select.pick(con, "unclassified", seen=set(), text_fallback=True)   # no file
+    assert 4 not in select.pick(con, "unclassified", seen=set())
+    assert 4 in select.pick(con, "unsynopsized", seen=set())
+    assert 5 not in select.pick(con, "unsynopsized", seen=set())      # no file, no blurb: not work
 
 
 def test_unclassified_batches_are_disjoint_and_the_set_shrinks():
@@ -171,9 +173,9 @@ def test_unclassified_batches_are_disjoint_and_the_set_shrinks():
 
 def test_unclassified_defaults_own_the_invariant():
     """Bare pick("unclassified") is the CORRECT call: seen defaults to artifacts.classified_ids()
-    and text_fallback to True inside select, so every counter (wizard header, plugin popup,
-    smoke_calibre) shows the same number without composing the invariant by hand — the plugin
-    once diverged by forgetting text_fallback, and smoke_calibre by forgetting seen."""
+    inside select, so every counter (wizard header, plugin popup, smoke_calibre) shows the same
+    number without composing the invariant by hand — smoke_calibre once diverged by forgetting
+    seen, and the plugin by forgetting the sendable filter."""
     from scourgify import artifacts
     old = os.environ.get("SCOURGIFY_HOME")
     os.environ["SCOURGIFY_HOME"] = tempfile.mkdtemp()
@@ -182,12 +184,12 @@ def test_unclassified_defaults_own_the_invariant():
         con = _ucon()
         con.execute("INSERT INTO data VALUES(?,?,?)", (4, "EPUB", "book4"))
         con.commit()
-        # no artifacts yet: every sendable book is backlog — including 4, thin-blurbed
-        # but sampleable (text_fallback defaults ON, matching a wizard-driven run)
-        assert select.pick(con, "unclassified") == [4, 3, 2, 1]
+        # no artifacts yet: every SENDABLE book is backlog. Book 4 is thin-blurbed — it is
+        # synopsis work now, not classify work (the --text-fallback widening is gone).
+        assert select.pick(con, "unclassified") == [3, 2, 1]
         # a pending proposal row counts as attempted (classified_ids), read by DEFAULT
         artifacts.write_proposal([{"book_id": 2, "title": "t", "added_tags": [], "proposed_new": []}])
-        assert select.pick(con, "unclassified") == [4, 3, 1]
+        assert select.pick(con, "unclassified") == [3, 1]
     finally:
         os.environ.pop("SCOURGIFY_HOME", None)
         if old is not None: os.environ["SCOURGIFY_HOME"] = old

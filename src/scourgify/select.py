@@ -93,34 +93,68 @@ def changed(con: sqlite3.Connection) -> dict:
 MIN_DESC = 40           # classify.gather() keeps a book only if its text reaches this many chars
 
 
-def sendable(con: sqlite3.Connection, text_fallback: bool = False) -> set:
+def sendable(con: sqlite3.Connection) -> set:
     """Books classify.gather() could actually send: a description of at least MIN_DESC chars —
-    the same test gather applies — or, with --text-fallback, any book with a format file whose
-    prose can be sampled instead.
+    the same test gather applies.
 
-    Deliberately a cheap DB-only predicate, not an extraction pass: it is optimistic on the
-    fallback side (extract() can still come back empty on a DRM'd or odd file), so the scope may
-    keep a handful of books that turn out unsendable. Being optimistic is the safe direction —
-    it can leave a book in the set, never silently drop one that was classifiable."""
+    Descriptions only, deliberately: a thin-blurb book is not classify work, it is SYNOPSIS work,
+    and it graduates back into this set on its own once the pass has written it a real
+    description. Detection is a query, never a stored flag — nothing to un-mark."""
     from scourgify.booktext import strip_html
-    ok = {b for b, t in con.execute("SELECT book, text FROM comments")
-          if len(strip_html(t or "")) >= MIN_DESC}
-    if text_fallback:                             # a file to sample is enough on its own. Asking the
-        ok |= {b for (b,) in con.execute(         # data table directly, not booktext.paths(), which
-            "SELECT DISTINCT book FROM data")}    # resolves absolute paths and so needs CALIBRE_LIBRARY
-    return ok
+    return {b for b, t in con.execute("SELECT book, text FROM comments")
+            if len(strip_html(t or "")) >= MIN_DESC}
+
+
+def has_file(con: sqlite3.Connection) -> set:
+    """Books with a format file on disk — a text source the synopsis pass could read.
+
+    Optimistic on purpose, and cheap on purpose: the `data` table, not booktext.paths(), which
+    resolves absolute paths and so needs CALIBRE_LIBRARY. extract() can still come back empty on
+    a DRM'd or odd file; that book then earns a failure row and leaves the queue that way, which
+    is the safe direction — a pessimistic predicate would silently drop books the pass could have
+    rescued."""
+    return {b for (b,) in con.execute("SELECT DISTINCT book FROM data")}
+
+
+SYN_STAMP = "#synopsized"   # per-book datetime: when this book's synopsis was SETTLED — earned by
+                            # generating one OR by inspecting and keeping an adequate existing blurb
+
+
+def resynopsize(stamp, updated) -> bool:
+    """Does this book need the synopsis pass? Pure — the refresh clock, in one place.
+
+    True when it was never settled, or when the fic was site-updated after it was settled (it grew
+    chapters, so the back cover is out of date). A book with no #updated NEVER auto-refreshes — a
+    library where FanFicFare does not fill that column would otherwise re-summarize itself forever.
+    Deliberately not books.timestamp: a re-fetch bumps the added-date without changing the story,
+    and re-reading a 200k-word fic on-device costs a minute of real compute."""
+    if not _key(stamp): return True
+    return _key(updated) > _key(stamp)
 
 
 def pick(con: sqlite3.Connection, mode: str = "incremental", n: int = 0,
          since: str = "", min_tags: int = 2, ids: list[int] | None = None,
-         seen: set | None = None, text_fallback: bool = True) -> list[int]:
+         seen: set | None = None) -> list[int]:
     """[book_id ...] newest-added-first for one scope:
       incremental — changed() books only            last   — the n most recently added
       since       — added OR site-updated >= date   sparse — fewer than min_tags tags
       all         — everything                      ids    — exactly these (absent ones dropped)
-      unclassified — never attempted and sendable; both defaults live HERE (see below)"""
+      unclassified — never attempted and sendable; the default for `seen` lives HERE (see below)
+      unsynopsized — no settled synopsis (or a stale one) and a text source; the pass's queue"""
     added, upd, stamped = _clocks(con)
     newest = sorted(added, key=lambda b: (_key(added[b]), b), reverse=True)
+    if mode == "unsynopsized":
+        # Three exits, and the sweep terminates only with all three: the #synopsized stamp
+        # (settled — library state, so no artifact is involved), the failure log (attempted and
+        # blocked), and having no text source at all (bucket C — thin blurb AND no file: not work,
+        # ever). The default for `seen` lives HERE like unclassified's, so every surface asks bare.
+        if seen is None:
+            from scourgify.artifacts import synopsis_failed_ids
+            seen = synopsis_failed_ids()
+        syn = read_custom_column(con, SYN_STAMP) or {}
+        ok = sendable(con) | has_file(con)
+        return [b for b in newest
+                if b not in seen and b in ok and resynopsize(syn.get(b), upd.get(b))]
     if mode == "unclassified":
         # Two filters, and BOTH are what make this scope finite — the property that lets it be
         # chunked. `seen` (artifacts.classified_ids) retires books already attempted; `sendable`
@@ -128,16 +162,17 @@ def pick(con: sqlite3.Connection, mode: str = "incremental", n: int = 0,
         # classified" forever, re-selected at the head of every batch and never able to leave.
         # A book with no usable text is not outstanding work, it is unclassifiABLE.
         #
-        # Both defaults live HERE, not at the call sites: seen=None means classified_ids(), and
-        # text_fallback defaults to True — the scope a wizard-driven run actually resolves. Every
+        # A book with no usable text is not outstanding CLASSIFY work either — it is synopsis
+        # work, and re-enters this scope by itself once the pass gives it a description.
+        #
+        # The default lives HERE, not at the call sites: seen=None means classified_ids(). Every
         # counter (wizard header, plugin, smoke check, a future dashboard) gets the same number by
         # asking bare; composing the invariant by hand is what let the plugin's count silently
-        # diverge from the wizard's. Pass seen= to override (tests pin the filter logic that way),
-        # or text_fallback=False to price a run that won't sample book text.
+        # diverge from the wizard's. Pass seen= to override (tests pin the filter logic that way).
         if seen is None:
             from scourgify.artifacts import classified_ids
             seen = classified_ids()
-        ok = sendable(con, text_fallback)
+        ok = sendable(con)
         return [b for b in newest if b not in seen and b in ok]
     if mode == "incremental":
         ch = changed_pure(added, upd, stamped)
