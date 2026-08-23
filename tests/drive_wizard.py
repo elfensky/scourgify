@@ -32,7 +32,8 @@ CHECKS = [
 def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         lib = os.path.join(td, "library"); os.makedirs(lib)
-        cols = [(c, {}) for c in ("fandoms", "characters", "relationships", "genres", "status", "updated", "wrangled")]
+        cols = [(c, {}) for c in ("fandoms", "characters", "relationships", "genres", "status",
+                                  "updated", "wrangled", "synopsized")]
         build(os.path.join(lib, "metadata.db"),
               [{"id": 1, "title": "Fixture Book A", "added": "2026-01-01 10:00:00",
                 "desc": "A description long enough to classify. " * 3, "tags": ["Keeper"]},
@@ -63,7 +64,7 @@ def main() -> int:
             clean = ANSI.sub("", transcript)
             new = clean[pos:]
             sent = None
-            if re.search(r"choose \[w/1/2/3/4/5/6/7/q\]", new) and menu_i < len(MENU_KEYS):
+            if re.search(r"choose \[w(?:/[\w]+)+/q\]", new) and menu_i < len(MENU_KEYS):
                 sent = MENU_KEYS[menu_i]; menu_i += 1
                 os.write(master, (sent + "\n").encode())
             else:
