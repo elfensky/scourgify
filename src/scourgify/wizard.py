@@ -20,14 +20,16 @@ from scourgify.ui import console
 from rich import box
 from rich.table import Table
 
-from scourgify import artifacts, common, engines, wrangle, classify, staleness, select, promote, overrides
+from scourgify import (artifacts, common, engines, wrangle, classify, synopsis, staleness,
+                       select, promote, overrides)
 from scourgify import setup as setup_mod
 from scourgify.common import library, db_path, load_config, ro_connect, custom_column_id, calibre_open
 
 LAST_DEFAULT  = 30      # wizard default for the 'most recent N' redo (matches the documented --last 30)
 BATCH_DEFAULT = 100     # wizard chunk size for the never-classified backlog; below SPEND_GATE
                         # deliberately NOT equal to it, so the spend confirm still fires on a repeat sweep
-COLS = ["#fandoms", "#characters", "#relationships", "#genres", "#status", "#updated", "#wrangled"]
+COLS = ["#fandoms", "#characters", "#relationships", "#genres", "#status", "#updated",
+        "#wrangled", "#synopsized"]
 ENGINE_KEYS = engines.ENGINE_ENV               # single source of truth (defined in engines); never disagree
 
 
@@ -52,6 +54,10 @@ def snapshot():
         # the plugin, and the classify stage measure the same way. ~0.03s on a 7,949-book library.
         try: unclassified = len(select.pick(con, "unclassified"))
         except Exception: unclassified = 0
+        # the synopsis sweep is the other large outstanding job, and the same rule applies: the
+        # header must never read "up to date" while thousands of books have no settled synopsis.
+        try: unsynopsized = len(select.pick(con, "unsynopsized"))
+        except Exception: unsynopsized = 0
         con.close()
     except Exception as e:
         raise SystemExit(f"can't read {db_path()} — is CALIBRE_LIBRARY correct? ({e})")
@@ -69,6 +75,7 @@ def snapshot():
         try: backfill_n = len(promote.backfill_plan()[0])
         except Exception: backfill_n = 0
     return {"books": books, "missing": missing, "changed": changed, "unclassified": unclassified,
+            "unsynopsized": unsynopsized,
             "pending": pending, "to_stamp": to_stamp, "calibre": calibre_open(),
             "candidates": candidates, "verdicts_pending": verdicts_pending,
             "rejects": rejects, "backfill": backfill_n, "backups": common.backups_size(),
@@ -87,6 +94,9 @@ def header(info):
         if info.get("unclassified"):
             bits.append(f"[cyan]{info['unclassified']:,} never classified[/]  → the classify step, a chunk at a time")
         g.add_row("classify", "  ·  ".join(bits) if bits else "[green]every book classified ✓[/]")
+    g.add_row("synopsis", f"[cyan]{info['unsynopsized']:,} awaiting a synopsis[/]  → the synopsis step, "
+                          "free and on-device" if info.get("unsynopsized")
+              else "[green]every synopsis settled ✓[/]")
     g.add_row("proposal", f"[cyan]{info['pending']} books queued to apply[/]  → the review step"
               if info["pending"] else "[dim]none pending[/]")
     n, b = info["backups"]
@@ -163,6 +173,46 @@ def stage_staleness():
             ui.say("none of those books need a status change ✓", "green"); return
         ui.say(f"scoped to {len(rows)} of the newest {n} books", "dim")
     staleness.write(label, rows)
+    ui.say("done ✓", "green")
+
+
+def _synopsis_options(n: int) -> list:
+    """PURE half of the synopsis menu — one fixed slot layout whatever the queue holds."""
+    return [
+        ("1", "apply" if n else None, f"settle {n:,} books" if n else "settle — nothing outstanding",
+         "judge each existing blurb; keep the good ones untouched, write a back cover for the rest"
+         if n else "every book's synopsis is already settled"),
+        ("2", "step" if n else None, "review 1-by-1",
+         "generate first, then walk each NEW synopsis; untick to leave that description alone"
+         if n else "nothing to walk"),
+        ("3", "skip", "skip", "leave descriptions unchanged (it is free, but slow — a chunk at a time is fine)"),
+    ]
+
+
+def stage_synopsis():
+    """Asks; synopsis.py does the work — the pass, its FanFicFare guard, its checklist and its
+    write all live there, so `scourgify synopsis` and this stage cannot diverge.
+
+    The engine is apple and deliberately NOT offered here: free, on-device, and the engine this
+    pass is designed for. A cloud engine is a per-stalled-book CLI opt-in (--engine), not
+    something to fat-finger over a 7,949-book sweep."""
+    con = ro_connect(); n = len(select.pick(con, "unsynopsized")); con.close()
+    if n:
+        ui.say(f"[cyan]{n:,}[/] book(s) have no settled synopsis. A good blurb is kept exactly as "
+               "the author wrote it; only a thin one is written from the book's own prose.", "dim")
+    choice = ui.menu("synopsis", _synopsis_options(n), default="apply" if n else "skip")
+    if choice == "skip":
+        ui.say("(skipped — nothing settled)", "dim"); return
+    batch = 0
+    if n > BATCH_DEFAULT:
+        # ~40 s a book on-device (measured), so the whole queue is days of wall-clock: ask how
+        # much of it to do now. N is a COUNT slicing an identity-keyed set — the next run resumes
+        # at the next N whatever was added, deleted or re-fetched in between.
+        batch = ui.ask_int(f"how many books this run?  {n:,} outstanding", BATCH_DEFAULT, lo=1, hi=n)
+    p = synopsis.plan(synopsis.default_opts(apply=True, step=choice == "step", batch=batch))
+    if not p.todo:
+        ui.say("every book's synopsis is settled ✓", "green"); return
+    p.run()
     ui.say("done ✓", "green")
 
 
@@ -246,7 +296,7 @@ def _engine_options(engs: list, n_todo: int) -> list:
 def stage_classify():
     con = ro_connect(); ch = select.changed(con)
     total = common.book_count(con)
-    # bare pick = the wizard's own measure: text-fallback on, seen owned by select
+    # bare pick = the wizard's own measure: the whole invariant lives in select
     outstanding = len(select.pick(con, "unclassified"))
     con.close()
     if not ch:
@@ -267,11 +317,10 @@ def stage_classify():
         # whatever was added, deleted or re-fetched in between.
         batch = ui.ask_int(f"how many books this run?  {outstanding:,} outstanding",
                            BATCH_DEFAULT, lo=1, hi=outstanding)
-    # thin descriptions sample the book text instead of being dropped; exactly one scope flag
-    # (whole-library reuses select.pick("all")). The plan is resolved ONCE — the cost shown and
-    # confirmed below is over the same `todo` set classify_run executes (never a re-gather).
-    # NB batch must be set BEFORE plan(): Plan.__init__ is the only reader of it.
-    a = classify.default_opts(text_fallback=True, incremental=scope == "changed",
+    # exactly one scope flag (whole-library reuses select.pick("all")). The plan is resolved ONCE
+    # — the cost shown and confirmed below is over the same `todo` set classify_run executes
+    # (never a re-gather). NB batch must be set BEFORE plan(): Plan.__init__ is its only reader.
+    a = classify.default_opts(incremental=scope == "changed",
                               unclassified=scope == "unclassified", last=last, batch=batch,
                               **{"all": scope == "all"})
     p = classify.plan(a)                          # owns a COPY of a — steering goes through p.opts
@@ -481,13 +530,15 @@ TASKS = [
     ("1", "wrangle",   "normalize raw tags/fandoms/characters/genres — deterministic cleanup first, so "
                        "junk tags don't hide books from the classifier", stage_wrangle, True),
     ("2", "staleness", "re-derive #status from #updated age (free, no API)", stage_staleness, True),
-    ("3", "classify",  "AI content tagging — only books new/changed since the last run", stage_classify, True),
-    ("4", "review",    "inspect the pending proposal, then apply it to the library", stage_review, True),
-    ("5", "promote",   "adjudicate new-tag candidates against the master list — promote / alias / reject",
+    ("3", "synopsis",  "settle every book's description — keep the good blurbs, write back covers "
+                       "for the thin ones (free, on-device, slow)", stage_synopsis, True),
+    ("4", "classify",  "AI content tagging — only books new/changed since the last run", stage_classify, True),
+    ("5", "review",    "inspect the pending proposal, then apply it to the library", stage_review, True),
+    ("6", "promote",   "adjudicate new-tag candidates against the master list — promote / alias / reject",
                        stage_promote, True),
-    ("6", "backfill",  "apply vocab-promoted tags to the books that first suggested them (deterministic)",
+    ("7", "backfill",  "apply vocab-promoted tags to the books that first suggested them (deterministic)",
                        stage_backfill, True),
-    ("7", "overrides", "turn --step-rejected deterministic changes into personal override rules",
+    ("8", "overrides", "turn --step-rejected deterministic changes into personal override rules",
                        stage_overrides, False),
 ]
 WORKFLOW = [(name, why, fn) for k, name, why, fn, wf in TASKS if wf]
@@ -537,6 +588,8 @@ def run_workflow():
 
 def _task_hint(name, info):
     """The cyan 'pending work' marker for a task, from the file-based snapshot signals."""
+    if name == "synopsis":
+        return f"{info['unsynopsized']:,} awaiting synopsis" if info.get("unsynopsized") else ""
     if name == "classify":
         return " · ".join(b for b in (f"{info['changed']} new/changed" if info.get("changed") else "",
                                       f"{info['unclassified']:,} never classified" if info.get("unclassified") else "")

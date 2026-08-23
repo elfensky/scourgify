@@ -15,7 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fixture_db import build
 from scourgify import classify, common, wizard
 
-COLS = ["fandoms", "characters", "relationships", "genres", "status", "updated", "wrangled"]
+COLS = ["fandoms", "characters", "relationships", "genres", "status", "updated", "wrangled",
+        "synopsized"]
 BOOKS = [{"id": 1, "title": "Fixture Book A", "added": "2026-01-01 10:00:00",
           "desc": "A description long enough to classify. " * 3, "tags": ["Keeper"]},
          {"id": 2, "title": "Fixture Book B", "added": "2026-02-01 10:00:00",
@@ -154,20 +155,22 @@ def test_a_full_menu_lap_runs_every_task_without_writing():
     # menu answers are DIGITS (slot numbers, stable in every library state); the bare "s"/"n" are
     # ui.checklist skips and y/n confirms, which keep letters — see ui.checklist's exception.
     lap = ["1", "n",                  # wrangle  (clean fixture: no apply menu) -> decline staleness
-           "2", "n",                  # staleness (already consistent)          -> decline classify
-           "3", "5", "n",             # classify -> scope skip (slot 5)         -> decline review
-           "4", "2", "s", "s", "n",   # review -> 1-by-1 (slot 2), SKIP both    -> decline promote
-           "5", "n",                  # promote (no candidates)                 -> decline backfill
-           "6",                       # backfill (nothing to do; no successor)
-           "7",                       # overrides (no rejects logged; not in the workflow)
+           "2", "n",                  # staleness (already consistent)          -> decline synopsis
+           "3", "3", "n",             # synopsis -> skip (slot 3)               -> decline classify
+           "4", "5", "n",             # classify -> scope skip (slot 5)         -> decline review
+           "5", "2", "s", "s", "n",   # review -> 1-by-1 (slot 2), SKIP both    -> decline promote
+           "6", "n",                  # promote (no candidates)                 -> decline backfill
+           "7",                       # backfill (nothing to do; no successor)
+           "8",                       # overrides (no rejects logged; not in the workflow)
            "q"]
     with wizard_lib(PROPOSAL) as prop:
         with common.scripted_answers(lap), transcript() as buf:
             wizard._run()
         out = buf.getvalue()
-        assert out.count("what would you like to do?") == 8       # the menu loop survived all 7 tasks
+        assert out.count("what would you like to do?") == 9       # the menu loop survived all 8 tasks
         for marker, stage in [("nothing to normalize", "wrangle"),
                               ("already consistent", "staleness"),
+                              ("nothing settled", "synopsis"),      # skip honored: no engine, no wall-clock
                               ("nothing tagged", "classify"),       # scope-skip honored: no engine, no spend
                               ("nothing decided", "review"),
                               ("no new-tag candidates yet", "promote"),
@@ -288,6 +291,33 @@ def test_a_short_script_raises_instead_of_exiting_zero():
             assert False, "a script with no answers must raise, not exit cleanly"
         except common.ScriptError as e:
             assert "no answer left" in str(e)
+
+
+
+def test_snapshot_reports_the_synopsis_queue():
+    """The header must never claim 'up to date' while the synopsis sweep is outstanding — the
+    same rule the never-classified backlog earned."""
+    with wizard_lib():
+        info = wizard.snapshot()
+        assert info["unsynopsized"] == 2, info
+        assert "2 awaiting synopsis" in wizard._task_hint("synopsis", info)
+
+
+def test_synopsis_stage_skip_reaches_no_engine():
+    """The wall-clock pin, the sibling of test_classify_scope_skip_reaches_no_engine. This pass
+    is free but SLOW — ~40 s a book on-device, measured — so a stage that runs when the user said
+    skip costs days, not euros."""
+    from scourgify import synopsis
+    def boom(*a, **k):
+        raise AssertionError("synopsis.plan must not run after a skip")
+    saved = synopsis.plan
+    synopsis.plan = boom
+    try:
+        with wizard_lib(), common.scripted_answers(["3"]), transcript() as buf:
+            wizard.stage_synopsis()
+    finally:
+        synopsis.plan = saved
+    assert "nothing settled" in buf.getvalue()
 
 
 if __name__ == "__main__":
