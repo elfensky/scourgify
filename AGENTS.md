@@ -38,8 +38,8 @@ uv run scourgify apply --apply                       # write changes (Calibre CL
 the **full maintenance run** (`run_workflow` over `WORKFLOW`) or a **single task** (`TASKS`), with
 unfinished work flagged inline from cheap file signals in `snapshot()` (pending proposal, undecided
 new-tag candidates, `--step` rejects, backfillable promotions). The menu loops (re-`snapshot` after each
-task) until quit. The guided run is the stages in order — **wrangle → staleness → classify → review →
-promote → backfill** — each dry-running first, showing its report, and asking before writing (a clean
+task) until quit. The guided run is the stages in order — **wrangle → staleness → synopsis → classify →
+review → promote → backfill** — each dry-running first, showing its report, and asking before writing (a clean
 stage auto-skips). There is no separate audit step — the wrangle stage's dry run IS the audit;
 `scourgify audit` stays for the full per-value detail. The wrangle stage drives one
 **`wrangle.plan()`** object (preview → guard → optional step → write; never a recompute). The
@@ -53,7 +53,9 @@ the expensive text extraction never runs twice), shows per-engine cost estimates
 `engines.TRAITS['out_tokens']` — a reasoning model bills hidden thinking as output, so gemini is
 ~14x its visible answer and costs MORE per book than claude despite a lower per-token price), offers an engine **bake-off**
 (`classify.bakeoff`: the same ~5 sample books through every usable engine, display-only), and
-enables `--text-fallback` so thin descriptions get sampled rather than dropped. The review stage offers apply / keep / discard (discard archives to
+The **synopsis stage** sits before classify and only asks — the engine is not offered there
+(apple is the engine that pass is designed for), and `synopsis.plan()`/`run()` own its guard, its
+checklist and its write. The review stage offers apply / keep / discard (discard archives to
 `*_discarded_*.csv`). **EVERY stage that proposes a list offers a 1-by-1 review** (`ui.checklist`, always slot 2) — wrangle (a book's field edits), review (a book's proposed tags), promote (a candidate's verdict), staleness (a book's #status change), backfill (a book gaining tags), overrides (a rule line). All-or-nothing on a reviewed artifact defeats the point of reviewing it; an unticked promote verdict gets no ledger row, so the candidate stays undecided and is offered again. Each has a CLI equivalent — `apply --step`, `classify --apply --step`, `promote --apply/--backfill --step`, `staleness --apply --step`, `overrides --apply --step` — and the wizard DELEGATES to the same function (`promote.apply_decisions_step` / `promote.backfill_step` / `staleness.step` / `overrides.step_pick`), so `ui.checklist` is never driven from wizard.py and the two surfaces cannot diverge. (`ui.checklist`,
 CLI `apply --step` / `classify --apply --step`): walk each book's changes, untick to reject
 individual items. Rejects land in `data/rejects.csv` (see `docs/superpowers/specs/2026-07-06-…`);
@@ -69,8 +71,9 @@ the wizard header both go through it, so they can never disagree.
 **`--unclassified` is the only scope that ADVANCES** — the one to chunk a backlog with
 (`--unclassified --batch N`, apply, repeat). It selects books classify has never *attempted*
 (`artifacts.classified_ids()`: applied archives + the pending proposal + **the failure log**) and
-could actually send (`select.sendable()`: description ≥ `MIN_DESC`, or any book with a file to
-sample under `--text-fallback`). Both filters are what make it finite: an errored book gets no
+could actually send (`select.sendable()`: description ≥ `MIN_DESC` — descriptions only; a
+thin-blurb book is **synopsis** work and re-enters this scope once the pass gives it a real
+description). Both filters are what make it finite: an errored book gets no
 proposal row on purpose, so without counting failures it re-occupies the head of every batch
 forever; and `gather()` drops a thin-text book before it can reach a proposal, so without
 `sendable` it could never leave the set. Discarded archives are deliberately NOT counted — the user
@@ -191,7 +194,11 @@ this repo's floor, not older.) `uv run tests/test_plugin_safety.py` pins the con
 plugin possible — every core module imports with **rich blocked** (Calibre's site-packages is empty),
 and `ui`/`wizard` refuse with a catchable `GuardrailError` rather than a `SystemExit` that would take
 the host process down. `uv run tests/test_write_path.py` shadow-replays one ops list through both
-write shapes; `uv run tests/test_editlog.py` pins the edit-log record shape (and the conflict
+write shapes; `uv run tests/test_synopsis.py` pins the synopsis pass — the measured chunk size,
+the three-state verdict, the FanFicFare guard, and the write contract with `run_writer` stubbed —
+and `uv run tests/test_synopsis_queue.py` pins the queue's three exits (stamp, failure log, no
+text source), the property that makes the sweep finite.
+`uv run tests/test_editlog.py` pins the edit-log record shape (and the conflict
 predicate) with the `calibre-debug` subprocess stubbed; `uv run tests/test_restore_drill.py` is
 the snapshot→corrupt→restore drill.
 **`calibre-debug -e tests/smoke_calibre.py`** is the manual pre-release check for what CI cannot
@@ -232,6 +239,7 @@ junk tags inflate a book's tag count and would hide it from the classifier's spa
 ```
 FFF fetch → uv run scourgify apply --apply           # 1. junk-drop/canonicalize the new raw tags (idempotent)
           → uv run scourgify staleness --apply       # 2. free; re-derive #status from #updated age
+          → uv run scourgify synopsis --apply --batch 200  # 2b. free, on-device; settle descriptions
           → uv run scourgify classify --incremental  # 3. cheap; only new/changed books (see select.py)
           → review data/classify_proposal.csv        # 4.
           → uv run scourgify classify --apply        # 5. Calibre closed (writes shell to calibre-debug)
@@ -251,7 +259,8 @@ free `classify` smoke test: use **`classify --scope-only`**, which resolves the 
 would be sent and what each engine would cost, and stops before any engine call. (Learned the hard
 way 2026-07-30: `classify --unclassified` was run as a "read-only" check and started grinding
 through 7,681 books.) The read-only checks that cost nothing: `scourgify audit`,
-`scourgify staleness` (no `--apply`), `scourgify rollback --list`, `classify --scope-only`, and
+`scourgify staleness` (no `--apply`), **`scourgify synopsis` (no `--apply`)**,
+`scourgify rollback --list`, `classify --scope-only`, and
 `SCOURGIFY_SCRIPT="q" scourgify`.
 
 **⚠️ Testing engines:** `--engine apple` is the DEFAULT because it is free and on-device — which
@@ -264,7 +273,7 @@ verifying behaviour, use `--engine openai` (cheapest usable) or `gemini`; keep t
 2026-07-30 against a 7,949-book library at list price: **≈$25** for `gemini-2.5-flash`
 (~1,020 input + ~1,111 output tokens/book, of which **~1,061 are hidden THINKING tokens** billed as
 output — `engines.TRAITS['out_tokens']` carries that per engine, and `est_cost` used to assume a flat
-80 and so quoted gemini at a fifth of its real price). `--text-fallback` pushes input higher still.
+80 and so quoted gemini at a fifth of its real price).
 Never run `--fresh`
 casually — use `--incremental` (only changed/new books), `--batch N`, or `--engine apple` (free, on-device).
 Confirm with the user before any full cloud run (classify itself gates cloud runs >200 books behind a
@@ -318,7 +327,7 @@ ranked / review / ledger / failures, the `"; "` delimiter, timestamped archiving
 `-term` removal) live in **`overrides.py`** (`overrides_dir`/`ov_path`/`append_lines`/`append_rows`/
 `merge_vocab`/`read_aliases`) — promote's folds and the rejects→overrides flow write through it,
 wrangle/classify/setup read through it; never re-derive the dir or hand-read those files. Book-text
-sampling for `--text-fallback` lives in **`booktext.py`** (`paths(con)` + `extract(path)`: EPUB-as-zip
+extraction for the synopsis pass lives in **`booktext.py`** (`paths(con)` + `extract(path, limit=)`: EPUB-as-zip
 with a zip-bomb guard, else `ebook-convert` with a timeout — testable against a fixture EPUB). Two outputs
 per book: `added_tags` (chosen from the controlled vocab — hand-curated `defaults/classify_vocab.txt` ∪ the
 frequency-gated AO3 seed `defaults/classify_vocab_ao3.txt` (the ~120 highest-use AO3 freeform tropes,
@@ -328,9 +337,9 @@ the box — regenerable, never hand-edit it) merged with the user's `overrides/c
 (novel candidates → aggregated to `classify_newtags_ranked.csv` for review→promotion, so the vocab grows
 without freeform noise). Engines `--engine apple|claude|openai|gemini|mistral` (keys via env:
 `ANTHROPIC_/OPENAI_/GEMINI_/MISTRAL_API_KEY`; `--bakeoff` compares them on sample books); `apple` = on-device, free, single-threaded. Concurrency
-via `ThreadPoolExecutor` (`--workers`), retry/backoff, incremental save + resume. `--text-fallback` samples
-the book's own prose (EPUB via zipfile, other formats via `ebook-convert`) when the description (Calibre's
-built-in `comments` table) is too thin. Scope flags (`--all` / `--incremental` / `--last N` / `--since DATE`) go through
+via `ThreadPoolExecutor` (`--workers`), retry/backoff, incremental save + resume. A book whose description
+(Calibre's built-in `comments` table) is too thin is DROPPED, not sampled from its prose — it is
+**synopsis** work, and comes back with a real description. Scope flags (`--all` / `--incremental` / `--last N` / `--since DATE`) go through
 `select.pick` and select ONLY their books (`--all` = the whole library, every book regardless of tag count — the
 wizard's whole-library option sets it); the sparse-book default (`< --min-tags`) applies only with no scope
 flag. `--apply` auto-creates the **`#wrangled`** datetime marker and stamps **every processed book** (a no-tag
@@ -347,6 +356,40 @@ promoted tag / alias target onto exactly the books that proposed it (union, prev
 **`staleness.py`** — re-derives `#status` for the activity family {In-Progress, Hiatus, Abandoned} from
 `#updated` age (`<2y`→In-Progress, `2–5y`→Hiatus, `≥5y`→Abandoned); idempotent + self-correcting on re-run.
 Completed/Dropped/Rewritten and date-less books are never touched.
+
+**`synopsis.py` — the synopsis pass** (roadmap #69). Every book ends up with a **settled**
+synopsis in Calibre's **built-in description** (`comments`) — the field Calibre and every reader
+display, so improving it is half the point. The cheap job runs first: a book whose blurb is
+already about the story is judged in ONE call and **kept untouched** (never AI-flatten a library
+of fine author descriptions into one beige voice). Only a bad blurb earns whole-book generation —
+`booktext.extract` the prose, `chunks()` it into ≤`MAX_CHUNKS` slabs of `CHUNK` chars, note each,
+then fold the notes into a back cover: premise, characters, stakes, hook, a themes line, and
+**never** plot outcomes or endings. `CHUNK` is **measured, not chosen**: the apple engine's
+context is a hard **4,096 tokens shared by prompt AND answer**, and real prose runs ~4.3
+chars/token (17,000 chars pass, 18,000 fail at 4,165) — re-measure when the bundled model changes.
+So is the adequacy prompt: phrased as "is this GOOD?" it rejected 12 of 13 real library blurbs,
+which would have rewritten thousands of healthy descriptions and turned a seconds-per-book sweep
+into days; phrased as "is this ABOUT the story?" it keeps 12 of 20. **That ratio is the pass's
+cost model** — re-measure it with the prompt. `verdict()` is deliberately **three-state**: an
+unparseable answer settles nothing, because guessing "keep" stamps a bad blurb as settled forever
+and guessing "generate" overwrites an author's prose.
+
+**`#synopsized`** (datetime) is the entire state — queue membership, provenance, and the refresh
+clock (`#updated` > stamp ⇒ re-settle; no `#updated` ⇒ never auto-refresh) — so resume needs no
+artifact, and the queue lives in `select.pick("unsynopsized")` like every other scope. Failures go
+to `synopsis_failures.csv` via `artifacts.py`, which is what keeps the queue finite on the failure
+side (the rule the classify backlog learned the hard way). **The pass refuses to start** unless
+FanFicFare's Comments → "New Only" switch is on — `setup.comments_protected` reads
+`std_cols_newonly` out of the FFF prefs blob in the library db (verified readable through
+`ro_connect()` 2026-08-23, which is why the guard is automatic rather than a confirm); `--force`
+accepts the degraded self-healing mode (a clobbered book re-enters the queue). Engine: **apple**,
+free and on-device and single-threaded — ~40 s a book measured, so the sweep is designed to run
+for weeks in the background; a cloud engine is a per-stalled-book `--engine` opt-in, never a
+default. **Unlike classify, a bare `scourgify synopsis` sends NOTHING** — there is no proposal
+artifact to build, so the dry run is genuinely free. **Transition rule: classify does NOT require
+the stamp while the sweep runs** — decent-blurb books keep flowing to the tagger exactly as today;
+requiring it on day one would park ~7.5k classifiable books behind a months-long sweep. Making the
+stamp the standard classify gate is a **post-sweep follow-up decision**, not part of this build.
 
 **`defaults/ao3/` — the generated master taxonomy** (universes/tags/characters/genres as `master,name,rel`
 pair rows; ~150k rows, ~7MB, ships in the wheel). Built by **`build_ao3_layer.py`** from the OTW

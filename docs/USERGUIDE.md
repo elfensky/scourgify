@@ -53,11 +53,12 @@ After downloading new stories, run `scourgify` again. You'll get a menu:
 w  full maintenance run     ← the whole routine, guided, in the right order
 1  wrangle                  tidy raw tags/fandoms/characters
 2  staleness                refresh #status from last-update age (free)
-3  classify                 AI content tagging (new/changed books only)
-4  review                   look at the AI's suggestions, then apply
-5  promote                  decide if brand-new tags join your vocabulary
-6  backfill                 give newly promoted tags to the books that inspired them
-7  overrides                turn your rejections into permanent personal rules
+3  synopsis                 give every book a real description (free, on-device)
+4  classify                 AI content tagging (new/changed books only)
+5  review                   look at the AI's suggestions, then apply
+6  promote                  decide if brand-new tags join your vocabulary
+7  backfill                 give newly promoted tags to the books that inspired them
+8  overrides                turn your rejections into permanent personal rules
 q  quit
 ```
 
@@ -77,6 +78,26 @@ SAFETY line proving no book loses its last fandom or character.
 
 **Staleness** — free and instant. In-progress stories age into Hiatus (2 years quiet) and
 Abandoned (5 years). Completed stories are never touched. Self-correcting if a story updates.
+
+**Synopsis** — free, private, and slow. Fanfiction descriptions are a lottery: some are proper
+back-cover blurbs, plenty are "summary inside", an update schedule, or nothing at all. This step
+looks at each one and **keeps the good ones exactly as the author wrote them** — no AI rewriting a
+description that was already fine. Only the useless ones get replaced, by reading the book itself
+on your own machine and writing a real blurb: premise, characters, what's at stake, and a themes
+line. Never the ending — the description stays safe to browse.
+
+It runs on-device, so it costs nothing and nothing leaves your Mac, but it takes about a minute
+per book it has to write. That's fine: it asks how many to do this run, remembers where it got to
+(the `#synopsized` column), and picks up there next time. Leave it chewing in the background over
+a few evenings.
+
+**One thing to do first:** in Calibre, go to Preferences → Plugins → FanFicFare → Customize →
+Standard Columns and tick **New Only** next to Comments. Without it, the next metadata re-fetch
+overwrites every description this step writes. scourgify refuses to start until you do, and
+`scourgify setup` offers to set it for you.
+
+Books with a good description also benefit indirectly: the next step, classify, tags from the
+description, so a book that had nothing to read now has something.
 
 **Classify** — the AI step. It picks the books that are new or changed since last time,
 shows you *exactly* how many, and prices each engine before you commit:
@@ -132,6 +153,7 @@ scourgify                        # the wizard — start here
 scourgify audit                  # detailed read-only report of every cleanup pass
 scourgify apply --apply          # wrangle from the CLI (add --step for 1-by-1)
 scourgify staleness --apply      # refresh #status
+scourgify synopsis --apply --batch 200   # write real descriptions for 200 books (free)
 scourgify classify --incremental # AI-tag only new/changed books
 scourgify classify --books 1,2,3 # AI-tag exactly these books (also: apply --books, staleness --books)
 scourgify classify --apply       # write the reviewed proposal (add --step for 1-by-1)
