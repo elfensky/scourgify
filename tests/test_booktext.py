@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pins booktext.py — the text extractor behind `classify --text-fallback`. A fixture EPUB is
+"""Pins booktext.py — the text extractor behind the synopsis pass. A fixture EPUB is
 just a zip of XHTML, so the whole EPUB strategy is testable with no Calibre, library, or LLM.
 No framework:  uv run tests/test_booktext.py   (also pytest-collectable)."""
 import os, sys, tempfile, zipfile

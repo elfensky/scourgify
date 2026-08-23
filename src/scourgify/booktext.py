@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Book-text extraction for `classify --text-fallback` — one deep interface over two strategies.
+"""Book-text extraction for the synopsis pass — one deep interface over two strategies.
 
-When a book's description is too thin to classify, we sample its own prose instead of dropping
-it. `paths(con)` discovers each book's best format file (EPUB preferred); `extract(path)` pulls
-readable text from it: EPUBs are read directly as zips of XHTML (with a zip-bomb guard and a
-nav-page heuristic); every other format shells out to Calibre's `ebook-convert` with a timeout.
-No LLM, no library state — testable against a fixture EPUB."""
+`paths(con)` discovers each book's best format file (EPUB preferred); `extract(path, limit=)`
+pulls readable text from it: EPUBs are read directly as zips of XHTML (with a zip-bomb guard and
+a nav-page heuristic); every other format shells out to Calibre's `ebook-convert` with a timeout.
+No LLM, no library state — testable against a fixture EPUB.
+
+(It began as `classify --text-fallback`'s prose sampler. That flag is retired: synopsis.py needs
+extraction more than classify ever did, and reads whole books rather than a slice.)"""
 import os
 import re
 import subprocess

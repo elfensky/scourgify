@@ -55,14 +55,20 @@ MIN_JUDGE = 120          # below this there is no blurb worth judging — go str
 MIN_SYNOPSIS = 120       # a shorter answer than this is the model failing, not a back cover
 JUDGE_CAP = 4_000        # blurb chars sent to the adequacy judge
 
+# Framed as "is this ABOUT the story", not "is this GOOD" — and it says so out loud that almost
+# all real descriptions pass. Measured 2026-08-23 on 20 random library books: the earlier
+# good/bad-criteria phrasing rejected 12 of 13, including an 877-char blurb, which would have
+# AI-rewritten thousands of healthy author descriptions (the one thing decision Q4 forbids) and
+# turned a seconds-per-book sweep into days of generation. This phrasing keeps 12 of 20.
+# Re-measure this ratio when the prompt or the bundled model changes — it is the pass's cost model.
 JUDGE_P = (
-    "You are judging whether a fanfiction's existing description works as a back-cover blurb.\n"
-    "GOOD: says what the story is about — premise, main characters, what is at stake — in a "
-    "sentence or more, and gives away no ending.\n"
-    "BAD: author's notes, update schedules, a dump of tags, 'summary inside', one vague line, "
-    "cross-posting boilerplate, or nothing about the story at all.\n\n"
+    "Here is a fanfiction's description, as its author wrote it.\n\n"
     "Title: {title}\nDescription: {blurb}\n\n"
-    "Reply with exactly one word: YES if it is good, NO if it is not.")
+    "Does it tell a reader what the story is about? Almost all real descriptions do — answer NO "
+    "only if this one is NOT about the story: an author's note, an update schedule, a list of "
+    "tags or warnings, \"summary inside\", a link, or a single vague line that could describe "
+    "anything.\n"
+    "Answer with exactly one word: YES or NO.")
 
 NOTE_P = (
     'Excerpt {i} of {n} from the fanfiction "{title}".\n'
@@ -161,3 +167,160 @@ def settle(title: str, blurb: str, path, ask) -> tuple:
     if err: return "", err
     out = clean(out)
     return (out, "") if len(out) >= MIN_SYNOPSIS else ("", "engine returned no usable synopsis")
+
+
+class Plan:
+    """ONE resolved synopsis run: guard -> scope -> todo, computed once so a confirm and the work
+    that follows it are over the same set (mirrors wrangle.Plan and classify.Plan; the CLI and the
+    wizard drive the same object). Owns a COPY of the caller's options — steering a resolved plan
+    goes through `p.opts`, never by mutating the caller's namespace."""
+
+    def __init__(self, a: argparse.Namespace):
+        self.opts = a = copy.copy(a)
+        con = ro_connect()
+        guard_comments(con, a.force)   # before any work: hours of compute a re-fetch would erase
+        if a.books is not None:
+            ids = select.pick(con, "ids", ids=select.parse_books(a.books))
+        elif a.last:
+            ids = select.pick(con, "last", n=a.last)
+        else:
+            ids = select.pick(con, "unsynopsized")
+        self.scope = ("named ids" if a.books is not None else
+                      f"last {a.last} added" if a.last else "the synopsis queue")
+        self.blurbs = {b: strip_html(t) for b, t in con.execute("SELECT book, text FROM comments")}
+        self.files = booktext.paths(con)
+        self.titles = book_titles(con)
+        self.have_stamp = custom_column_id(con, STAMP) is not None
+        con.close()
+        self.todo = ids[:a.batch] if a.batch else ids
+
+    def preview(self) -> None:
+        """What a run WOULD do, without doing any of it. Unlike classify there is nothing to send
+        for a proposal, so this is zero cost — not merely zero writes."""
+        from scourgify import report
+        n = len(self.todo)
+        judged = sum(1 for b in self.todo if len(self.blurbs.get(b, "")) >= MIN_JUDGE)
+        report.say(f"  scope: {self.scope} -> {n} book(s), engine={self.opts.engine}")
+        report.table("what this run would do", ["books", "step"],
+                     [[str(judged), "have a blurb to judge (one cheap call; a good one is kept as-is)"],
+                      [str(n - judged), "go straight to whole-book generation"],
+                      [str(n), f"stamped {STAMP} either way"]], right=(0,))
+        report.say("\nDry run — nothing sent, nothing written. To run it: "
+                   "scourgify synopsis --apply   (Calibre closed)")
+
+    def run(self, ask=None) -> None:
+        """Execute. Without --apply this is preview() and stops — see the module docstring."""
+        from scourgify import report
+        a = self.opts
+        if not a.apply:
+            self.preview(); return
+        if not self.todo:
+            report.say("every book's synopsis is settled ✓"); return
+        if ask is None:
+            eng = ENGINES[a.engine](a.model, a.timeout)
+            ask = lambda prompt: ask_retry(eng, prompt)
+        report.say(f"  {len(self.todo)} book(s) · engine={a.engine} "
+                   f"({'free, on-device — slow is fine' if a.engine == 'apple' else 'billed per book'})")
+        made, kept, failures = {}, [], []
+        for i, b in enumerate(self.todo, 1):
+            title = str(self.titles.get(b, ""))
+            out, err = settle(title, self.blurbs.get(b, ""), self.files.get(b), ask)
+            if err:
+                failures.append([b, title, err]); mark = f"✗ {err[:60]}"
+            elif out:
+                made[b] = out; mark = f"wrote {len(out)} chars"
+            else:
+                kept.append(b); mark = "kept the existing blurb"
+            report.say(f"  [{i}/{len(self.todo)}] #{b} {title[:40]:<40} {mark}")
+        # The log is rewritten every run, not only when this one failed: a book recovered on
+        # another engine has to LEAVE the list or it reads as blocked forever — and stays out of
+        # the queue with it. Books outside this run's scope are carried through untouched.
+        processed = set(made) | set(kept) | {r[0] for r in failures}
+        write_failures(merge_failures(read_rows(syn_fail()), processed, failures), syn_fail())
+        if failures:
+            report.say(f"  {len(failures)} failed -> {os.path.basename(syn_fail())}  "
+                       "(retry on another engine: scourgify synopsis --apply --engine openai)")
+        if a.step and made:
+            made = step(made, self.titles)
+        if not (made or kept):
+            report.say("(nothing settled — nothing written.)"); return
+        ops = []
+        if not self.have_stamp:
+            ops.append(op_create_column("synopsized", "Synopsized", "datetime"))
+        if made:
+            ops.append(op_set_field("comments", made))
+        # Stamp EVERY settled book, generated or kept — an unstamped kept blurb would be re-read
+        # and re-judged on every future sweep, which is classify's no-tag bug in a new field.
+        ops.append(op_stamp_now(STAMP, sorted(set(made) | set(kept))))
+        run_writer(ops, tool="synopsis", scope=f"{len(made)} written, {len(kept)} kept")
+        report.say(f"settled {len(made) + len(kept)} book(s): {len(made)} new synopses, "
+                   f"{len(kept)} existing blurbs kept.")
+
+
+def step(made: dict, titles: dict) -> dict:
+    """1-by-1 review of the generated synopses -> the ACCEPTED subset ({} = nothing decided).
+
+    Lives here, not in the wizard: CLAUDE.md's rule is that a wizard stage calls the same engine
+    function the subcommand does, so `synopsis --apply --step` and the wizard share one path. An
+    unticked book gets neither its new description NOR the stamp — it stays in the queue, which is
+    the point of rejecting it."""
+    from scourgify import ui
+    if not ui.interactive():
+        raise GuardrailError("--step needs an interactive terminal (omit it to write every synopsis).")
+    ids = sorted(made)
+    acc, _, action = ui.checklist(
+        "new synopses — untick one to leave that book's description alone",
+        [f"[bold]#{b}[/] {str(titles.get(b, ''))[:36]:<36} [dim]{made[b][:120]}…[/]" for b in ids])
+    if action in ("skip", "quit"): return {}
+    return {ids[i]: made[ids[i]] for i in acc}
+
+
+def plan(a: argparse.Namespace) -> Plan:
+    """Resolve a synopsis run ONCE — the wizard confirms over this plan and run() executes the
+    SAME one."""
+    return Plan(a)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description="Settle every book's synopsis into its description (free + on-device by "
+                    "default; dry-run until --apply).")
+    p.add_argument("--apply", action="store_true",
+                   help="generate and write (Calibre closed). Without it NOTHING is sent — unlike "
+                        "classify, a bare run here really is free.")
+    p.add_argument("--step", action="store_true",
+                   help="with --apply: review each new synopsis 1-by-1 (untick to leave a description alone)")
+    p.add_argument("--engine", default="apple", choices=sorted(ENGINES),
+                   help="apple = on-device, free, slow (default; the engine this pass is designed for)")
+    p.add_argument("--books", default=None, metavar="SPEC",
+                   help="only these books: '1,2,3', '10-20', '@ids.txt', or a combination "
+                        "(re-settles them whatever their stamp says)")
+    p.add_argument("--last", type=int, default=0, metavar="N",
+                   help="only the N most recently added books (the same N as classify --last)")
+    p.add_argument("--batch", type=int, default=0, metavar="N",
+                   help="settle only N books this run — the queue advances, so re-run to continue")
+    p.add_argument("--force", action="store_true",
+                   help="run even though FanFicFare may overwrite the descriptions (a clobbered "
+                        "book re-enters the queue and is re-summarized)")
+    p.add_argument("--model", default="", help="override the per-engine default model")
+    p.add_argument("--timeout", type=int, default=120, metavar="S", help="per-request HTTP timeout")
+    return p
+
+
+def default_opts(**overrides) -> argparse.Namespace:
+    """The non-CLI entry to a run's options: parser defaults + keyword overrides. The argparse
+    parser stays the single schema; the wizard is the second adapter that fills it."""
+    a = build_parser().parse_args([])
+    for k, v in overrides.items(): setattr(a, k, v)
+    return a
+
+
+def main() -> None:
+    a = build_parser().parse_args()
+    if a.books is not None and a.last:
+        raise GuardrailError("--books and --last are two ways to name the same thing — pick one.")
+    plan(a).run()
+
+
+if __name__ == "__main__":
+    main()

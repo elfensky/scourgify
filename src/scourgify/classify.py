@@ -19,8 +19,8 @@ Engines (--engine):  apple = on-device Apple Foundation Models via ./afm (free; 
           file. Selection semantics live in select.py (shared with the wizard header)."""
 import argparse, os, csv, json, re, collections, difflib
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from scourgify import booktext, engines as engines_mod, report, select
-from scourgify.booktext import strip_html                               # text extraction lives in booktext.py
+from scourgify import engines as engines_mod, report, select
+from scourgify.booktext import strip_html
 from scourgify.common import (HERE, data_dir, user_dir, ro_connect, custom_column_id, run_writer, library,
                               GuardrailError,
                               current_tags, titles as book_titles, op_create_column, op_set_field, op_stamp_now,
@@ -258,7 +258,8 @@ def gather(a: argparse.Namespace) -> tuple:
     --books SPEC / --incremental / --last N / --since DATE select ONLY matching books (newest-added-first);
     bare classify keeps the sparse mode (fewer than --min-tags tags). `needs(b)` is True for
     explicitly scoped books — the resume logic uses it to re-process them even if already proposed.
-    Text extraction (EPUB zip / ebook-convert) lives in booktext.py."""
+    A book whose description is too thin is DROPPED here (not sampled from its prose): that book
+    is synopsis work, and `scourgify synopsis` returns it with a real description."""
     con = ro_connect(); c = con.cursor()
     missing = 0
     if a.books is not None:                       # explicit ids win over every other scope flag
@@ -268,8 +269,7 @@ def gather(a: argparse.Namespace) -> tuple:
     elif a.all:       ids, scope = select.pick(con, "all"), "whole library"
     elif a.incremental: ids, scope = select.pick(con, "incremental"), "new/changed since last classify"
     elif a.unclassified:                          # the advancing scope: never attempted, and sendable
-        # seen defaults to classified_ids() inside pick; text_fallback is this run's actual flag
-        ids = select.pick(con, "unclassified", text_fallback=a.text_fallback)
+        ids = select.pick(con, "unclassified")    # seen + the sendable filter default inside pick
         scope = f"never classified ({len(ids)} outstanding)"
     elif a.last:      ids, scope = select.pick(con, "last", n=a.last), f"last {a.last} added"
     elif a.since:     ids, scope = select.pick(con, "since", since=a.since), f"added/updated since {a.since}"
@@ -278,22 +278,17 @@ def gather(a: argparse.Namespace) -> tuple:
                             or a.last or a.since) else set()
     def needs(b): return b in explicit
     desc = {b: t for b, t in c.execute("SELECT book, text FROM comments")}
-    # when the description is thin, sample the book's own text instead of dropping the book
-    bookfile = booktext.paths(con) if a.text_fallback else {}
-    def text_for(b):
-        d = strip_html(desc.get(b, ""))
-        if len(d) >= 80 or not a.text_fallback: return d
-        et = booktext.extract(bookfile.get(b, ""))
-        return (d + " " + et).strip() if et else d
-    targets = [(b, text_for(b)) for b in ids]
+    # A thin description is SYNOPSIS work now, not a raw-prose sample taken at tag time (#69):
+    # `scourgify synopsis` writes those books a real description and they graduate back here.
+    targets = [(b, strip_html(desc.get(b, ""))) for b in ids]
     kept = [(b, t) for b, t in targets if t and len(t) >= 40]
     # flush: the live dashboard writes straight through, so an unflushed plain print lands
     # AFTER it when stdout is a pipe (scripting/CI) rather than a terminal
     print(f"  scope: {scope} -> {len(ids)} books", flush=True)
     if missing: print(f"  note: {missing} requested id(s) not in the library")
     if len(kept) < len(targets):                  # no silent drops: thin descriptions are reported, not vanished
-        print(f"  note: {len(targets) - len(kept)} dropped (description under 40 chars"
-              + (")" if a.text_fallback else "; --text-fallback samples the book text instead)"))
+        print(f"  note: {len(targets) - len(kept)} dropped (description under 40 chars — "
+              "`scourgify synopsis` gives these books a real one)")
     titles = book_titles(con)
     if a.limit: kept = kept[:a.limit]
     return kept, titles, needs
@@ -317,7 +312,7 @@ class Plan:
             for r in read_proposal():
                 bid, at = r["book_id"], r["added_tags"]
                 self.proposal[bid] = (at, r["proposed_new"])
-                if (at or not a.text_fallback) and not self.needs(bid):   # re-process books changed since last wrangle
+                if not self.needs(bid):        # only an explicitly scoped book is re-processed
                     self.done.add(bid)
         self.todo = [(b, d) for b, d in self.targets if b not in self.done]
         if a.batch: self.todo = self.todo[:a.batch]
@@ -473,7 +468,6 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"difflib ratio (0-1) to treat a proposed tag as a variant of an existing one (default {DEDUP_CUTOFF})")
     p.add_argument("--model", default="", help="override the per-engine default model")
     p.add_argument("--timeout", type=int, default=60, metavar="S", help="per-request HTTP timeout")
-    p.add_argument("--text-fallback", action="store_true", help="sample the book's own prose when the description is thin")
     p.add_argument("--bakeoff", action="store_true", help="compare a few sample books across every usable engine, then exit (no proposal written)")
     p.add_argument("--yes", "-y", action="store_true", help="skip the large-cloud-run confirmation")
     return p
@@ -496,7 +490,6 @@ def default_opts(**overrides) -> argparse.Namespace:
 def bakeoff_cli(a: argparse.Namespace) -> None:
     """`scourgify classify --bakeoff`: the same sample-books-across-engines comparison the wizard offers,
     display-only (never writes the proposal). Plain text — works with or without rich."""
-    a.text_fallback = True                         # thin descriptions sample the book text, like the wizard's compare
     targets, titles, _ = gather(a)
     if not targets:
         print("no candidate books with usable text — nothing to compare."); return
