@@ -29,6 +29,14 @@ def fail() -> str:
     return os.path.join(data_dir(), "classify_failures.csv")
 
 
+def syn_fail() -> str:
+    """Books the synopsis pass could not settle (unreadable/DRM'd file, model refusal, an
+    unparseable verdict). Same FAIL_COLS shape and the same self-clearing merge as classify's
+    log — and for the same reason: it retires a book from the queue exactly as long as it stays
+    blocked, so the sweep is finite on the failure side too."""
+    return os.path.join(data_dir(), "synopsis_failures.csv")
+
+
 def review() -> str:
     """promote's adjudicated verdicts awaiting apply."""
     return os.path.join(data_dir(), "promote_review.csv")
@@ -208,6 +216,13 @@ def classified_ids() -> set:
     seen |= _ids(prop())
     seen |= _ids(fail())
     return seen
+
+
+def synopsis_failed_ids() -> set:
+    """Books the synopsis pass attempted and could not settle — the queue's failure-side cursor.
+    Only the log: everything else the queue needs (the #synopsized stamp, the refresh clock) is
+    library state, so there is no archive to glob here."""
+    return _ids(syn_fail())
 
 
 def applied_proposals() -> list:
