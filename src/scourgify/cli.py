@@ -1,7 +1,8 @@
 """Single `scourgify` command.
 
 Dispatch: bare -> wizard (via wrangle); setup/audit/apply -> wrangle;
-classify -> classify; staleness -> staleness. Each tool keeps its own argparse,
+classify -> classify;
+synopsis -> synopsis; staleness -> staleness. Each tool keeps its own argparse,
 so we just hand off argv. Imports are lazy so `scourgify --version` stays cheap.
 """
 import sys
@@ -36,6 +37,10 @@ def _dispatch():
         from scourgify import staleness
         sys.argv = ["scourgify staleness", *argv[1:]]
         return staleness.main()
+    if argv and argv[0] == "synopsis":
+        from scourgify import synopsis
+        sys.argv = ["scourgify synopsis", *argv[1:]]
+        return synopsis.main()
     if argv and argv[0] == "promote":
         from scourgify import promote
         sys.argv = ["scourgify promote", *argv[1:]]

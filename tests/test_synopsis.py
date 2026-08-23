@@ -203,6 +203,161 @@ def test_a_model_that_returns_nothing_usable_is_a_failure_not_an_empty_descripti
     assert out == "" and "no usable synopsis" in err
 
 
+
+# ---- Plan: scope, the write contract, the failure log ----
+import contextlib, io
+
+
+@contextlib.contextmanager
+def _env(**kv):
+    saved = {k: os.environ.get(k) for k in kv}
+    for k, v in kv.items():
+        os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+    try: yield
+    finally:
+        for k, v in saved.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+
+THIN = "see inside"
+FAT = "A sheriff who used to be a monster keeps the peace in a town of exiled fairy tales. " * 2
+PREFS_ON = {"std_cols_newonly": {"comments": True}, "custom_cols": {}}
+BOOKS2 = [dict(id=1, added="2026-01-01 10:00:00", title="Good Blurb", desc=FAT),
+          dict(id=2, added="2026-01-02 10:00:00", title="Thin Blurb", desc=THIN)]
+BACK = ("A generated back cover, long enough to be worth storing in a library, with a premise "
+        "and a hook. Themes: exile, duty, noir.")
+
+
+@contextlib.contextmanager
+def lib(books=BOOKS2, custom=None, prefs=PREFS_ON):
+    """A throwaway library with real EPUB files on disk, so booktext.paths() resolves and
+    extract() actually reads. NEVER the user's library — CALIBRE_LIBRARY points into a tempdir."""
+    import zipfile
+    with tempfile.TemporaryDirectory() as td:
+        root = os.path.join(td, "library"); os.makedirs(root)
+        con = build(os.path.join(root, "metadata.db"), books,
+                    custom=custom if custom is not None else [("updated", {}), ("synopsized", {})])
+        if prefs is not None:
+            con.execute("INSERT INTO preferences VALUES(?,?)", (FFF_KEY, json.dumps(prefs)))
+        for b in books:
+            d = os.path.join(root, f"b{b['id']}"); os.makedirs(d, exist_ok=True)
+            con.execute("UPDATE books SET path=? WHERE id=?", (f"b{b['id']}", b["id"]))
+            con.execute("INSERT INTO data VALUES(?,?,?)", (b["id"], "EPUB", "f"))
+            with zipfile.ZipFile(os.path.join(d, "f.epub"), "w") as z:
+                z.writestr("ch1.xhtml", "<html><body><p>%s</p></body></html>"
+                           % ("the story went on and on. " * 900))
+        con.commit(); con.close()
+        with _env(SCOURGIFY_HOME=os.path.join(td, "home"), CALIBRE_LIBRARY=root):
+            os.makedirs(common.data_dir(), exist_ok=True)
+            yield
+
+
+@contextlib.contextmanager
+def recording_writer():
+    """synopsis.run_writer replaced by a recorder — the write is asserted, never performed."""
+    recorded = []
+    saved = synopsis.run_writer
+    synopsis.run_writer = lambda ops, force=False, **kw: recorded.append(ops)
+    try: yield recorded
+    finally: synopsis.run_writer = saved
+
+
+def _syn_failures():
+    from scourgify import artifacts
+    return artifacts.read_rows(artifacts.syn_fail())
+
+
+def test_a_bare_run_sends_nothing_and_writes_nothing():
+    """The cost pin, and the lesson CLAUDE.md records the hard way about classify: a read-only
+    check must be genuinely free. Here there is no proposal artifact to build, so a dry run is
+    the queue report and nothing else — no engine call, no library write."""
+    with lib():
+        p = synopsis.plan(synopsis.default_opts())
+        assert sorted(p.todo) == [1, 2]
+        def boom(prompt): raise AssertionError("a dry run must reach no engine")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            p.run(ask=boom)
+        assert "--apply" in buf.getvalue()
+
+
+def test_apply_keeps_a_good_blurb_writes_a_bad_one_and_stamps_both():
+    """The write contract in one assertion: comments is set ONLY for the generated book, while
+    #synopsized stamps every book the run settled — a kept blurb is settled too, and an unstamped
+    one would be re-read and re-judged on every future sweep."""
+    with lib(), recording_writer() as recorded:
+        p = synopsis.plan(synopsis.default_opts(apply=True))
+        with contextlib.redirect_stdout(io.StringIO()):
+            p.run(ask=FakeAsk(judge="YES", back=BACK))
+    (ops,) = recorded
+    # book ids stringify through op_set_field (ops.coerce puts both write paths back on int)
+    sets = {o["field"]: {int(b): v for b, v in o["values"].items()}
+            for o in ops if o["op"] == "set_field"}
+    assert list(sets["comments"]) == [2]                    # only the thin-blurb book is rewritten
+    assert sets["comments"][2].startswith("A generated back cover")
+    (stamp,) = [o for o in ops if o["op"] == "stamp_now"]
+    assert stamp["field"] == "#synopsized" and sorted(stamp["books"]) == [1, 2]
+    assert not [o for o in ops if o["op"] == "create_column"]      # the column already exists
+
+
+def test_the_stamp_column_is_created_on_first_run():
+    with lib(custom=[("updated", {})]), recording_writer() as recorded:
+        p = synopsis.plan(synopsis.default_opts(apply=True))
+        with contextlib.redirect_stdout(io.StringIO()):
+            p.run(ask=FakeAsk(judge="YES", back=BACK))
+    (ops,) = recorded
+    assert ops[0]["op"] == "create_column" and ops[0]["label"] == "synopsized"
+
+
+def test_a_failed_book_lands_in_the_failure_log_and_is_not_stamped():
+    """Not stamped, because a blocked book must stay retryable; in the log, because otherwise it
+    re-occupies the head of every batch forever."""
+    with lib([BOOKS2[1]]), recording_writer() as recorded:
+        p = synopsis.plan(synopsis.default_opts(apply=True))
+        with contextlib.redirect_stdout(io.StringIO()):
+            p.run(ask=FakeAsk(err="quota: 429"))
+        rows = _syn_failures()
+        assert [int(r["book_id"]) for r in rows] == [2]
+        assert "quota" in rows[0]["reason"]
+    assert recorded == []                                   # nothing settled -> nothing written
+
+
+def test_the_failure_log_clears_when_a_book_later_succeeds():
+    """Self-clearing, like classify's: a book recovered on another engine must LEAVE the list or
+    it reads as blocked forever — and would stay out of the queue forever with it."""
+    with lib([BOOKS2[1]]), recording_writer():
+        with contextlib.redirect_stdout(io.StringIO()):
+            synopsis.plan(synopsis.default_opts(apply=True)).run(ask=FakeAsk(err="quota: 429"))
+            assert len(_syn_failures()) == 1
+            synopsis.plan(synopsis.default_opts(apply=True, books="2")).run(ask=FakeAsk(back=BACK))
+        assert _syn_failures() == []
+
+
+def test_batch_caps_the_run_newest_first():
+    with lib():
+        p = synopsis.plan(synopsis.default_opts(batch=1))
+        assert p.todo == [2]
+
+
+def test_named_books_are_re_settled_whatever_the_stamp_says():
+    """--books is the targeted redo: it bypasses the queue, so a settled book can be re-done."""
+    with lib(custom=[("updated", {}), ("synopsized", {1: "2030-01-01 00:00:00+00:00"})]):
+        assert 1 not in synopsis.plan(synopsis.default_opts()).todo      # settled
+        assert synopsis.plan(synopsis.default_opts(books="1")).todo == [1]
+
+
+def test_the_guard_fires_before_any_work():
+    off = {"std_cols_newonly": {"comments": False}, "custom_cols": {}}
+    with lib(prefs=off):
+        try:
+            synopsis.plan(synopsis.default_opts(apply=True))
+            assert False, "expected the pre-flight guard to refuse"
+        except common.GuardrailError as e:
+            assert "New Only" in str(e)
+    with lib(prefs=off):
+        synopsis.plan(synopsis.default_opts(apply=True, force=True))   # degraded mode, opted into
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
