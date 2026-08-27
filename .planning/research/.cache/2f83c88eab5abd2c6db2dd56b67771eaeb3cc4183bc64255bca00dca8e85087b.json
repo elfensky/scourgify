@@ -1,0 +1,1 @@
+{"content":"Calibre's new_api (db.cache.Cache) has no concept of marked books; marking must go through the legacy db object via db.set_marked_ids(matched_ids). Plugins needing marks must therefore hold/acquire the legacy handle alongside new_api.","source":"web","provider":"websearch","confidence":"MEDIUM","fetched_at":"2026-08-27T23:14:31.392Z","ttl":86400000,"kind":"web"}
