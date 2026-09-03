@@ -1,0 +1,85 @@
+---
+gsd_state_version: '1.0'
+status: planning
+progress:
+  total_phases: 6
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
+---
+
+# Project State
+
+## Project Reference
+
+See: .planning/PROJECT.md (updated 2026-08-28)
+
+**Core value:** The full maintenance loop (wrangle → staleness → synopsis → classify → review → promote → backfill) runs from a Calibre toolbar button, on the live library, with every guard, backup and undo the CLI has — and never freezes or corrupts Calibre.
+**Current focus:** Phase 1 — Foundation: a hostable core
+
+## Current Position
+
+Phase: 1 of 6 (Foundation — a hostable core)
+Plan: 0 of TBD in current phase
+Status: Ready to plan
+Last activity: 2026-08-28 — Roadmap created (6 phases, 40/40 requirements mapped)
+
+Progress: [░░░░░░░░░░] 0%
+
+## Performance Metrics
+
+**Velocity:**
+- Total plans completed: 0
+- Average duration: -
+- Total execution time: 0.0 hours
+
+**By Phase:**
+
+| Phase | Plans | Total | Avg/Plan |
+|-------|-------|-------|----------|
+| - | - | - | - |
+
+**Recent Trend:**
+- Last 5 plans: -
+- Trend: -
+
+*Updated after each plan completion*
+
+## Accumulated Context
+
+### Decisions
+
+Decisions are logged in PROJECT.md Key Decisions table.
+Recent decisions affecting current work:
+
+- [Roadmap]: Plumbing-first — FOUND-01..07 plus the Windows CI lane (XPLAT-01..03) land in Phase 1 before any write verb; each piece reproduces an already-observed phase-4/5 bug if skipped, and a Windows lane landed first guards every later Qt phase instead of a late handoff discovering it.
+- [Roadmap]: Cross-platform hardening folded into Phase 1, not a late phase — FOUND-02/07 are already Windows work and SETUP-03 (key-first onboarding) depends on XPLAT-02 (apple absent off-mac).
+- [Roadmap]: Roadmap phases 2 / 4 / 5 are spec phases 6 / 7 / 8 (#59 / #60 / #61); the NLSpec stays the acceptance authority for plugin behaviour.
+- [Roadmap]: Phase 4 dashboard acceptance does not depend on true QDockWidget docking (spike; non-modal window is the fallback); Phase 5 review carries an explicit early marks/snapshot spike (no precedent anywhere).
+- [Roadmap]: PUB-05 (CLI/wizard unchanged) is verified in Phase 6 but is a standing rule inherited by every phase's success criteria.
+
+### Pending Todos
+
+None yet.
+
+### Blockers/Concerns
+
+- [Phase 1]: XPLAT-03's `calibre-debug.exe` resolution on `windows-latest` is conventional, not verified on a real Windows install — the CI lane is where it gets settled.
+- [Phase 4]: QDockWidget main-window integration has no worked third-party example; plan around the non-modal-window fallback.
+- [Phase 5]: The exact read-back call for current marked ids (`db.data.marked_ids`?) is unverified against a live Calibre 9.11 — a five-minute spike before the snapshot/restore helper's shape is finalized.
+- [Phase 3]: `CreateCustomColumn.must_restart()`'s exact call sequence needs a direct Calibre source re-read at implementation time.
+
+## Deferred Items
+
+Items acknowledged and deferred at milestone close, most recent first:
+
+| Category | Item | Status | Deferred At | Milestone |
+|----------|------|--------|-------------|-----------|
+| *(none)* | | | | |
+
+## Session Continuity
+
+Last session: 2026-08-28
+Stopped at: Roadmap and state initialized; awaiting user approval of the roadmap draft
+Resume file: None
