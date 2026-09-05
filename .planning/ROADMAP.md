@@ -58,7 +58,15 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. A second write job against the same library while one is running is refused with a visible reason naming the running job, and an op whose current value no longer matches its expected before-value is skipped and reported by book — never overwritten — through `ops.apply_ops` using `editlog.conflict`.
   4. The wizard's scope-menu, engine-picker and checklist option computations live in `report.py`/tool modules as pure functions that the wizard now consumes, with `tests/test_wizard_flow.py` and `tests/test_cli.py` passing unchanged.
   5. CI has a green `windows-latest` lane running the core tests and the `calibre-debug` smoke against a downloaded Calibre; off-macOS the apple engine is absent from `usable_engines` and never attempted; no in-process guard shells out (`calibre_open()` stays CLI-only; Windows-side detection uses `tasklist`, never `pgrep`/`ps`).
-**Plans**: TBD
+**Plans**: 6 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — Per-library state: uuid-keyed `data_dir()`, Windows `user_dir()`, guarded legacy migration (wave 1, tracer)
+- [ ] 01-02-PLAN.md — Windows + Linux CI lanes: core tests on `windows-latest` and the `calibre-debug` smoke (wave 1)
+- [ ] 01-03-PLAN.md — Defaults readable from inside the zip, and apple absent off its platform (wave 2)
+- [ ] 01-04-PLAN.md — One write funnel, the library-uuid write-run lock, and non-shelling guards (wave 3)
+- [ ] 01-05-PLAN.md — Pure option functions in the tool modules and a `decide=` seam on every checklist (wave 3)
+- [ ] 01-06-PLAN.md — Apply-time conflict checks: `expected` on the op, skip-and-report by book (wave 4)
 
 ### Phase 2: Write verbs on a selection
 **Goal**: Every wizard stage is a verb on the selected books from the toolbar menu — preview computed in a PLAN job, decision taken in a Qt picker that makes no core call, write done in an EXECUTE job through `common.write_ops` — with the price on the control instead of a confirmation dialog, every write logged per op, and a diff-after that names what was skipped. Spec phase 6 (#59); lands the plugin job runner's per-job ceremony (#72) and the one ask envelope that carries failure classes to the ledger (#73). Build classify first (the engine picker and cost display are the highest-stakes UI), then the deterministic verbs.
@@ -131,7 +139,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6. Phase 3's colu
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation — a hostable core | 0/TBD | Not started | - |
+| 1. Foundation — a hostable core | 0/6 | Not started | - |
 | 2. Write verbs on a selection | 0/TBD | Not started | - |
 | 3. In-plugin setup and onboarding | 0/TBD | Not started | - |
 | 4. The dashboard | 0/TBD | Not started | - |
