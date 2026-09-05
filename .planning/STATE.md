@@ -1,6 +1,15 @@
 ---
-gsd_state_version: '1.0'
+gsd_state_version: 1.0
+milestone: v1
+milestone_name: (the terminal goes away)
+current_phase: 1
+current_phase_name: Foundation — a hostable core
 status: planning
+stopped_at: Phase 1 context gathered
+last_updated: "2026-09-05T22:00:03.860Z"
+last_activity: 2026-08-28
+last_activity_desc: Roadmap created (6 phases, 40/40 requirements mapped)
+state_head: 33d1e5bcc00d68df15450f2950bec6924d490d61
 progress:
   total_phases: 6
   completed_phases: 0
@@ -30,6 +39,7 @@ Progress: [░░░░░░░░░░] 0%
 ## Performance Metrics
 
 **Velocity:**
+
 - Total plans completed: 0
 - Average duration: -
 - Total execution time: 0.0 hours
@@ -41,6 +51,7 @@ Progress: [░░░░░░░░░░] 0%
 | - | - | - | - |
 
 **Recent Trend:**
+
 - Last 5 plans: -
 - Trend: -
 
@@ -80,6 +91,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-08-28
-Stopped at: Roadmap and state initialized; awaiting user approval of the roadmap draft
-Resume file: None
+Last session: 2026-09-05T22:00:03.847Z
+Stopped at: Phase 1 context gathered
+Resume file: .planning/phases/01-foundation-a-hostable-core/01-CONTEXT.md
