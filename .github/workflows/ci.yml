@@ -201,8 +201,9 @@ jobs:
         # Run 34142222493's first attempt failed here, not on the download: the official
         # linux-installer.sh refuses outright without libEGL.so.1 — ubuntu-latest carries no
         # GL stack by default. A missing runner dependency, not a flaky download, so D-12's
-        # "demote the smoke job" fallback does not apply.
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libegl1 libopengl0
+        # "demote the smoke job" fallback does not apply. Run 34142905483's re-attempt got past
+        # libEGL and hit a second missing library the installer named: libxcb-cursor.so.0.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libegl1 libopengl0 libxcb-cursor0
 
       - name: Install Calibre (official installer, unprivileged prefix)
         shell: bash
