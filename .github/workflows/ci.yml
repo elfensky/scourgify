@@ -6,8 +6,11 @@ name: CI
 # an enforced fact. (No lint leg: scourgify ships no ruff config or dev deps — the
 # tests are the gate.)
 #
-# test-windows below runs the same suite on windows-latest because Windows is
-# one of this milestone's acceptance targets (see 01-02-PLAN.md).
+# Windows and the calibre-debug smoke (test-windows, smoke-calibre-windows,
+# smoke-calibre-linux) exist because Windows and macOS are this milestone's
+# acceptance targets, and Calibre's own bundled interpreter is the one property
+# the plain-assert suite alone cannot prove (see 01-02-PLAN.md). CALIBRE_VERSION
+# is pinned ONCE below; bumping it is a single visible commit (D-13).
 
 on:
   push:
@@ -21,6 +24,11 @@ permissions:
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The one place the Calibre version is written. Both smoke jobs read this —
+  # never hardcode the version number anywhere else in this file (D-13).
+  CALIBRE_VERSION: "9.11.0"
 
 jobs:
   test:
@@ -48,8 +56,8 @@ jobs:
           for t in tests/test_*.py; do uv run "$t"; done
 
   test-windows:
-    # D-14: the floor (3.10/3.13) stays proven on ubuntu above; this job proves the
-    # whole plain-assert suite — including plan 01-03's platform-gate tests in
+    # D-12/D-14: the floor (3.10/3.13) stays proven on ubuntu above; this job proves
+    # the whole plain-assert suite — including plan 01-03's platform-gate tests in
     # tests/test_engines.py — on a natively win32 host, on 3.14 only (the version
     # Calibre 9.11 bundles). Blocking within this workflow from day one (D-12);
     # making it a REQUIRED check on `main` is a branch-protection setting, not
@@ -70,3 +78,153 @@ jobs:
         shell: bash
         run: |  # same loop, same meaning of "in CI by existing", as the ubuntu job above
           for t in tests/test_*.py; do uv run "$t"; done
+
+  smoke-calibre-windows:
+    # The one property the plain-assert suite cannot assert: that every core module
+    # imports and reads under Calibre's OWN bundled interpreter. Read-only —
+    # tests/smoke_calibre.py never writes and CALIBRE_LIBRARY is deliberately left
+    # unset here (a library is a manual-pass concern, not a CI one).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Cache Calibre installer
+        id: cache-installer
+        uses: actions/cache@v4
+        with:
+          path: calibre-installer
+          key: calibre-installer-${{ runner.os }}-${{ env.CALIBRE_VERSION }}
+
+      - name: Download Calibre installer
+        if: steps.cache-installer.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path calibre-installer | Out-Null
+          $url = "https://download.calibre-ebook.com/${{ env.CALIBRE_VERSION }}/calibre-64bit-${{ env.CALIBRE_VERSION }}.msi"
+          Invoke-WebRequest -Uri $url -OutFile "calibre-installer\calibre.msi"
+
+      - name: Install Calibre silently
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem calibre-installer -Filter *.msi | Select-Object -First 1
+          $logPath = Join-Path (Get-Location) "calibre-install.log"
+          $proc = Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart /L*v `"$logPath`"" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            Write-Host "msiexec exited with code $($proc.ExitCode) — see calibre-install.log"
+            exit $proc.ExitCode
+          }
+
+      - name: Resolve calibre-debug.exe
+        id: resolve
+        shell: pwsh
+        run: |
+          # STATED priority order (Pitfall 3 / OpenCode plan-02 HIGH): the conventional
+          # 64-bit install dir first, then PATH, then a bounded one-level search under
+          # both Program Files roots. Fails with every searched path named.
+          $searched = New-Object System.Collections.Generic.List[string]
+          $resolved = $null
+          $hit = $null
+
+          $conventional = "C:\Program Files\Calibre2\calibre-debug.exe"
+          $searched.Add($conventional)
+          if (Test-Path $conventional) {
+            $resolved = $conventional
+            $hit = "conventional 64-bit install dir"
+          }
+
+          if (-not $resolved) {
+            $searched.Add("PATH (Get-Command calibre-debug)")
+            $cmd = Get-Command calibre-debug -ErrorAction SilentlyContinue
+            if ($cmd) {
+              $resolved = $cmd.Source
+              $hit = "PATH"
+            }
+          }
+
+          if (-not $resolved) {
+            foreach ($root in @("C:\Program Files", "C:\Program Files (x86)")) {
+              $searched.Add("$root\*\calibre-debug.exe (one level)")
+              $found = Get-ChildItem -Path $root -Filter "calibre-debug.exe" -Depth 1 -ErrorAction SilentlyContinue -Recurse |
+                Select-Object -First 1
+              if ($found) {
+                $resolved = $found.FullName
+                $hit = "bounded Program Files search ($root)"
+                break
+              }
+            }
+          }
+
+          if (-not $resolved) {
+            Write-Host "FAILED to locate calibre-debug.exe. Searched:"
+            $searched | ForEach-Object { Write-Host "  - $_" }
+            $searched | ForEach-Object { Add-Content -Path searched-paths.txt -Value $_ }
+            exit 1
+          }
+
+          Write-Host "Resolved calibre-debug.exe via: $hit -> $resolved"
+          # Add-Content, not Out-File: Out-File's utf8 encoding can prepend a BOM, which
+          # corrupts $GITHUB_OUTPUT's key=value parsing.
+          Add-Content -Path searched-paths.txt -Value "resolved via: $hit -> $resolved"
+          Add-Content -Path searched-paths.txt -Value "searched (in order):"
+          $searched | ForEach-Object { Add-Content -Path searched-paths.txt -Value $_ }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "path=$resolved"
+
+      - name: Print calibre-debug version
+        shell: pwsh
+        run: |
+          & "${{ steps.resolve.outputs.path }}" --version
+
+      - name: Run calibre-debug smoke
+        shell: pwsh
+        run: |
+          & "${{ steps.resolve.outputs.path }}" -e tests/smoke_calibre.py
+
+      - name: Upload install diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: calibre-windows-install-diagnostics
+          path: |
+            calibre-install.log
+            searched-paths.txt
+          if-no-files-found: ignore
+
+  smoke-calibre-linux:
+    # Same smoke as smoke-calibre-windows, against the official Linux installer
+    # pinned to the same CALIBRE_VERSION (D-14). Today ci.yml has no Calibre
+    # install step on any OS — this is first-time integration work.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Calibre (official installer, unprivileged prefix)
+        shell: bash
+        run: |
+          set -o pipefail
+          PREFIX="${RUNNER_TEMP}/calibre"
+          mkdir -p "$PREFIX"
+          curl -fsSL https://download.calibre-ebook.com/linux-installer.sh -o linux-installer.sh
+
+          if sh linux-installer.sh version="${{ env.CALIBRE_VERSION }}" install_dir="$PREFIX" isolated=y 2>&1 | tee calibre-install.log; then
+            echo "install mode: unprivileged (install_dir=/isolated=y)" | tee -a calibre-install.log
+            echo "CALIBRE_BIN=$PREFIX/calibre-debug" >> "$GITHUB_ENV"
+          else
+            echo "unprivileged install failed — falling back to sudo sh (the named fallback; GitHub Linux runners have passwordless sudo)" | tee -a calibre-install.log
+            sudo sh linux-installer.sh version="${{ env.CALIBRE_VERSION }}" 2>&1 | tee -a calibre-install.log
+            echo "install mode: sudo fallback" | tee -a calibre-install.log
+            echo "CALIBRE_BIN=calibre-debug" >> "$GITHUB_ENV"
+          fi
+
+      - name: Print calibre-debug version
+        run: $CALIBRE_BIN --version
+
+      - name: Run calibre-debug smoke
+        run: $CALIBRE_BIN -e tests/smoke_calibre.py
+
+      - name: Upload install log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: calibre-linux-install-log
+          path: calibre-install.log
+          if-no-files-found: ignore
