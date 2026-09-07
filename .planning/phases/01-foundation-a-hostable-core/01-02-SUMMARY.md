@@ -309,6 +309,13 @@ gh api -X PATCH repos/elfensky/scourgify/branches/main/protection/required_statu
 - Plan 01-01's `data_dir()`/`user_dir()`/migration work (D-01 through D-05) is now proven on a real Windows filesystem, not just monkeypatched unit tests — all 27 `test_paths.py` tests green on `windows-latest`.
 - No blockers for plan 01-03. Branch protection (above) is the only outstanding item, and it is explicitly not this plan's decision to make.
 
+## Self-Check: PASSED
+
+- `.github/workflows/ci.yml`, `src/scourgify/cli.py`, `tests/test_books_cli.py` — all confirmed present on disk.
+- All 11 task/fix commits (`f5f039e`, `64e3a78`, `80ee828`, `b2f396c`, `9a2c9b3`, `3f2a9fd`, `e26cb57`, `1a39f97`, `e6afca8`, `23de0e2`, `4ae62c4`) plus this SUMMARY's commit (`de11553`) confirmed present in `git log`.
+- CI run [34150694155](https://github.com/elfensky/scourgify/actions/runs/34150694155): all six jobs `success` (`test (3.10)`, `test (3.13)`, `test (3.14)`, `test-windows`, `smoke-calibre-windows`, `smoke-calibre-linux`).
+- Local gate green: `env -u CALIBRE_LIBRARY SCOURGIFY_HOME=$(mktemp -d) bash -c 'for t in tests/test_*.py; do uv run "$t" || exit 1; done'` — 25/25 files, exit 0, run immediately before the final push.
+
 ---
 *Phase: 01-foundation-a-hostable-core*
 *Completed: 2026-09-07*
