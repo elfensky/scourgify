@@ -102,6 +102,10 @@ authority for plugin behaviour; B-references below point at it.
 
 - [ ] **XPLAT-01**: The plugin loads and every core module imports under Windows Calibre's
       bundled Python 3.14 (no `pgrep`, no `chmod` assumptions, no POSIX-only paths)
+      — **split across two phases.** Phase 1 delivers the *imports* half (`smoke-calibre-windows`
+      + `test-windows`). The *plugin loads* half is deferred to Phase 6 / XPLAT-05: no plugin-side
+      code exists to load until Phase 2, and no headless runner can load a Qt `InterfaceAction`
+      into a live Calibre GUI. Do not mark XPLAT-01 Done on Phase 1 completion.
 - [ ] **XPLAT-02**: The apple engine is cleanly absent off-macOS (not listed, not attempted);
       `afm.swift` ships but is never invoked there
 - [ ] **XPLAT-03**: CI has a `windows-latest` lane running the core tests and the
@@ -189,7 +193,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | REVIEW-03 | Phase 5 | Pending |
 | REVIEW-04 | Phase 5 | Pending |
 | REVIEW-05 | Phase 5 | Pending |
-| XPLAT-01 | Phase 1 | Pending |
+| XPLAT-01 | Phase 1 (imports half) + Phase 6 (plugin-loads half, via XPLAT-05) | Pending |
 | XPLAT-02 | Phase 1 | Pending |
 | XPLAT-03 | Phase 1 | Pending |
 | XPLAT-04 | Phase 6 | Pending |

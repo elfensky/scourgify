@@ -693,10 +693,13 @@ approach with a fundamentally different one.
 | A3 | `C:\Program Files\Calibre2\` is where `calibre-debug.exe` lives on a fresh `windows-latest` GitHub Actions runner after the pinned MSI install | Common Pitfalls #3 | Medium — CITED from general Calibre/Windows documentation, but STATE.md already flags this specific fact as unverified and defers resolution to the CI lane itself; the plan should not hard-code this path without a fallback search |
 | A4 | Plain `zipfile` reading (rather than `importlib.resources`) is the right mechanism for FOUND-01's extraction, given the zip's flat `scourgify/` layout | Don't Hand-Roll | Low — `build_plugin.py`'s own construction of the zip (verified, read this session) already treats it as a flat directory tree via `zipfile.ZipFile(...).write()`, so reading it back the same way is the lower-risk symmetric choice, but `importlib.resources` was not tested against this exact zip layout to rule it out definitively |
 
-## Open Questions
+## Open Questions (RESOLVED — all three answered during planning; see the resolutions inline)
 
 1. **Does `wizard.py` keep re-export aliases for the six relocated pure functions, or does
    `test_wizard.py` get updated to call the new owning modules directly?**
+   - **RESOLVED:** no aliases; `test_wizard.py` is updated to call the new owning modules
+     directly (`01-05-PLAN.md`, Task at lines 146-151). The names are private (`_...`), so the
+     break is contained, and a re-export layer would leave two ways to reach one function.
    - What we know: CONTEXT.md's success criterion only requires `test_wizard_flow.py` and
      `test_cli.py` to pass unchanged; `test_wizard.py` calls the old names directly at ~9 sites
      (verified, see Pitfall 2).
@@ -708,6 +711,9 @@ approach with a fundamentally different one.
 
 2. **Is the run_writer/write_ops unification (Pitfall 5) a hard prerequisite for FOUND-05, or can
    the conflict check land in both functions separately as an interim step?**
+   - **RESOLVED:** hard prerequisite. Unification lands in `01-04` (wave 3), the conflict check
+     consumes it in `01-06` (wave 4) — the wave split enforces the ordering. Landing the check
+     twice would create the second equality test the phase exists to prevent.
    - What we know: the roadmap phase goal explicitly frames unification as in-scope ("Closes the
      pre-write protocol half of #71 (one write funnel)"); CONTEXT D-07 describes the conflict
      check as running "in the shared pre-write funnel" as if that funnel already exists as one
@@ -721,6 +727,9 @@ approach with a fundamentally different one.
 
 3. **What exact `expected` key shape does `op_set_field` carry (D-09), and does it apply
    per-book or as a single scalar for the whole op?**
+   - **RESOLVED:** per-book, mirroring `values` exactly (same key type, book ids stringified the
+     same way, so both round-trip through JSON identically). Adopted verbatim in
+     `01-06-PLAN.md`'s `<flagged_planner_assumptions>` (lines 97-103).
    - What we know: D-09 says "`op_set_field` gains a plan-time `expected` mapping per book,"
      and CONTEXT's discretion list separately flags "the `expected` key name on the op dict" as
      undecided.
