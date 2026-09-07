@@ -67,7 +67,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 Plans:
 **Wave 1**
 
-- [ ] 01-01-PLAN.md — Per-library state: uuid-keyed `data_dir()`, Windows `user_dir()`, guarded legacy migration (wave 1, tracer)
+- [ ] 01-01-PLAN.md — Per-library state: uuid-keyed `data_dir()`, Windows `user_dir()`, all-or-nothing guarded legacy migration behind a one-way decision gate (wave 1, tracer)
 - [ ] 01-02-PLAN.md — Windows + Linux CI lanes: core tests on `windows-latest` and the `calibre-debug` smoke (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
