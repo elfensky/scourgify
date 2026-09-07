@@ -20,15 +20,15 @@ authority for plugin behaviour; B-references below point at it.
       Calibre's own `config_dir` convention) with stdlib only — no new dependency
 - [x] **FOUND-03**: All operational artifacts (proposals, failures, edit log, backups, rejects,
       ledger) are namespaced per library uuid, so two libraries never share state
-- [ ] **FOUND-04**: A single process-global, library-uuid-keyed write-run lock — a second write
+- [x] **FOUND-04**: A single process-global, library-uuid-keyed write-run lock — a second write
       job against the same library is refused with a visible reason, never queued silently
-- [ ] **FOUND-05**: Apply-time conflict checks in `ops.apply_ops` using `editlog.conflict` — an
+- [x] **FOUND-05**: Apply-time conflict checks in `ops.apply_ops` using `editlog.conflict` — an
       op whose current value no longer matches its expected value is skipped and reported, not
       clobbered
 - [ ] **FOUND-06**: The wizard's option/decision functions (scope menus, engine picker rows,
       checklist items) live in `report.py`/tool modules as pure functions, so a two-phase
       PLAN-job → Qt picker → EXECUTE-job split consumes the same source as the wizard
-- [ ] **FOUND-07**: In-process guards never shell out — `calibre_open()` is a CLI-only concept;
+- [x] **FOUND-07**: In-process guards never shell out — `calibre_open()` is a CLI-only concept;
       any Windows-side process detection uses `tasklist`, never `pgrep`/`ps`
 
 ### Write actions on a selection (spec phase 6, B1/B2/B4)
@@ -166,10 +166,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | FOUND-01 | Phase 1 | Complete |
 | FOUND-02 | Phase 1 | Complete |
 | FOUND-03 | Phase 1 | Complete |
-| FOUND-04 | Phase 1 | Pending |
-| FOUND-05 | Phase 1 | Pending |
+| FOUND-04 | Phase 1 | Complete |
+| FOUND-05 | Phase 1 | Complete |
 | FOUND-06 | Phase 1 | Pending |
-| FOUND-07 | Phase 1 | Pending |
+| FOUND-07 | Phase 1 | Complete |
 | WRITE-01 | Phase 2 | Pending |
 | WRITE-02 | Phase 2 | Pending |
 | WRITE-03 | Phase 2 | Pending |

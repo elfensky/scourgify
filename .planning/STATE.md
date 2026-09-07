@@ -5,16 +5,16 @@ milestone_name: (the terminal goes away)
 current_phase: 01
 current_phase_name: Foundation — a hostable core
 status: executing
-stopped_at: Completed 01-03-PLAN.md
-last_updated: "2026-09-07T18:42:53.217Z"
+stopped_at: Completed 01-04-PLAN.md
+last_updated: "2026-09-07T19:07:44.641Z"
 last_activity: 2026-09-07
 last_activity_desc: Phase 01 execution started
-state_head: 4e5f33f7a4937c66cd45248ca72f6167175f54db
+state_head: 30a1dbb486333324e975e4d1d134b0ce3f31ecbf
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 6
-  completed_plans: 3
+  completed_plans: 4
   percent: 0
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-28)
 ## Current Position
 
 Phase: 01 (Foundation — a hostable core) — EXECUTING
-Plan: 4 of 6
+Plan: 5 of 6
 Status: Ready to execute
 Last activity: 2026-09-07 — Phase 01 execution started
 
@@ -63,6 +63,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P01 | 1h 35min | 5 tasks | 10 files |
 | Phase 01 P02 | 2h 3min | 3 tasks | 31 files |
 | Phase 01 P03 | 45min | 3 tasks | 6 files |
+| Phase 01 P04 | 50 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -81,6 +82,9 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-02: two Windows test failures (test_user_dir_default_is_dot_config, test_set_library_redirects_the_core...) were test-authoring gaps that proved plan 01-01's user_dir()/set_library()/db_path() correct, not production bugs. — Neither test neutralized the environment variable (APPDATA) or path-separator behavior that a real Windows host exercises; fixed the tests, not the production code.
 - [Phase 01]: 01-03: afm.swift is resolved via os.path.dirname(common.defaults_dir()), not a second cache path — defaults_dir() stays literally HERE/defaults on a normal install while the extracted cache mirrors afm.swift's real sibling position. — Keeps defaults_dir()'s contract exact (matches the plan's own acceptance criterion) while still routing afm.swift through the ONE resolver.
 - [Phase 01]: 01-03: overrides.py's common.DEFAULTS import (scourgify overrides --master, a maintainer-only checkout-only write target) left unchanged — out of scope, not a runtime read of a shipped file, never job-reachable. — Repointing it would be scope creep onto a tool this plan's must_haves/acceptance criteria never named.
+- [Phase 01]: [Phase 01]: 01-04: the write-run lock's key is _resolve_uuid() (matching backups_dir()'s own identity), with the caller-supplied lib_uuid as a fallback only — guarantees the lock and the snapshot directory never disagree about library identity.
+- [Phase 01]: [Phase 01]: 01-04: run_writer's subprocess-timeout edit-log outcome collapses from a distinct 'timeout' string into the shared protocol's generic 'failed' -- _write_run's finally is a deliberate binary ok/failed flag, and no test pinned the old 'timeout' string.
+- [Phase 01]: [Phase 01]: 01-04: the plan's acceptance-criteria grep for zero 'except BaseException' in common.py could not be satisfied literally -- two pre-existing, unrelated occurrences from plans 01-01/01-03 (rollback/cleanup handlers) are out of this plan's scope; this plan's own write-funnel code has zero occurrences, verified in isolation.
 
 ### Pending Todos
 
@@ -104,6 +108,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-07T18:42:53.200Z
-Stopped at: Completed 01-03-PLAN.md
+Last session: 2026-09-07T19:07:44.624Z
+Stopped at: Completed 01-04-PLAN.md
 Resume file: None
