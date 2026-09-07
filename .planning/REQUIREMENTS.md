@@ -108,7 +108,7 @@ authority for plugin behaviour; B-references below point at it.
       into a live Calibre GUI. Do not mark XPLAT-01 Done on Phase 1 completion.
 - [ ] **XPLAT-02**: The apple engine is cleanly absent off-macOS (not listed, not attempted);
       `afm.swift` ships but is never invoked there
-- [ ] **XPLAT-03**: CI has a `windows-latest` lane running the core tests and the
+- [x] **XPLAT-03**: CI has a `windows-latest` lane running the core tests and the
       `calibre-debug` smoke against a downloaded Calibre
 - [ ] **XPLAT-04**: A handoff checklist/prompt lives in the repo (`docs/`) so the Windows desktop
       (with Claude installed) can run the manual acceptance pass repeatably
@@ -195,7 +195,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | REVIEW-05 | Phase 5 | Pending |
 | XPLAT-01 | Phase 1 (imports half) + Phase 6 (plugin-loads half, via XPLAT-05) | Pending |
 | XPLAT-02 | Phase 1 | Pending |
-| XPLAT-03 | Phase 1 | Pending |
+| XPLAT-03 | Phase 1 | Complete |
 | XPLAT-04 | Phase 6 | Pending |
 | XPLAT-05 | Phase 6 | Pending |
 | PUB-01 | Phase 6 | Pending |

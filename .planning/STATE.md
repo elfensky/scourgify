@@ -5,16 +5,16 @@ milestone_name: (the terminal goes away)
 current_phase: 01
 current_phase_name: Foundation — a hostable core
 status: executing
-stopped_at: Completed 01-01-PLAN.md
-last_updated: "2026-09-07T15:59:18.313Z"
+stopped_at: Completed 01-02-PLAN.md
+last_updated: "2026-09-07T18:19:02.069Z"
 last_activity: 2026-09-07
 last_activity_desc: Phase 01 execution started
-state_head: 19ca385b81fe517aedeae4ef9be883ce500ee66a
+state_head: e4b7ef211f42ca636fba5897f8e2bd4bb0fb20b4
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 6
-  completed_plans: 1
+  completed_plans: 2
   percent: 0
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-28)
 ## Current Position
 
 Phase: 01 (Foundation — a hostable core) — EXECUTING
-Plan: 2 of 6
+Plan: 3 of 6
 Status: Ready to execute
 Last activity: 2026-09-07 — Phase 01 execution started
 
@@ -61,6 +61,7 @@ Progress: [░░░░░░░░░░] 0%
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 01 P01 | 1h 35min | 5 tasks | 10 files |
+| Phase 01 P02 | 2h 3min | 3 tasks | 31 files |
 
 ## Accumulated Context
 
@@ -75,6 +76,8 @@ Recent decisions affecting current work:
 - [Roadmap]: Phase 4 dashboard acceptance does not depend on true QDockWidget docking (spike; non-modal window is the fallback); Phase 5 review carries an explicit early marks/snapshot spike (no precedent anywhere).
 - [Roadmap]: PUB-05 (CLI/wizard unchanged) is verified in Phase 6 but is a standing rule inherited by every phase's success criteria.
 - [Phase 01]: Task 3 decision: a-guarded-auto-move approved with verified Time Machine + APFS snapshot backup; real ~/.config/scourgify/data (527MB) migrated intact into data/<uuid>/ during Task 5
+- [Phase 01]: 01-02: Windows console-encoding fix (Fix 6) goes in cli.main(), not report.py -- report.py runs inside Calibre jobs too; stripping report.py's non-ASCII glyphs was considered and rejected as degrading the interface on every platform for one legacy console. — report.py is the ONE owner of render policy; reconfiguring process streams there would be an import-time side effect that could mutate a live Calibre job's own stdout/stderr.
+- [Phase 01]: 01-02: two Windows test failures (test_user_dir_default_is_dot_config, test_set_library_redirects_the_core...) were test-authoring gaps that proved plan 01-01's user_dir()/set_library()/db_path() correct, not production bugs. — Neither test neutralized the environment variable (APPDATA) or path-separator behavior that a real Windows host exercises; fixed the tests, not the production code.
 
 ### Pending Todos
 
@@ -86,6 +89,7 @@ None yet.
 - [Phase 4]: QDockWidget main-window integration has no worked third-party example; plan around the non-modal-window fallback.
 - [Phase 5]: The exact read-back call for current marked ids (`db.data.marked_ids`?) is unverified against a live Calibre 9.11 — a five-minute spike before the snapshot/restore helper's shape is finalized.
 - [Phase 3]: `CreateCustomColumn.must_restart()`'s exact call sequence needs a direct Calibre source re-read at implementation time.
+- Branch protection on main is NOT updated. Lane is green (run 34150694155) but adding test-windows/smoke-calibre-windows/smoke-calibre-linux as required status checks needs a separate developer confirmation, per standing instruction. Command recorded in 01-02-SUMMARY.md.
 
 ## Deferred Items
 
@@ -97,6 +101,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-07T15:59:18.298Z
-Stopped at: Completed 01-01-PLAN.md
+Last session: 2026-09-07T18:19:02.053Z
+Stopped at: Completed 01-02-PLAN.md
 Resume file: None
