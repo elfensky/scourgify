@@ -561,6 +561,35 @@ def test_both_transports_skip_the_same_ops():
     assert cli_ops[0]["values"] == plugin_ops[0]["values"] == {"1": ["New"]}
 
 
+# ---------------- the comments before-read (T-01-28, plan 01-06 Task 2) ----------------
+def test_column_values_reads_the_builtin_comments_field():
+    """`comments` is a Calibre BUILTIN table, not a custom column — the existing custom_columns
+    lookup misses it, so before this fix every `comments` before-value was None for every book."""
+    d = tempfile.mkdtemp()
+    con = fixture_db.build(os.path.join(d, "metadata.db"),
+                           [{"id": 1, "desc": "A real blurb."}, {"id": 2}])
+    try:
+        got = common.column_values(con, "comments", [1, 2])
+        assert got == {1: "A real blurb.", 2: None}
+        assert common.column_is_multiple(con, "comments") is False
+    finally:
+        con.close()
+
+
+def test_a_comments_op_gets_a_real_before_value():
+    """The assertion that would have caught the synopsis write-nothing failure: without the
+    comments branch, this before-read yields None instead of the stored blurb."""
+    from scourgify import editlog
+    d = tempfile.mkdtemp()
+    con = fixture_db.build(os.path.join(d, "metadata.db"), [{"id": 1, "desc": "Original blurb."}])
+    try:
+        ops = [common.op_set_field("comments", {1: "A generated back cover."})]
+        before = editlog.before_values(lambda f, bs: common.column_values(con, f, bs), ops)
+        assert before["comments"][1] == "Original blurb."
+    finally:
+        con.close()
+
+
 def test_a_write_run_still_prunes_past_the_backup_keep_budget():
     lib = _lib()
     old_keep = common.BACKUP_KEEP

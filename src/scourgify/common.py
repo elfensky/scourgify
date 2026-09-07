@@ -793,10 +793,13 @@ def _is_wipe(n_before, n_after):
     return n_before >= WRITE_WIPE_FLOOR and n_after < n_before * (1 - WRITE_WIPE_FRAC)
 
 def _populated_books(con, field):
-    """Set of book ids currently holding a non-empty value for `field` (builtin tags or a custom column).
-    The read-only-sqlite half of the guard's before-read; populated_via_api() is the in-process twin."""
+    """Set of book ids currently holding a non-empty value for `field` (builtin tags/comments, or
+    a custom column). The read-only-sqlite half of the guard's before-read; populated_via_api()
+    is the in-process twin."""
     if field == "tags":
         return {b for (b,) in con.execute("SELECT DISTINCT book FROM books_tags_link")}
+    if field == "comments":
+        return {b for (b,) in con.execute("SELECT book FROM comments WHERE text != ''")}
     return set(read_custom_column(con, field) or {})
 
 def column_is_multiple(con: sqlite3.Connection, field: str) -> bool:
@@ -814,9 +817,16 @@ def column_values(con: sqlite3.Connection, field: str, books=None) -> dict:
     The wipe guard reads the same column and throws the values away (`_populated_books` keeps
     only the keys, and short-circuits `tags` to DISTINCT book); capturing them is the extra join.
     `books=None` returns the whole column; a book with no value maps to None — a real
-    before-state ("nothing"), not a missing row."""
+    before-state ("nothing"), not a missing row.
+
+    `comments` is a Calibre BUILTIN table, not a custom column — the custom_columns lookup
+    `read_custom_column` uses would miss it and silently return {} for every book, which would
+    give a synopsis `set_field` op a before-value of None for every book and read every one of
+    them as a conflict (T-01-28). Read directly off the `comments` table instead."""
     if field == "tags":
         vals = {b: sorted(t) for b, t in current_tags(con).items()}
+    elif field == "comments":
+        vals = dict(con.execute("SELECT book, text FROM comments"))
     else:
         vals = read_custom_column(con, field, multi=column_is_multiple(con, field)) or {}
     return vals if books is None else {int(b): vals.get(int(b)) for b in books}
