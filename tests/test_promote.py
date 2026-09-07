@@ -2,10 +2,32 @@
 """Regression tests for tag promotion features.
 No framework needed:  uv run tests/test_promote.py   (also collectable by pytest).
 No Calibre, no library, no network."""
-import os, sys, tempfile
+import os, sys, tempfile, contextlib
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from scourgify import common
+import fixture_db
+
+
+@contextlib.contextmanager
+def _fixture_library_env(td: str, uuid: str):
+    """Point SCOURGIFY_HOME + CALIBRE_LIBRARY at a throwaway fixture library under `td` — several
+    tests here reach artifacts.*() defaults (ledger()/review()), which resolve through
+    common.data_dir(), now uuid-scoped and requiring a resolvable library. Restores both env vars
+    and clears the uuid memo on exit."""
+    old = {k: os.environ.get(k) for k in ("SCOURGIFY_HOME", "CALIBRE_LIBRARY")}
+    os.environ["SCOURGIFY_HOME"] = os.path.join(td, "home")
+    lib = os.path.join(td, "lib"); os.makedirs(lib, exist_ok=True)
+    fixture_db.build(os.path.join(lib, "metadata.db"), [{"id": 1}], uuid=uuid).close()
+    os.environ["CALIBRE_LIBRARY"] = lib
+    common.clear_uuid_cache()
+    try:
+        yield
+    finally:
+        for k, v in old.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+        common.clear_uuid_cache()
 
 
 def test_ask_retry_success_and_block():
@@ -160,12 +182,15 @@ def test_promote_run_writes_review(tmp=None):
     with open(prop, "w", newline="") as f:
         w = csv.writer(f); w.writerow(["book_id", "title", "added_tags", "proposed_new"]); w.writerow(["1", "Bend It", "", "Reality Warping"])
     review = os.path.join(d, "promote_review.csv")
-    a = promote.build_parser().parse_args(["--yes"])
-    # ask is an injected callable — the same seam decide() has; no engine registry to fake
-    promote.run(a, ranked_path=ranked, proposal_path=prop, review_path=review, existing=["Time Travel", "Fluff"],
-                ask=lambda p: '{"verdict":"promote","reason":"novel reusable trope","confidence":"high"}')
-    rows = list(csv.DictReader(open(review)))
-    assert len(rows) == 1 and rows[0]["tag"] == "Reality Warping" and rows[0]["verdict"] == "promote"
+    # candidates()'s default ledger_path (run() takes no ledger_path of its own) needs a
+    # resolvable library now that data_dir() is uuid-scoped.
+    with _fixture_library_env(d, "uuid-promote-run"):
+        a = promote.build_parser().parse_args(["--yes"])
+        # ask is an injected callable — the same seam decide() has; no engine registry to fake
+        promote.run(a, ranked_path=ranked, proposal_path=prop, review_path=review, existing=["Time Travel", "Fluff"],
+                    ask=lambda p: '{"verdict":"promote","reason":"novel reusable trope","confidence":"high"}')
+        rows = list(csv.DictReader(open(review)))
+        assert len(rows) == 1 and rows[0]["tag"] == "Reality Warping" and rows[0]["verdict"] == "promote"
 
 
 def test_apply_decisions_normalizes_verdict():
@@ -247,10 +272,12 @@ def test_run_raises_on_existing_review():
         raised = True
         assert "pending review" in str(e)
     assert raised, "expected a refusal when review file exists and --yes not set"
-    # with --yes, should overwrite without error
+    # with --yes, should overwrite without error. prop has no rows, so candidates() is empty —
+    # but candidates() still resolves its default ledger_path first, which needs a library now.
     a2 = promote.build_parser().parse_args(["--yes"])
-    # candidates list is empty (prop has no rows), so run exits early with "nothing to do"
-    promote.run(a2, ranked_path=ranked, proposal_path=prop, review_path=review, ask=fake_ask)
+    with _fixture_library_env(d, "uuid-run-raises"):
+        # candidates list is empty (prop has no rows), so run exits early with "nothing to do"
+        promote.run(a2, ranked_path=ranked, proposal_path=prop, review_path=review, ask=fake_ask)
 
 
 def test_decide_downgrades_self_and_unknown_alias():
@@ -341,20 +368,16 @@ def test_apply_decisions_counts_rows_it_could_not_decide():
     stays pending. apply must SAY so — else it reports success and the wizard's hint survives the
     apply with nothing on screen explaining why."""
     import tempfile, os
-    from scourgify import promote, artifacts, common
-    with tempfile.TemporaryDirectory() as d:
-        old = os.environ.get("SCOURGIFY_HOME"); os.environ["SCOURGIFY_HOME"] = d
-        try:
-            os.makedirs(common.data_dir()); os.makedirs(os.path.join(d, "overrides"))
-            with open(artifacts.review(), "w") as f:
-                f.write("tag,count,verdict,target,reason,confidence,contested\n"
-                        "Good,3,promote,,ok,high,False\n"
-                        "Flaky,2,error,,transport failure,low,False\n"
-                        "Bad,1,alias,,empty target,low,False\n")
-            n = promote.apply_decisions()
-            assert n["promote"] == 1 and n["skipped"] == 2, n
-        finally:
-            os.environ.pop("SCOURGIFY_HOME", None) if old is None else os.environ.__setitem__("SCOURGIFY_HOME", old)
+    from scourgify import promote, artifacts
+    with tempfile.TemporaryDirectory() as d, _fixture_library_env(d, "uuid-apply-decisions"):
+        os.makedirs(common.data_dir()); os.makedirs(os.path.join(d, "home", "overrides"))
+        with open(artifacts.review(), "w") as f:
+            f.write("tag,count,verdict,target,reason,confidence,contested\n"
+                    "Good,3,promote,,ok,high,False\n"
+                    "Flaky,2,error,,transport failure,low,False\n"
+                    "Bad,1,alias,,empty target,low,False\n")
+        n = promote.apply_decisions()
+        assert n["promote"] == 1 and n["skipped"] == 2, n
 
 
 def test_backfill_drop_redundant_is_case_and_punctuation_insensitive():

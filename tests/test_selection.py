@@ -177,11 +177,16 @@ def test_unclassified_defaults_own_the_invariant():
     number without composing the invariant by hand — smoke_calibre once diverged by forgetting
     seen, and the plugin by forgetting the sendable filter."""
     from scourgify import artifacts
-    old = os.environ.get("SCOURGIFY_HOME")
+    old = {k: os.environ.get(k) for k in ("SCOURGIFY_HOME", "CALIBRE_LIBRARY")}
     os.environ["SCOURGIFY_HOME"] = tempfile.mkdtemp()
+    lib_dir = tempfile.mkdtemp()   # artifacts.write_proposal() below resolves through data_dir(),
+                                   # which is uuid-scoped now and needs a resolvable library.
+    con = build(os.path.join(lib_dir, "metadata.db"), UBOOKS, custom=[("updated", {}), ("wrangled", {})],
+                uuid="uuid-unclassified-invariant")
+    os.environ["CALIBRE_LIBRARY"] = lib_dir
+    common.clear_uuid_cache()
     try:
         os.makedirs(common.data_dir(), exist_ok=True)
-        con = _ucon()
         con.execute("INSERT INTO data VALUES(?,?,?)", (4, "EPUB", "book4"))
         con.commit()
         # no artifacts yet: every SENDABLE book is backlog. Book 4 is thin-blurbed — it is
@@ -191,8 +196,9 @@ def test_unclassified_defaults_own_the_invariant():
         artifacts.write_proposal([{"book_id": 2, "title": "t", "added_tags": [], "proposed_new": []}])
         assert select.pick(con, "unclassified") == [3, 1]
     finally:
-        os.environ.pop("SCOURGIFY_HOME", None)
-        if old is not None: os.environ["SCOURGIFY_HOME"] = old
+        for k, v in old.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+        common.clear_uuid_cache()
 
 
 if __name__ == "__main__":

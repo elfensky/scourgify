@@ -40,8 +40,11 @@ def _pointed_at(lib):
             else: os.environ[k] = v
 
 
-def _read(home):
-    p = os.path.join(home, "data", "edits.jsonl")
+def _read(home=None):
+    """`home` is accepted (and ignored) for call-site compatibility — the log path is uuid-scoped
+    now, so it is resolved through editlog.log_path() (which reads the CALIBRE_LIBRARY still set
+    by the enclosing _pointed_at() block) rather than a literal os.path.join(home, "data", ...)."""
+    p = editlog.log_path()
     return [json.loads(l) for l in open(p)] if os.path.exists(p) else []
 
 

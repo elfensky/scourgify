@@ -15,6 +15,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "tests"))
 sys.path.insert(0, os.path.join(REPO, "src"))
 from fixture_db import build
+from scourgify import common
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|[\r\x07]")
 
@@ -40,9 +41,23 @@ def main() -> int:
                {"id": 2, "title": "Fixture Book B", "added": "2026-02-01 10:00:00",
                 "desc": "Another perfectly serviceable description. " * 3}],
               custom=cols).close()
-        home = os.path.join(td, "home"); os.makedirs(os.path.join(home, "data"))
+        home = os.path.join(td, "home"); os.makedirs(home)
         open(os.path.join(home, "config.toml"), "w").write('[columns]\n[behavior]\n[overrides]\ndir = "overrides"\n')
-        prop_path = os.path.join(home, "data", "classify_proposal.csv")
+
+        # data_dir() is uuid-scoped now — resolve it here (in THIS process, briefly pointed at the
+        # same lib/home the child subprocess below gets) so the seeded proposal lands exactly
+        # where the wizard subprocess will look for it.
+        old = {k: os.environ.get(k) for k in ("SCOURGIFY_HOME", "CALIBRE_LIBRARY")}
+        os.environ["SCOURGIFY_HOME"], os.environ["CALIBRE_LIBRARY"] = home, lib
+        common.clear_uuid_cache()
+        try:
+            data_dir = common.data_dir()
+        finally:
+            for k, v in old.items():
+                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+            common.clear_uuid_cache()
+        os.makedirs(data_dir, exist_ok=True)
+        prop_path = os.path.join(data_dir, "classify_proposal.csv")
         open(prop_path, "w").write("book_id,title,added_tags,proposed_new\n"
                                    "1,Fixture Book A,Time Loop,\n2,Fixture Book B,Fix-It,\n")
 

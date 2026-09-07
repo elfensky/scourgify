@@ -30,10 +30,10 @@ SYN = {2: STAMP, 3: STAMP, 6: STAMP}
 UPD = {3: "2026-06-01", 6: "2026-04-01"}
 
 
-def _con():
-    d = tempfile.mkdtemp()
+def _con(lib_dir=None, uuid=None):
+    d = lib_dir or tempfile.mkdtemp()
     con = build(os.path.join(d, "metadata.db"), BOOKS,
-                custom=[("updated", UPD), ("wrangled", {}), ("synopsized", SYN)])
+                custom=[("updated", UPD), ("wrangled", {}), ("synopsized", SYN)], uuid=uuid)
     con.execute("INSERT INTO data VALUES(?,?,?)", (4, "EPUB", "book4"))
     con.commit()
     return con
@@ -66,11 +66,15 @@ def test_a_failed_book_leaves_the_queue_until_it_succeeds():
 def test_queue_defaults_read_the_failure_log():
     """Bare pick("unsynopsized") is the CORRECT call — the invariant lives in select, so the
     wizard header, the CLI and any future dashboard cannot compose it differently."""
-    old = os.environ.get("SCOURGIFY_HOME")
+    old = {k: os.environ.get(k) for k in ("SCOURGIFY_HOME", "CALIBRE_LIBRARY")}
     os.environ["SCOURGIFY_HOME"] = tempfile.mkdtemp()
+    lib_dir = tempfile.mkdtemp()   # artifacts.write_failures() below resolves through data_dir(),
+                                   # which is uuid-scoped now and needs a resolvable library.
+    os.environ["CALIBRE_LIBRARY"] = lib_dir
+    common.clear_uuid_cache()
     try:
+        con = _con(lib_dir=lib_dir, uuid="uuid-synopsis-queue")   # creates metadata.db first
         os.makedirs(common.data_dir(), exist_ok=True)
-        con = _con()
         assert select.pick(con, "unsynopsized") == [4, 3, 1]
         artifacts.write_failures([[4, "book 4", "no readable text"]], artifacts.syn_fail())
         assert artifacts.synopsis_failed_ids() == {4}
@@ -78,8 +82,9 @@ def test_queue_defaults_read_the_failure_log():
         # ...and the synopsis log is NOT the classify log
         assert artifacts.syn_fail() != artifacts.fail()
     finally:
-        os.environ.pop("SCOURGIFY_HOME", None)
-        if old is not None: os.environ["SCOURGIFY_HOME"] = old
+        for k, v in old.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+        common.clear_uuid_cache()
 
 
 def test_has_file_and_sendable_are_separate_predicates():

@@ -252,9 +252,9 @@ def test_write_ops_guards_snapshots_then_applies():
     api = FakeApi(books=(1, 2, 3))
     with _pointed_at(lib) as home:
         out = _quiet(common.write_ops, api, [common.op_set_field("tags", {1: ["Isekai"]})])
+        assert glob.glob(os.path.join(common.backups_dir(), "ff_*.db")), "no snapshot before the write"
     assert api.fields["tags"] == {1: ("Isekai",)}
     assert "backup:" in out
-    assert glob.glob(os.path.join(home, "data", "backups", "ff_*.db")), "no snapshot before the write"
 
 
 def test_write_ops_refuses_a_wipe_and_writes_nothing():
@@ -269,9 +269,9 @@ def test_write_ops_refuses_a_wipe_and_writes_nothing():
             pass
         else:
             raise AssertionError("write_ops applied a catastrophic wipe")
+        assert not glob.glob(os.path.join(common.backups_dir(), "ff_*.db")), \
+            "guard ran AFTER the snapshot — a refused change-set should cost nothing"
     assert api.fields["tags"][1] == ("x",), "the wipe was applied despite the guard"
-    assert not glob.glob(os.path.join(home, "data", "backups", "ff_*.db")), \
-        "guard ran AFTER the snapshot — a refused change-set should cost nothing"
 
 
 def test_write_ops_does_nothing_for_an_empty_change_set():
@@ -279,10 +279,10 @@ def test_write_ops_does_nothing_for_an_empty_change_set():
     api = FakeApi()
     with _pointed_at(lib) as home:
         out = _quiet(common.write_ops, api, [common.op_set_field("tags", {})])
+        assert not glob.glob(os.path.join(common.backups_dir(), "ff_*.db")), \
+            "an empty change-set still burned a snapshot"
     assert "nothing to write" in out
     assert api.fields == {}
-    assert not glob.glob(os.path.join(home, "data", "backups", "ff_*.db")), \
-        "an empty change-set still burned a snapshot"
 
 
 if __name__ == "__main__":

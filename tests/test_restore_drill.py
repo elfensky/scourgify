@@ -55,7 +55,7 @@ def test_restore_drill():
         assert _sha(db) == _sha(snap), "the restored db does not match the snapshot byte for byte"
 
         # ... and the restore is itself reversible: the pre-restore state was snapshotted first
-        pre = [p for p in glob.glob(os.path.join(home, "data", "backups", "ff_*.db")) if p != snap]
+        pre = [p for p in glob.glob(os.path.join(common.backups_dir(), "ff_*.db")) if p != snap]
         assert pre, "rollback left no snapshot of the state it overwrote — a restore you can't undo"
         assert any(_books(p) == 100 for p in pre), "the pre-restore snapshot doesn't hold the state it replaced"
 
