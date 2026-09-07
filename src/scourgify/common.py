@@ -9,7 +9,7 @@ used to each carry a private copy of:
   - the single write funnel: run_writer() -> calibre-debug -e _writer.py
     (backs up metadata.db to data/backups/ before every write; refuses to run while Calibre is open)
 """
-import os, re, sys, csv, time, glob, sqlite3, contextlib, collections, unicodedata
+import os, re, sys, csv, time, glob, hashlib, sqlite3, contextlib, collections, unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))   # the installed package dir (read-only)
 DEFAULTS = os.path.join(HERE, "defaults")            # bundled generic maps — ship inside the package
@@ -17,10 +17,19 @@ DEFAULTS = os.path.join(HERE, "defaults")            # bundled generic maps — 
 
 def user_dir() -> str:
     """The one root for every user-owned file (config.toml, overrides/, data/).
-    $SCOURGIFY_HOME wins (tests, experiments); else XDG:
-    ($XDG_CONFIG_HOME or ~/.config)/scourgify. mac + Linux only — no Windows."""
-    return os.environ.get("SCOURGIFY_HOME") or os.path.join(
-        os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "scourgify")
+    Precedence, ONE total order on every OS: $SCOURGIFY_HOME wins (tests, experiments); else,
+    on Windows (os.name == "nt") with %APPDATA% set and non-empty, %APPDATA%\\scourgify (mirrors
+    Calibre's own %APPDATA%\\calibre convention); else XDG: ($XDG_CONFIG_HOME or ~/.config)/scourgify.
+    `APPDATA` is read with os.environ.get, never subscripted — an nt host without it (rare, but
+    possible) falls through to the XDG branch rather than raising."""
+    home = os.environ.get("SCOURGIFY_HOME")
+    if home:
+        return home
+    if os.name == "nt":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return os.path.join(appdata, "scourgify")
+    return os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "scourgify")
 
 
 # Per-run + per-user files live under user_dir(), not site-packages nor the invoking CWD:
@@ -39,9 +48,56 @@ BACKUP_WARN = BACKUP_BUDGET                           # wizard nudges past this 
 REJECT_COLS = ["ts", "stage", "book", "title", "kind", "column", "before", "after", "class"]
 
 
+# The library uuid is the primary key for every piece of operational state (proposals, failures,
+# edits.jsonl, backups, rejects, ledger) — a plugin opens whatever library the GUI has open and
+# switches libraries mid-session, so a path built from user_dir() alone would let a throwaway
+# library read and write the real library's history (observed once in plugin phases 4-5).
+#
+# _UUID_CACHE is memoized by library PATH, not cleared by set_library(): a Calibre library's
+# library_id.uuid does not change over the life of that folder, so a library switch cannot make
+# an entry stale, and re-opening sqlite on every switch for no gain would be wasted work. The ONE
+# case that can go stale is a test/fixture harness that rebuilds a DIFFERENT db at a path it
+# already resolved — that calls clear_uuid_cache() deliberately, the one supported reset.
+_UUID_CACHE: dict[str, str] = {}
+
+
+def _resolve_uuid() -> str:
+    """This process's memoized answer to "which library's data/<uuid>/ tree are we in".
+
+    Opens a short-lived ro_connect() and reads library_uuid() (the ONE uuid reader — do not add a
+    second). A db with no library_id table (a hand-built fixture) keys on
+    nouuid-<sha1(library path)[:12]> instead of refusing — the fallback exists for fixtures, not
+    for real Calibre libraries, which always carry the table. library() raises GuardrailError
+    when nothing is resolvable, so data_dir() inherits that refusal for free rather than ever
+    returning a library-less path."""
+    lib = library()
+    if lib not in _UUID_CACHE:
+        con = ro_connect()
+        try:
+            u = library_uuid(con)
+        finally:
+            con.close()
+        _UUID_CACHE[lib] = u or f"nouuid-{hashlib.sha1(lib.encode()).hexdigest()[:12]}"
+    return _UUID_CACHE[lib]
+
+
+def clear_uuid_cache() -> None:
+    """Empty the per-process library-uuid memo (mirrors classify.clear_caches()).
+
+    set_library() deliberately does NOT call this — the memo is keyed by library PATH and a
+    library's uuid does not change over its life, so switching libraries cannot make an entry
+    stale. This is the one supported reset, for a test/fixture harness that rebuilds a different
+    db at a path already resolved this process."""
+    _UUID_CACHE.clear()
+
+
 def data_dir() -> str:
-    """data/ under user_dir() — personal review maps, proposals, intermediates (gitignored)."""
-    return os.path.join(user_dir(), "data")
+    """user_dir()/data/<library uuid>/ — personal review maps, proposals, intermediates
+    (gitignored), namespaced per library so two libraries opened in one process never share an
+    artifact path. Raises GuardrailError (never a library-less path) when no library resolves.
+    A FUNCTION, never memoized at the user_dir() level: $SCOURGIFY_HOME set after import must
+    still redirect the whole tree."""
+    return os.path.join(user_dir(), "data", _resolve_uuid())
 
 
 def backups_dir() -> str:
