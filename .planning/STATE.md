@@ -4,17 +4,17 @@ milestone: v1
 milestone_name: (the terminal goes away)
 current_phase: 01
 current_phase_name: Foundation — a hostable core
-status: executing
-stopped_at: Completed 01-05-PLAN.md
-last_updated: "2026-09-07T19:31:46.369Z"
+status: verifying
+stopped_at: Completed 01-06-PLAN.md
+last_updated: "2026-09-07T20:02:06.169Z"
 last_activity: 2026-09-07
 last_activity_desc: Phase 01 execution started
-state_head: 53b63a3d08ed208f83a7824588f373cfeca2a3cf
+state_head: 73e1cb610a0467efef78d10f3768eeaa17fdfa7d
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 6
-  completed_plans: 5
+  completed_plans: 6
   percent: 0
 ---
 
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-28)
 
 Phase: 01 (Foundation — a hostable core) — EXECUTING
 Plan: 6 of 6
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-09-07 — Phase 01 execution started
 
 Progress: [░░░░░░░░░░] 0%
@@ -65,6 +65,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P03 | 45min | 3 tasks | 6 files |
 | Phase 01 P04 | 50 min | 3 tasks | 4 files |
 | Phase 01-foundation-a-hostable-core P05 | 40 min | 2 tasks | 8 files |
+| Phase 01 P06 | 55 min | 3 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -88,6 +89,10 @@ Recent decisions affecting current work:
 - [Phase 01]: [Phase 01]: 01-04: the plan's acceptance-criteria grep for zero 'except BaseException' in common.py could not be satisfied literally -- two pre-existing, unrelated occurrences from plans 01-01/01-03 (rollback/cleanup handlers) are out of this plan's scope; this plan's own write-funnel code has zero occurrences, verified in isolation.
 - [Phase 01]: 01-05: engines.engine_options gained an injected cost_fn parameter instead of importing classify.est_cost — classify.py already imports engines, so a verbatim relocation would have created an engines->classify import cycle; the injection breaks it while keeping D-10's locked module placement.
 - [Phase 01]: 01-05: no compatibility alias kept in wizard.py for any of the six relocated builders (orchestrator-resolved) — an import of an old private name now fails loudly; tests/test_wizard.py's call sites were repointed in the same commit.
+- [Phase 01]: 01-06: check_wipe runs on the unfiltered change-set BEFORE the conflict filter — A guard a race can disarm is not a guard
+- [Phase 01]: 01-06: an all-skipped run is a dedicated early-exit inside _write_run (header+footer, no snapshot) rather than routing an empty ops list through the normal apply path — Makes 'no snapshot, still a footer' an exact special case instead of a general property every caller has to reason about
+- [Phase 01]: 01-06: classify's expected comes from a fresh cur=current_tags(con) read at the head of apply_proposal, not the proposal's own state — The proposal schema has no before-state column; a proposal-time expected would permanently retire an edited book from the --unclassified backlog untagged, since its #wrangled stamp carries no expected
+- [Phase 01]: 01-06: synopsis.Plan keeps raw_blurbs (unstripped) alongside blurbs (stripped); the comments op's expected is built from raw_blurbs — Comparing the stripped text against the stored HTML before-value would make every op read as a conflict and silently disable the whole pass
 
 ### Pending Todos
 
@@ -111,6 +116,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-07T19:31:46.350Z
-Stopped at: Completed 01-05-PLAN.md
+Last session: 2026-09-07T20:02:06.150Z
+Stopped at: Completed 01-06-PLAN.md
 Resume file: None

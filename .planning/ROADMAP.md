@@ -62,7 +62,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. The wizard's scope-menu, engine-picker and checklist option computations live in `report.py`/tool modules as pure functions that the wizard now consumes, with `tests/test_wizard_flow.py` and `tests/test_cli.py` passing unchanged.
   5. CI has a green `windows-latest` lane running the core tests and the `calibre-debug` smoke against a downloaded Calibre; off-macOS the apple engine is absent from `usable_engines` and never attempted; no in-process guard shells out (`calibre_open()` stays CLI-only; Windows-side detection uses `tasklist`, never `pgrep`/`ps`).
 
-**Plans**: 5/6 plans executed
+**Plans**: 6/6 plans executed
 
 Plans:
 **Wave 1**
@@ -81,7 +81,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 01-06-PLAN.md — Apply-time conflict checks: `expected` on the op, skip-and-report by book (wave 4)
+- [x] 01-06-PLAN.md — Apply-time conflict checks: `expected` on the op, skip-and-report by book (wave 4)
 
 ### Phase 2: Write verbs on a selection
 
@@ -169,7 +169,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6. Phase 3's colu
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation — a hostable core | 5/6 | In Progress|  |
+| 1. Foundation — a hostable core | 6/6 | In Progress|  |
 | 2. Write verbs on a selection | 0/TBD | Not started | - |
 | 3. In-plugin setup and onboarding | 0/TBD | Not started | - |
 | 4. The dashboard | 0/TBD | Not started | - |
