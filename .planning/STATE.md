@@ -5,16 +5,16 @@ milestone_name: (the terminal goes away)
 current_phase: 01
 current_phase_name: Foundation — a hostable core
 status: executing
-stopped_at: Completed 01-04-PLAN.md
-last_updated: "2026-09-07T19:07:44.641Z"
+stopped_at: Completed 01-05-PLAN.md
+last_updated: "2026-09-07T19:31:46.369Z"
 last_activity: 2026-09-07
 last_activity_desc: Phase 01 execution started
-state_head: 30a1dbb486333324e975e4d1d134b0ce3f31ecbf
+state_head: 53b63a3d08ed208f83a7824588f373cfeca2a3cf
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 6
-  completed_plans: 4
+  completed_plans: 5
   percent: 0
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-28)
 ## Current Position
 
 Phase: 01 (Foundation — a hostable core) — EXECUTING
-Plan: 5 of 6
+Plan: 6 of 6
 Status: Ready to execute
 Last activity: 2026-09-07 — Phase 01 execution started
 
@@ -64,6 +64,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P02 | 2h 3min | 3 tasks | 31 files |
 | Phase 01 P03 | 45min | 3 tasks | 6 files |
 | Phase 01 P04 | 50 min | 3 tasks | 4 files |
+| Phase 01-foundation-a-hostable-core P05 | 40 min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -85,6 +86,8 @@ Recent decisions affecting current work:
 - [Phase 01]: [Phase 01]: 01-04: the write-run lock's key is _resolve_uuid() (matching backups_dir()'s own identity), with the caller-supplied lib_uuid as a fallback only — guarantees the lock and the snapshot directory never disagree about library identity.
 - [Phase 01]: [Phase 01]: 01-04: run_writer's subprocess-timeout edit-log outcome collapses from a distinct 'timeout' string into the shared protocol's generic 'failed' -- _write_run's finally is a deliberate binary ok/failed flag, and no test pinned the old 'timeout' string.
 - [Phase 01]: [Phase 01]: 01-04: the plan's acceptance-criteria grep for zero 'except BaseException' in common.py could not be satisfied literally -- two pre-existing, unrelated occurrences from plans 01-01/01-03 (rollback/cleanup handlers) are out of this plan's scope; this plan's own write-funnel code has zero occurrences, verified in isolation.
+- [Phase 01]: 01-05: engines.engine_options gained an injected cost_fn parameter instead of importing classify.est_cost — classify.py already imports engines, so a verbatim relocation would have created an engines->classify import cycle; the injection breaks it while keeping D-10's locked module placement.
+- [Phase 01]: 01-05: no compatibility alias kept in wizard.py for any of the six relocated builders (orchestrator-resolved) — an import of an old private name now fails loudly; tests/test_wizard.py's call sites were repointed in the same commit.
 
 ### Pending Todos
 
@@ -108,6 +111,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-07T19:07:44.624Z
-Stopped at: Completed 01-04-PLAN.md
+Last session: 2026-09-07T19:31:46.350Z
+Stopped at: Completed 01-05-PLAN.md
 Resume file: None

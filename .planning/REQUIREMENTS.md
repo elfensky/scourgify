@@ -25,7 +25,7 @@ authority for plugin behaviour; B-references below point at it.
 - [x] **FOUND-05**: Apply-time conflict checks in `ops.apply_ops` using `editlog.conflict` — an
       op whose current value no longer matches its expected value is skipped and reported, not
       clobbered
-- [ ] **FOUND-06**: The wizard's option/decision functions (scope menus, engine picker rows,
+- [x] **FOUND-06**: The wizard's option/decision functions (scope menus, engine picker rows,
       checklist items) live in `report.py`/tool modules as pure functions, so a two-phase
       PLAN-job → Qt picker → EXECUTE-job split consumes the same source as the wizard
 - [x] **FOUND-07**: In-process guards never shell out — `calibre_open()` is a CLI-only concept;
@@ -168,7 +168,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | FOUND-03 | Phase 1 | Complete |
 | FOUND-04 | Phase 1 | Complete |
 | FOUND-05 | Phase 1 | Complete |
-| FOUND-06 | Phase 1 | Pending |
+| FOUND-06 | Phase 1 | Complete |
 | FOUND-07 | Phase 1 | Complete |
 | WRITE-01 | Phase 2 | Pending |
 | WRITE-02 | Phase 2 | Pending |
