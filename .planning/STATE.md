@@ -3,18 +3,18 @@ gsd_state_version: 1.0
 milestone: v1
 milestone_name: (the terminal goes away)
 current_phase: 01
-current_phase_name: foundation-a-hostable-core
+current_phase_name: Foundation — a hostable core
 status: executing
-stopped_at: Phase 1 context gathered
-last_updated: "2026-09-05T23:28:27.751Z"
-last_activity: 2026-08-28
-last_activity_desc: Roadmap created (6 phases, 40/40 requirements mapped)
-state_head: 7bda2757c10743d2a5069a358f5caddf9cb517ef
+stopped_at: Completed 01-01-PLAN.md
+last_updated: "2026-09-07T15:59:18.313Z"
+last_activity: 2026-09-07
+last_activity_desc: Phase 01 execution started
+state_head: 19ca385b81fe517aedeae4ef9be883ce500ee66a
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 6
-  completed_plans: 0
+  completed_plans: 1
   percent: 0
 ---
 
@@ -25,14 +25,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-28)
 
 **Core value:** The full maintenance loop (wrangle → staleness → synopsis → classify → review → promote → backfill) runs from a Calibre toolbar button, on the live library, with every guard, backup and undo the CLI has — and never freezes or corrupts Calibre.
-**Current focus:** Phase 1 — Foundation: a hostable core
+**Current focus:** Phase 01 — Foundation — a hostable core
 
 ## Current Position
 
-Phase: 01 (foundation-a-hostable-core) — READY TO EXECUTE
-Plan: 0 of TBD in current phase
+Phase: 01 (Foundation — a hostable core) — EXECUTING
+Plan: 2 of 6
 Status: Ready to execute
-Last activity: 2026-08-28 — Roadmap created (6 phases, 40/40 requirements mapped)
+Last activity: 2026-09-07 — Phase 01 execution started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -56,6 +56,11 @@ Progress: [░░░░░░░░░░] 0%
 - Trend: -
 
 *Updated after each plan completion*
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 01 P01 | 1h 35min | 5 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -69,6 +74,7 @@ Recent decisions affecting current work:
 - [Roadmap]: Roadmap phases 2 / 4 / 5 are spec phases 6 / 7 / 8 (#59 / #60 / #61); the NLSpec stays the acceptance authority for plugin behaviour.
 - [Roadmap]: Phase 4 dashboard acceptance does not depend on true QDockWidget docking (spike; non-modal window is the fallback); Phase 5 review carries an explicit early marks/snapshot spike (no precedent anywhere).
 - [Roadmap]: PUB-05 (CLI/wizard unchanged) is verified in Phase 6 but is a standing rule inherited by every phase's success criteria.
+- [Phase 01]: Task 3 decision: a-guarded-auto-move approved with verified Time Machine + APFS snapshot backup; real ~/.config/scourgify/data (527MB) migrated intact into data/<uuid>/ during Task 5
 
 ### Pending Todos
 
@@ -91,6 +97,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-05T22:00:03.847Z
-Stopped at: Phase 1 context gathered
-Resume file: .planning/phases/01-foundation-a-hostable-core/01-CONTEXT.md
+Last session: 2026-09-07T15:59:18.298Z
+Stopped at: Completed 01-01-PLAN.md
+Resume file: None

@@ -16,9 +16,9 @@ authority for plugin behaviour; B-references below point at it.
 - [ ] **FOUND-01**: Bundled `defaults/*.csv` are readable when the core runs from inside the
       plugin zip — a `DEFAULTS` resource seam (extract-once to a version-keyed cache under
       `user_dir()`); `load_maps()`/`load_vocab()` never build empty maps silently
-- [ ] **FOUND-02**: `common.user_dir()` resolves on Windows (`%APPDATA%\scourgify`, mirroring
+- [x] **FOUND-02**: `common.user_dir()` resolves on Windows (`%APPDATA%\scourgify`, mirroring
       Calibre's own `config_dir` convention) with stdlib only — no new dependency
-- [ ] **FOUND-03**: All operational artifacts (proposals, failures, edit log, backups, rejects,
+- [x] **FOUND-03**: All operational artifacts (proposals, failures, edit log, backups, rejects,
       ledger) are namespaced per library uuid, so two libraries never share state
 - [ ] **FOUND-04**: A single process-global, library-uuid-keyed write-run lock — a second write
       job against the same library is refused with a visible reason, never queued silently
@@ -164,8 +164,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | FOUND-01 | Phase 1 | Pending |
-| FOUND-02 | Phase 1 | Pending |
-| FOUND-03 | Phase 1 | Pending |
+| FOUND-02 | Phase 1 | Complete |
+| FOUND-03 | Phase 1 | Complete |
 | FOUND-04 | Phase 1 | Pending |
 | FOUND-05 | Phase 1 | Pending |
 | FOUND-06 | Phase 1 | Pending |
@@ -205,6 +205,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PUB-05 | Phase 6 | Pending |
 
 **Coverage:**
+
 - v1 requirements: 40 total
 - Mapped to phases: 40
 - Unmapped: 0 ✓
