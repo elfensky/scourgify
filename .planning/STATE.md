@@ -5,16 +5,16 @@ milestone_name: (the terminal goes away)
 current_phase: 01
 current_phase_name: Foundation — a hostable core
 status: executing
-stopped_at: Completed 01-02-PLAN.md
-last_updated: "2026-09-07T18:19:02.069Z"
+stopped_at: Completed 01-03-PLAN.md
+last_updated: "2026-09-07T18:42:53.217Z"
 last_activity: 2026-09-07
 last_activity_desc: Phase 01 execution started
-state_head: e4b7ef211f42ca636fba5897f8e2bd4bb0fb20b4
+state_head: 4e5f33f7a4937c66cd45248ca72f6167175f54db
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 6
-  completed_plans: 2
+  completed_plans: 3
   percent: 0
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-28)
 ## Current Position
 
 Phase: 01 (Foundation — a hostable core) — EXECUTING
-Plan: 3 of 6
+Plan: 4 of 6
 Status: Ready to execute
 Last activity: 2026-09-07 — Phase 01 execution started
 
@@ -62,6 +62,7 @@ Progress: [░░░░░░░░░░] 0%
 |------|----------|-------|-------|
 | Phase 01 P01 | 1h 35min | 5 tasks | 10 files |
 | Phase 01 P02 | 2h 3min | 3 tasks | 31 files |
+| Phase 01 P03 | 45min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -78,6 +79,8 @@ Recent decisions affecting current work:
 - [Phase 01]: Task 3 decision: a-guarded-auto-move approved with verified Time Machine + APFS snapshot backup; real ~/.config/scourgify/data (527MB) migrated intact into data/<uuid>/ during Task 5
 - [Phase 01]: 01-02: Windows console-encoding fix (Fix 6) goes in cli.main(), not report.py -- report.py runs inside Calibre jobs too; stripping report.py's non-ASCII glyphs was considered and rejected as degrading the interface on every platform for one legacy console. — report.py is the ONE owner of render policy; reconfiguring process streams there would be an import-time side effect that could mutate a live Calibre job's own stdout/stderr.
 - [Phase 01]: 01-02: two Windows test failures (test_user_dir_default_is_dot_config, test_set_library_redirects_the_core...) were test-authoring gaps that proved plan 01-01's user_dir()/set_library()/db_path() correct, not production bugs. — Neither test neutralized the environment variable (APPDATA) or path-separator behavior that a real Windows host exercises; fixed the tests, not the production code.
+- [Phase 01]: 01-03: afm.swift is resolved via os.path.dirname(common.defaults_dir()), not a second cache path — defaults_dir() stays literally HERE/defaults on a normal install while the extracted cache mirrors afm.swift's real sibling position. — Keeps defaults_dir()'s contract exact (matches the plan's own acceptance criterion) while still routing afm.swift through the ONE resolver.
+- [Phase 01]: 01-03: overrides.py's common.DEFAULTS import (scourgify overrides --master, a maintainer-only checkout-only write target) left unchanged — out of scope, not a runtime read of a shipped file, never job-reachable. — Repointing it would be scope creep onto a tool this plan's must_haves/acceptance criteria never named.
 
 ### Pending Todos
 
@@ -101,6 +104,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-07T18:19:02.053Z
-Stopped at: Completed 01-02-PLAN.md
+Last session: 2026-09-07T18:42:53.200Z
+Stopped at: Completed 01-03-PLAN.md
 Resume file: None

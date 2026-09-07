@@ -13,7 +13,7 @@ authority for plugin behaviour; B-references below point at it.
 
 ### Foundation (cross-cutting plumbing — before any write verb)
 
-- [ ] **FOUND-01**: Bundled `defaults/*.csv` are readable when the core runs from inside the
+- [x] **FOUND-01**: Bundled `defaults/*.csv` are readable when the core runs from inside the
       plugin zip — a `DEFAULTS` resource seam (extract-once to a version-keyed cache under
       `user_dir()`); `load_maps()`/`load_vocab()` never build empty maps silently
 - [x] **FOUND-02**: `common.user_dir()` resolves on Windows (`%APPDATA%\scourgify`, mirroring
@@ -106,7 +106,7 @@ authority for plugin behaviour; B-references below point at it.
       + `test-windows`). The *plugin loads* half is deferred to Phase 6 / XPLAT-05: no plugin-side
       code exists to load until Phase 2, and no headless runner can load a Qt `InterfaceAction`
       into a live Calibre GUI. Do not mark XPLAT-01 Done on Phase 1 completion.
-- [ ] **XPLAT-02**: The apple engine is cleanly absent off-macOS (not listed, not attempted);
+- [x] **XPLAT-02**: The apple engine is cleanly absent off-macOS (not listed, not attempted);
       `afm.swift` ships but is never invoked there
 - [x] **XPLAT-03**: CI has a `windows-latest` lane running the core tests and the
       `calibre-debug` smoke against a downloaded Calibre
@@ -163,7 +163,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| FOUND-01 | Phase 1 | Pending |
+| FOUND-01 | Phase 1 | Complete |
 | FOUND-02 | Phase 1 | Complete |
 | FOUND-03 | Phase 1 | Complete |
 | FOUND-04 | Phase 1 | Pending |
@@ -194,7 +194,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | REVIEW-04 | Phase 5 | Pending |
 | REVIEW-05 | Phase 5 | Pending |
 | XPLAT-01 | Phase 1 (imports half) + Phase 6 (plugin-loads half, via XPLAT-05) | Pending |
-| XPLAT-02 | Phase 1 | Pending |
+| XPLAT-02 | Phase 1 | Complete |
 | XPLAT-03 | Phase 1 | Complete |
 | XPLAT-04 | Phase 6 | Pending |
 | XPLAT-05 | Phase 6 | Pending |
