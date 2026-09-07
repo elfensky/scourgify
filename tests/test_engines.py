@@ -2,10 +2,22 @@
 """Pins the engine seam (engines.py): the cloud adapters against a fake transport (_post_json is
 the seam — no network), and the Gemini blocked-content RuntimeError that ask_retry's no-retry
 branch keys off. No framework:  uv run tests/test_engines.py   (also pytest-collectable)."""
-import os, sys
+import contextlib, os, sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 from scourgify import common, engines
+
+
+@contextlib.contextmanager
+def _as_platform(name):
+    """Monkeypatch sys.platform (via engines' own `import sys`, the real module — a singleton) for
+    the block, restoring after. Mirrors tests/test_paths.py's _as_windows() os.name idiom."""
+    real = engines.sys.platform
+    engines.sys.platform = name
+    try:
+        yield
+    finally:
+        engines.sys.platform = real
 
 
 def _with_transport(resp, fn):
@@ -90,6 +102,58 @@ def test_missing_key_message_names_the_env_var():
 def test_engine_tables_agree():
     assert set(engines.ENGINE_ENV) == set(engines.ENGINES) - {"apple"}   # every cloud engine has a key entry
     assert set(engines.PRICING) == set(engines.ENGINES)                  # ... and a price row
+
+
+def test_apple_is_absent_off_its_platform():
+    """XPLAT-02: apple never appears off its platform, even when the afm/swift probe would have
+    succeeded — the platform gate runs FIRST."""
+    with _as_platform("linux"):
+        assert "apple" not in engines.usable_engines(env={})
+    with _as_platform("win32"):
+        assert "apple" not in engines.usable_engines(env={})
+
+
+def test_apple_is_still_absent_in_platform_without_a_toolchain():
+    """The platform gate COMPOSES with the existing afm/swift probe, it does not replace it: an
+    in-platform host with neither the binary nor a toolchain still yields no apple."""
+    import shutil
+    real_which, real_shipped = shutil.which, engines._shipped_dir
+    shutil.which = lambda name: None
+    engines._shipped_dir = lambda: os.path.join(os.sep, "no", "such", "shipped", "dir")
+    try:
+        with _as_platform("darwin"):
+            assert "apple" not in engines.usable_engines(env={})
+    finally:
+        shutil.which = real_which
+        engines._shipped_dir = real_shipped
+
+
+def test_cloud_engines_are_unaffected_by_the_platform_gate():
+    with _as_platform("win32"):
+        assert "openai" in engines.usable_engines(env={"OPENAI_API_KEY": "sk-t"})
+    with _as_platform("linux"):
+        assert "claude" in engines.usable_engines(env={"ANTHROPIC_API_KEY": "sk-t"})
+
+
+def test_the_platform_gate_is_a_trait_not_a_name_test():
+    """A newly registered engine with no `platforms` row is unconstrained without any code change
+    — constraining an engine is a row edit, never a `== "apple"` scattered across the tools."""
+    plats = engines.trait("apple", "platforms")
+    assert plats and "darwin" in plats and "linux" not in plats
+    assert engines.trait("openai", "platforms") is None          # falls back to the permissive default
+    assert engines.trait("some-new-engine", "platforms") is None
+
+
+def test_apple_is_absent_on_this_host_unless_it_is_darwin():
+    """Patches NOTHING — the only assertion in this file that reads the REAL sys.platform, so
+    plan 01-02's test-windows job (which runs the whole tests/test_*.py glob) proves ROADMAP
+    success criterion 5 against a genuinely non-darwin host, not only a monkeypatched one. The
+    four tests above prove the LOGIC, which is identical on any host; this one proves the FACT on
+    whichever host actually runs it."""
+    if sys.platform in engines.trait("apple", "platforms"):
+        print("  (this host is on apple's platform list — logic already proven by the tests above)")
+        return
+    assert "apple" not in engines.usable_engines(env={})
 
 
 def test_traits_free_workers_judge():

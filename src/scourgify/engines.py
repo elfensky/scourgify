@@ -7,9 +7,11 @@ cloud adapters differ only by their constants (URL / env var / default model / e
 import json
 import os
 import subprocess
+import sys
 import time
 
-from scourgify.common import HERE, GuardrailError
+from scourgify import common
+from scourgify.common import GuardrailError
 
 ERR_TRUNC = 140   # chars kept when recording an engine error (same width in bakeoff table and failures CSV)
 
@@ -29,12 +31,16 @@ PRICING = {"apple": (0.0, 0.0), "claude": (1.00, 5.00), "openai": (0.15, 0.60), 
 # picker DERIVE every row from here, so a capability claim a surface wants to make has to become a
 # row first. `refuses` is the one the menu reads as behaviour, not prose — only a refusal-class
 # failure earns B1's "Retry on <other engine>" (see classify_error below).
+# `platforms`: which sys.platform values can run this engine at all — checked by usable_engines()
+# BEFORE its existing afm/swift runtime probe (composes with it, does not replace it: an in-platform
+# host with neither the binary nor a toolchain still yields no apple). None (the default) means
+# "every platform" — a cloud engine is unconstrained without a code change, only a row.
 _TRAIT_DEFAULTS = {"parallel": True, "judge": True, "hint": "key set ✓", "unusable": "no API key in env",
-                   "out_tokens": 80, "refuses": False, "role": "", "limits": ""}
+                   "out_tokens": 80, "refuses": False, "role": "", "limits": "", "platforms": None}
 TRAITS = {"apple": {"parallel": False,               # one subprocess pipe — not thread-safe
                     "judge": False,                  # too weak for promote's adversarial refereeing
                     "hint": "free, on-device", "unusable": "needs the afm binary or a swift toolchain",
-                    "role": "on-device",
+                    "role": "on-device", "platforms": ("darwin",),   # Apple Foundation Models: macOS only
                     "limits": "Single-threaded — a handful of books is fine, thousands take hours. "
                               "Weakest tagging, and cannot judge new tags."},
           "openai": {"role": "cheapest usable",
@@ -74,10 +80,19 @@ def _post_json(url: str, headers: dict, payload: dict, timeout: int) -> dict:
     return json.load(urllib.request.urlopen(req, timeout=timeout))
 
 
+def _shipped_dir() -> str:
+    """Where the shipped afm/afm.swift files live: common.HERE on a normal install, or the
+    plugin's extraction cache root inside the zip — derived from common.defaults_dir() (never
+    common.HERE directly, per this phase's resource seam), since defaults_dir() always returns
+    <this dir>/defaults, so its parent is exactly the directory afm.swift ships beside."""
+    return os.path.dirname(common.defaults_dir())
+
+
 class Apple:
     def __init__(self, model, timeout, env=None):     # env: on-device, no key — accepted so every
-        exe = f"{HERE}/afm" if os.path.exists(f"{HERE}/afm") else None   # engine constructs alike
-        cmd = [exe] if exe else ["swift", f"{HERE}/afm.swift"]
+        d = _shipped_dir()                                                # engine constructs alike
+        exe = os.path.join(d, "afm") if os.path.exists(os.path.join(d, "afm")) else None
+        cmd = [exe] if exe else ["swift", os.path.join(d, "afm.swift")]
         self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
 
     def ask(self, prompt):
@@ -202,14 +217,22 @@ def unmask(typed: str, stored: str) -> str:
 
 
 def usable_engines(env=None) -> list:
-    """Engines runnable here right now: apple needs the afm binary or a swift toolchain, cloud
-    engines a key. `env` defaults to os.environ — tests pass a dict instead of juggling it."""
+    """Engines runnable here right now: apple needs a platform in its `platforms` trait row AND
+    (composing with, not replacing, that gate) the afm binary or a swift toolchain; cloud engines
+    just a key. `env` defaults to os.environ — tests pass a dict instead of juggling it.
+
+    The platform check is a TRAITS row lookup, never a name test — no engine name is compared for
+    equality with the string "apple" anywhere in this function."""
     import shutil
     env = os.environ if env is None else env
     out = []
     for e in ENGINES:
+        plats = trait(e, "platforms")
+        if plats is not None and sys.platform not in plats:
+            continue
         if not ENGINE_ENV.get(e):                 # no key env = on-device: needs the local runtime
-            if os.path.exists(f"{HERE}/afm") or shutil.which("swift"): out.append(e)
+            d = _shipped_dir()
+            if os.path.exists(os.path.join(d, "afm")) or shutil.which("swift"): out.append(e)
         elif any(env.get(k) for k in ENGINE_ENV[e]): out.append(e)
     return out
 
