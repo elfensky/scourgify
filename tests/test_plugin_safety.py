@@ -165,7 +165,7 @@ def test_set_library_redirects_the_core_without_touching_the_environment():
         assert common.library() == "/tmp/from-the-env"
         common.set_library("/tmp/from-the-gui")
         assert common.library() == "/tmp/from-the-gui", "the injected path must win"
-        assert common.db_path() == "/tmp/from-the-gui/metadata.db", "db_path must follow the seam"
+        assert common.db_path() == os.path.join("/tmp/from-the-gui", "metadata.db"), "db_path must follow the seam"
         assert os.environ["CALIBRE_LIBRARY"] == "/tmp/from-the-env", "os.environ must be untouched"
         common.set_library(None)
         assert common.library() == "/tmp/from-the-env", "None hands the process back to the env"
