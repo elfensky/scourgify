@@ -9,7 +9,7 @@ used to each carry a private copy of:
   - the single write funnel: run_writer() -> calibre-debug -e _writer.py
     (backs up metadata.db to data/backups/ before every write; refuses to run while Calibre is open)
 """
-import os, re, sys, csv, time, glob, hashlib, sqlite3, contextlib, collections, unicodedata, dataclasses
+import os, re, sys, csv, time, glob, hashlib, sqlite3, contextlib, collections, unicodedata, dataclasses, threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))   # the installed package dir (read-only)
 # Deprecated import-compat alias ONLY — nothing may read this for a runtime path any more.
@@ -903,6 +903,58 @@ class WriteResult:
     outcome: str
 
 
+# The write-run lock (FOUND-04): one library takes one write run at a time. In-process,
+# module-level dict of threading.Lock, keyed by library uuid — no lock file, no pid probing
+# (D-06). _WRITE_LOCKS holds ONE Lock per library uuid actually WRITTEN in this process, kept for
+# the life of the process on purpose: a handful of small objects per Calibre session. Do NOT add
+# a reaper — deleting a Lock another thread is about to acquire converts a few hundred bytes of
+# steady-state memory into a race (REVIEW: OpenCode agreed concern 3 asked for a
+# `_cleanup_stale_locks()`; this is the reasoned refusal plus the bound that makes the concern
+# moot — see test_write_locks_is_bounded_by_library_count). _WRITE_HOLDERS holds the per-RUN
+# record (tool, scope, started_at) and IS cleared on release, so nothing here grows per run.
+_WRITE_LOCKS: dict[str, threading.Lock] = {}
+_WRITE_HOLDERS: dict[str, dict] = {}
+
+
+def _write_lock_key(lib_uuid) -> str:
+    """The lock's key — the SAME identity backups_dir()/data_dir() resolve through
+    (_resolve_uuid()), so two write runs that would land in the same backups directory always
+    take the same lock. Falls back to the caller-supplied lib_uuid (the in-process transport's
+    live-handle identity, already used for the edit log header) only if _resolve_uuid() itself
+    cannot be computed — by the time this is called, _write_run has already resolved library()
+    successfully for lib_path, so that fallback is a defensive backstop, not the normal path."""
+    try:
+        return _resolve_uuid()
+    except GuardrailError:
+        if lib_uuid is not None:
+            return lib_uuid
+        raise
+
+
+def _acquire_write_lock(key: str, tool: str, scope) -> threading.Lock:
+    """Non-blocking by construction — refusing loudly beats queuing silently, and it is also what
+    makes a same-thread double-take raise instead of deadlocking a Calibre worker thread (a plain
+    threading.Lock is not reentrant, so re-acquiring one this thread already holds simply fails
+    rather than hanging)."""
+    lock = _WRITE_LOCKS.setdefault(key, threading.Lock())
+    if not lock.acquire(blocking=False):
+        holder = _WRITE_HOLDERS.get(key, {})
+        raise GuardrailError(
+            f"ABORT: a {holder.get('tool', 'another')} run started at "
+            f"{holder.get('started_at', 'an unknown time')} is already writing this library — "
+            "wait for it to finish (nothing was written).")
+    _WRITE_HOLDERS[key] = {"tool": tool, "scope": scope,
+                           "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    return lock
+
+
+def _release_write_lock(key: str, lock: threading.Lock) -> None:
+    """Cleared whether the run succeeded or raised — a failed run must not wedge the library for
+    the rest of the session."""
+    _WRITE_HOLDERS.pop(key, None)
+    lock.release()
+
+
 @contextlib.contextmanager
 def _write_run(ops, tool, scope, force, out, populated, read, is_multi, lib_uuid, lib_path,
                engine=None, model=None):
@@ -910,7 +962,7 @@ def _write_run(ops, tool, scope, force, out, populated, read, is_multi, lib_uuid
     call — issue #71's "closes the pre-write protocol half". In order, and no other:
 
         1. drop set_field ops with an empty values map — an all-empty change-set is a no-op
-        2. (the write-run lock, keyed by library uuid, inserted by plan 01-04 Task 2)
+        2. acquire the write-run lock, keyed by library uuid (_acquire_write_lock)
         3. check_wipe(), unless force
         4. the before-read (editlog.before_values)
         5. the snapshot (backup_db), then the explicit prune backup_db(dst=...) disables
@@ -944,27 +996,32 @@ def _write_run(ops, tool, scope, force, out, populated, read, is_multi, lib_uuid
         out("  (nothing to write)")
         yield None
         return
-    # (Task 2 inserts the write-run lock's acquire here, spanning through the release below.)
-    if not force:
-        check_wipe(filtered, populated)
-    # ...but the log's before-read is NOT conditional on the guard: --force means "skip the
-    # guard", not "write blind", and a forced run is the one most likely to need undo.
-    before = editlog.before_values(read, filtered)
-    bak = backup_db(dst=_backup_path(bdir), src=os.path.join(lib_path, "metadata.db"))
-    out(f"  backup: {bak}   (restore: scourgify rollback)")
-    # backup_db(dst=...) turns its OWN prune off (it only prunes when dst is None) — the
-    # per-library BACKUP_KEEP/BACKUP_BUDGET/BACKUP_MIN budget (D-04) still applies, so prune
-    # explicitly.
-    _prune_backups(dirpath=bdir)
-    rec = editlog.start(tool, filtered, before, scope=scope, library=lib_uuid,
-                        engine=engine, model=model)
-    outcome = "failed"
+    # The lock spans steps 2 through 8 — editlog.start AND editlog.finish are both inside it, so
+    # a second run can never interleave op lines between another run's header and its footer.
+    lock_key = _write_lock_key(lib_uuid)
+    lock = _acquire_write_lock(lock_key, tool, scope)
     try:
-        yield {"ops": filtered, "rec": rec, "backup": bak}
-        outcome = "ok"
+        if not force:
+            check_wipe(filtered, populated)
+        # ...but the log's before-read is NOT conditional on the guard: --force means "skip the
+        # guard", not "write blind", and a forced run is the one most likely to need undo.
+        before = editlog.before_values(read, filtered)
+        bak = backup_db(dst=_backup_path(bdir), src=os.path.join(lib_path, "metadata.db"))
+        out(f"  backup: {bak}   (restore: scourgify rollback)")
+        # backup_db(dst=...) turns its OWN prune off (it only prunes when dst is None) — the
+        # per-library BACKUP_KEEP/BACKUP_BUDGET/BACKUP_MIN budget (D-04) still applies, so prune
+        # explicitly.
+        _prune_backups(dirpath=bdir)
+        rec = editlog.start(tool, filtered, before, scope=scope, library=lib_uuid,
+                            engine=engine, model=model)
+        outcome = "failed"
+        try:
+            yield {"ops": filtered, "rec": rec, "backup": bak}
+            outcome = "ok"
+        finally:
+            editlog.finish(rec, outcome)
     finally:
-        editlog.finish(rec, outcome)
-        # (Task 2 inserts the write-run lock's release here.)
+        _release_write_lock(lock_key, lock)
 
 
 def write_ops(api, ops: list[dict], force: bool = False, out=print,

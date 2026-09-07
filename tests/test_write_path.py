@@ -7,7 +7,7 @@ What breaks in the real world if these fail: the CLI writer (`calibre-debug -e _
 ops arriving as JSON) and an in-process plugin writer (live dicts against gui.current_db.new_api)
 stop agreeing about what a change-set means — and the plugin writes to a live library with a
 guard or a backup that the CLI has and it doesn't."""
-import os, io, sys, json, glob, sqlite3, tempfile, contextlib
+import os, io, sys, json, glob, sqlite3, tempfile, contextlib, threading
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -34,6 +34,34 @@ class FakeApi:
     def set_field(self, field, vals): self.fields.setdefault(field, {}).update(vals)
     def set_pref(self, key, value): self.prefs[key] = value
     def state(self): return {"fields": self.fields, "prefs": self.prefs}
+
+
+class _BlockingApi(FakeApi):
+    """A FakeApi whose set_field() signals `ready` then parks on `release` — how the lock tests
+    hold the write-run lock across a REAL second thread (parked inside apply_ops), matching a
+    genuine concurrent write instead of re-entering _write_run directly from the same thread."""
+    def __init__(self, *a, ready=None, release=None, **k):
+        super().__init__(*a, **k)
+        self._ready, self._release = ready, release
+
+    def set_field(self, field, vals):
+        if self._ready is not None:
+            self._ready.set()
+        if self._release is not None:
+            self._release.wait(5)
+        super().set_field(field, vals)
+
+
+def _held_lock(lib, tool="wrangle"):
+    """Start a write_ops run on a background thread and block it mid-apply, holding the
+    write-run lock until the caller sets `api._release`. -> (thread, blocking_api)."""
+    ready, release = threading.Event(), threading.Event()
+    api = _BlockingApi(books=(1, 2, 3), ready=ready, release=release)
+    t = threading.Thread(target=lambda: _quiet(common.write_ops, api,
+                                               [common.op_set_field("tags", {1: ["x"]})], tool=tool))
+    t.start()
+    assert ready.wait(5), "writer thread never reached apply_ops — lock not held"
+    return t, api
 
 
 class FakeLegacy:
@@ -301,6 +329,145 @@ def test_write_ops_does_nothing_for_an_empty_change_set():
             "an empty change-set still burned a snapshot"
     assert "nothing to write" in out
     assert api.fields == {}
+
+
+# ---------------- the write-run lock (NLSpec B2, FOUND-04) ----------------
+def test_a_second_write_run_against_one_library_is_refused_by_name():
+    lib = _lib()
+    with _pointed_at(lib):
+        t, held_api = _held_lock(lib, tool="wrangle")
+        try:
+            try:
+                common.write_ops(FakeApi(books=(1, 2, 3)), [common.op_set_field("tags", {2: ["y"]})],
+                                 tool="classify")
+            except common.GuardrailError as e:
+                assert "wrangle" in str(e), str(e)
+            else:
+                raise AssertionError("a concurrent write run against the same library was not refused")
+        finally:
+            held_api._release.set(); t.join(5)
+
+
+def test_a_refused_second_run_takes_no_snapshot_and_logs_nothing():
+    from scourgify import editlog
+    lib = _lib()
+    with _pointed_at(lib):
+        t, held_api = _held_lock(lib)
+        try:
+            try:
+                common.write_ops(FakeApi(books=(1, 2, 3)), [common.op_set_field("tags", {2: ["y"]})],
+                                 tool="classify")
+            except common.GuardrailError:
+                pass
+            snaps = glob.glob(os.path.join(common.backups_dir(), "ff_*.db"))
+            log_path = editlog.log_path()
+            headers = [json.loads(l) for l in open(log_path, encoding="utf-8")
+                      if json.loads(l).get("kind") == "run"] if os.path.exists(log_path) else []
+        finally:
+            held_api._release.set(); t.join(5)
+    assert len(snaps) == 1, f"expected only the held run's snapshot, found {len(snaps)}"
+    assert len(headers) == 1, "the refused run wrote a second run header"
+
+
+def test_two_library_uuids_take_two_independent_locks():
+    common._WRITE_LOCKS.clear(); common._WRITE_HOLDERS.clear()
+    lock_a = common._acquire_write_lock("uuid-a", "wrangle", None)
+    try:
+        lock_b = common._acquire_write_lock("uuid-b", "classify", None)
+        try:
+            assert lock_a is not lock_b
+            assert len(common._WRITE_LOCKS) == 2
+        finally:
+            common._release_write_lock("uuid-b", lock_b)
+    finally:
+        common._release_write_lock("uuid-a", lock_a)
+
+
+def test_the_lock_is_held_across_the_whole_log_run():
+    from scourgify import editlog
+    lib = _lib()
+    with _pointed_at(lib):
+        t, held_api = _held_lock(lib, tool="wrangle")
+        try:
+            try:
+                common.write_ops(FakeApi(books=(1, 2, 3)), [common.op_set_field("tags", {2: ["y"]})],
+                                 tool="classify")
+                refused = False
+            except common.GuardrailError:
+                refused = True
+        finally:
+            held_api._release.set(); t.join(5)
+        lines = [json.loads(l) for l in open(editlog.log_path(), encoding="utf-8")]
+    assert refused, "a second run attempted mid-first-run's log was not refused"
+    kinds = [l["kind"] for l in lines]
+    assert kinds.count("run") == 1 and kinds.count("end") == 1
+    assert kinds[0] == "run" and kinds[-1] == "end", "a foreign line appeared between header and footer"
+
+
+def test_the_lock_is_released_after_a_failed_run():
+    from scourgify import editlog
+    lib = _lib()
+    api = FakeApi(books=(1, 2, 3))
+    api.set_field = lambda field, vals: (_ for _ in ()).throw(RuntimeError("calibre exploded"))
+    with _pointed_at(lib):
+        try:
+            common.write_ops(api, [common.op_set_field("tags", {1: ["x"]})], tool="wrangle")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("write_ops swallowed the writer's exception")
+        lines = [json.loads(l) for l in open(editlog.log_path(), encoding="utf-8")]
+        assert lines[-1]["kind"] == "end" and lines[-1]["outcome"] == "failed"
+        ok_api = FakeApi(books=(1, 2, 3))
+        _quiet(common.write_ops, ok_api, [common.op_set_field("tags", {1: ["y"]})], tool="wrangle")
+        assert ok_api.fields["tags"] == {1: ("y",)}, "a subsequent run against the same library did not succeed"
+
+
+def test_taking_one_librarys_lock_twice_raises_rather_than_deadlocking():
+    lib = _lib()
+    with _pointed_at(lib):
+        t, held_api = _held_lock(lib)
+        result = {}
+        def attempt():
+            try:
+                common.write_ops(FakeApi(books=(1, 2, 3)), [common.op_set_field("tags", {2: ["y"]})],
+                                 tool="classify")
+            except Exception as e:
+                result["error"] = e
+        t2 = threading.Thread(target=attempt)
+        t2.start(); t2.join(5)
+        try:
+            assert not t2.is_alive(), "a second acquire against the same library hung — must be non-blocking"
+            assert isinstance(result.get("error"), common.GuardrailError), result.get("error")
+        finally:
+            held_api._release.set(); t.join(5)
+
+
+def test_write_locks_is_bounded_by_library_count():
+    common._WRITE_LOCKS.clear(); common._WRITE_HOLDERS.clear()
+    lib_a, lib_b = _lib(), _lib()
+    for lib, n in ((lib_a, 3), (lib_b, 2)):
+        with _pointed_at(lib):
+            for i in range(n):
+                api = FakeApi(books=(1, 2, 3))
+                _quiet(common.write_ops, api, [common.op_set_field("tags", {1: [f"t{i}"]})], tool="wrangle")
+    assert len(common._WRITE_LOCKS) <= 2, f"expected at most 2 library locks, got {len(common._WRITE_LOCKS)}"
+    assert common._WRITE_HOLDERS == {}, "a per-run holder record leaked past its run"
+
+
+def test_a_write_run_still_prunes_past_the_backup_keep_budget():
+    lib = _lib()
+    old_keep = common.BACKUP_KEEP
+    common.BACKUP_KEEP = 2
+    try:
+        with _pointed_at(lib):
+            for i in range(4):
+                api = FakeApi(books=(1, 2, 3))
+                _quiet(common.write_ops, api, [common.op_set_field("tags", {1: [f"t{i}"]})], tool="wrangle")
+            snaps = glob.glob(os.path.join(common.backups_dir(), "ff_*.db"))
+    finally:
+        common.BACKUP_KEEP = old_keep
+    assert len(snaps) <= 2, f"expected pruning to BACKUP_KEEP=2, found {len(snaps)}"
 
 
 if __name__ == "__main__":
