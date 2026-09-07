@@ -21,7 +21,7 @@ def read_tropes(path: str) -> list:
     if not os.path.exists(path): return []
     delim = _delim_of(path)                       # the one sniffer (overrides.py owns the formats)
     out = []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for c in csv.reader(f, delimiter=delim):
             if not c or not c[0].strip() or c[0].strip().lower() == "variant": continue
             var = c[0].strip()

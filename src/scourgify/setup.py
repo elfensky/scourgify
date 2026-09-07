@@ -67,7 +67,7 @@ def write_config(colmap: dict, beh: dict | None = None) -> None:
           "# folder of user files (same formats as defaults/) that extend & win over the defaults",
           'dir = "overrides"', ""]
     os.makedirs(user_dir(), exist_ok=True)
-    open(os.path.join(user_dir(), "config.toml"), "w").write("\n".join(L))
+    open(os.path.join(user_dir(), "config.toml"), "w", encoding="utf-8").write("\n".join(L))
 
 
 def setup(cfg: dict, yes: bool = False) -> None:

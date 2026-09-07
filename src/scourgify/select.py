@@ -42,7 +42,7 @@ def _tokens(spec: str, depth: int = 0):
         if depth:
             raise GuardrailError(f"--books: '@file' inside a file is not supported ({t})")
         path = os.path.expanduser(t[1:])
-        try: text = open(path).read()
+        try: text = open(path, encoding="utf-8").read()
         except (OSError, UnicodeDecodeError) as e:
             raise GuardrailError(f"--books: cannot read {path}: {e}")
         yield from _tokens(",".join(ln.split("#")[0] for ln in text.splitlines()), depth + 1)

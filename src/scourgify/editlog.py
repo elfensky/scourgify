@@ -105,7 +105,7 @@ def append(lines: list, path: str | None = None) -> None:
     """Append JSON lines. One open/close per call — this runs twice per write run, not per book."""
     path = path or log_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a") as f:
+    with open(path, "a", encoding="utf-8") as f:
         for r in lines:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 

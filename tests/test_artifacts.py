@@ -132,6 +132,64 @@ def test_merge_failures_keeps_untouched_books_when_nothing_ran():
     assert artifacts.merge_failures(prev, set(), []) == [["1", "A", "boom"]]
 
 
+def test_ao3_defaults_decode_as_utf8_not_the_platform_locale_default():
+    """The Windows regression found on ci.yml run 34142222493 (test-windows job, first run):
+    `open()` with no `encoding=` resolves the platform's LOCALE default — UTF-8 on macOS/Linux,
+    but cp1252 on Windows. The bundled AO3 taxonomy CSVs (src/scourgify/defaults/ao3/*.csv) are
+    UTF-8 and contain bytes cp1252 cannot decode (byte 0x90 crashed wrangle.load_maps() ->
+    ao3_pairs() -> artifacts.read_rows() with UnicodeDecodeError on the real Windows runner).
+    Every text-mode `open()` in src/scourgify/ must now pass `encoding="utf-8"` explicitly.
+
+    Two checks, because a real Windows host isn't available to run this suite against:
+    1. A static source-grep — the actual regression guard, host-independent — asserting no
+       text-mode `open(` call in src/scourgify/*.py lacks `encoding=` (binary-mode "rb"/"wb"/"ab"
+       opens are exempt; they carry no text encoding).
+    2. A behavioral check that the real bundled AO3 characters.csv is genuinely non-ASCII
+       (so check 1 isn't guarding an empty case) and that artifacts.read_rows() decodes it
+       without raising, on whatever locale this host happens to run under.
+    """
+    import re as _re
+
+    def _open_calls(src: str) -> list:
+        """Every `open(...)` call's argument text, paren-balanced (a plain regex stops at the
+        first ')', which is wrong the moment an argument is itself a call, e.g.
+        `open(_ao3_vocab_path(), encoding="utf-8")`)."""
+        out = []
+        for m in _re.finditer(r"\bopen\(", src):
+            depth, i = 1, m.end()
+            start = i
+            while depth and i < len(src):
+                if src[i] == "(":
+                    depth += 1
+                elif src[i] == ")":
+                    depth -= 1
+                i += 1
+            out.append(src[start:i - 1])
+        return out
+
+    core_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src", "scourgify")
+    offenders = []
+    for fn in sorted(os.listdir(core_dir)):
+        if not fn.endswith(".py"):
+            continue
+        src = open(os.path.join(core_dir, fn), encoding="utf-8").read()
+        for args in _open_calls(src):
+            if "encoding=" in args:
+                continue
+            if any(mode in args for mode in ('"rb"', "'rb'", '"wb"', "'wb'", '"ab"', "'ab'")):
+                continue                                    # binary mode — no text encoding to pin
+            offenders.append(f"{fn}: open({args})")
+    assert not offenders, f"text-mode open() missing encoding=\"utf-8\":\n  " + "\n  ".join(offenders)
+
+    ao3_path = os.path.join(core_dir, "defaults", "ao3", "characters.csv")
+    raw = open(ao3_path, "rb").read()
+    assert any(b > 0x7F for b in raw), "fixture must contain non-ASCII bytes or this test proves nothing"
+    rows = artifacts.read_rows(ao3_path)
+    assert rows, "expected at least one row from the bundled AO3 characters.csv"
+    assert any(ord(ch) > 0x7F for r in rows for v in r.values() for ch in v), \
+        "expected at least one decoded row with a non-ASCII character"
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

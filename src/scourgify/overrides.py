@@ -34,7 +34,7 @@ def _delim_of(path: str, default: str = ",") -> str:
     """The delimiter an existing override CSV already uses (sniffed like wrangle.read_tropes);
     `default` for a new file."""
     if os.path.exists(path):
-        first = open(path).readline()
+        first = open(path, encoding="utf-8").readline()
         if ";" in first and first.count(";") >= first.count(","): return ";"
         if "," in first: return ","
     return default
@@ -53,7 +53,7 @@ def merge_vocab(terms: list, path: str | None = None) -> list:
     path = path or ov_path("classify_vocab.txt")
     terms = list(terms)
     if os.path.exists(path):
-        for l in open(path):
+        for l in open(path, encoding="utf-8"):
             l = l.strip()
             if not l or l.startswith("#"): continue
             if l.startswith("-"): terms = [t for t in terms if t.lower() != l[1:].strip().lower()]
@@ -67,7 +67,7 @@ def read_aliases(path: str | None = None) -> dict:
     path = path or ov_path("promote_aliases.csv")
     out = {}
     if os.path.exists(path):
-        for r in csv.DictReader(open(path), delimiter=_delim_of(path)):
+        for r in csv.DictReader(open(path, encoding="utf-8"), delimiter=_delim_of(path)):
             if r.get("candidate") and r.get("target"):
                 out[r["candidate"].strip().lower()] = r["target"].strip()
     return out
@@ -78,10 +78,10 @@ def append_rows(path: str, header: list, rows: list) -> int:
     on first write, skipping rows already present. -> how many were added."""
     delim = _delim_of(path)
     new = not os.path.exists(path)
-    existing = set() if new else {tuple(r) for r in csv.reader(open(path), delimiter=delim)}
+    existing = set() if new else {tuple(r) for r in csv.reader(open(path, encoding="utf-8"), delimiter=delim)}
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     added = 0
-    with open(path, "a", newline="") as f:
+    with open(path, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter=delim)
         if new: w.writerow(header)
         for r in rows:
@@ -210,7 +210,7 @@ def _append_override(path: str, lines: list) -> list:
         existing = {l.strip() for l in read_lines(path)}
     os.makedirs(os.path.dirname(path), exist_ok=True)
     added = []
-    with open(path, "a", newline="") as f:
+    with open(path, "a", newline="", encoding="utf-8") as f:
         if new and fn in _OV_HEADERS:
             f.write(_OV_HEADERS[fn] + "\n"); existing.add(_OV_HEADERS[fn])
         for ln in lines:
@@ -297,9 +297,9 @@ def _archive_consumed_rejects() -> None:
     gone = [r for r in rows if r.get("stage") == "wrangle" and r.get("class") == "auto"]
     if gone:
         arch = rejects_path().replace(".csv", f"_applied_{time.strftime('%Y%m%d-%H%M%S')}.csv")
-        with open(arch, "w", newline="") as f:
+        with open(arch, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=REJECT_COLS, extrasaction="ignore"); w.writeheader(); w.writerows(gone)
-    with open(rejects_path(), "w", newline="") as f:
+    with open(rejects_path(), "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=REJECT_COLS, extrasaction="ignore"); w.writeheader(); w.writerows(keep)
 
 

@@ -49,7 +49,7 @@ def _read_vocab_file(path: str) -> list:
     """The plain terms in a vocab file. '-term' lines are removal DIRECTIVES (merge_vocab applies
     them) — reading one as a literal term would put '-Foo' in the prompt's controlled vocabulary."""
     if not os.path.exists(path): return []
-    return [l.strip() for l in open(path)
+    return [l.strip() for l in open(path, encoding="utf-8")
             if l.strip() and not l.startswith("#") and not l.strip().startswith("-")]
 
 def load_vocab() -> list:
@@ -85,7 +85,7 @@ def load_ao3_vocab() -> list:
     global _AO3
     if _AO3 is None:
         try:
-            _AO3 = [r["name"] for r in csv.DictReader(open(_ao3_vocab_path())) if r.get("name", "").strip()]
+            _AO3 = [r["name"] for r in csv.DictReader(open(_ao3_vocab_path(), encoding="utf-8")) if r.get("name", "").strip()]
         except OSError:
             _AO3 = []
     return _AO3

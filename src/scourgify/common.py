@@ -233,7 +233,7 @@ def migrate_legacy_data() -> str | None:
         raise GuardrailError(msg) from e
 
     ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    with open(marker, "w") as f:
+    with open(marker, "w", encoding="utf-8") as f:
         f.write(f"uuid: {uid}\nts: {ts}\nmoved:\n")
         for name in legacy_entries:
             f.write(f"  - {name}\n")
@@ -266,7 +266,7 @@ def log_rejects(rows: list[dict]) -> int:
     os.makedirs(data_dir(), exist_ok=True)
     ts = time.strftime("%Y-%m-%dT%H:%M:%S")
     new = not os.path.exists(rejects_path())
-    with open(rejects_path(), "a", newline="") as f:
+    with open(rejects_path(), "a", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=REJECT_COLS, extrasaction="ignore")
         if new: w.writeheader()
         for r in rows: w.writerow({"ts": ts, **r})
@@ -420,7 +420,7 @@ def confirm(msg: str, default: bool = False) -> bool:
 def read_lines(path: str) -> list:
     """Lines of a text file without trailing newlines; [] if missing — the shared list-file
     reader (allow/block/junk lists). The CSV twin is artifacts.read_rows."""
-    return [l.rstrip("\n") for l in open(path)] if os.path.exists(path) else []
+    return [l.rstrip("\n") for l in open(path, encoding="utf-8")] if os.path.exists(path) else []
 
 
 # ---------------- normalization ----------------
@@ -490,7 +490,7 @@ def load_config(path: str | None = None) -> dict:
     p = path or os.path.join(user_dir(), "config.toml")    # user config: user_dir(), not the package
     if os.path.exists(p):
         sec = None
-        for raw in open(p):
+        for raw in open(p, encoding="utf-8"):
             ln = raw.strip()
             if not ln or ln.startswith("#"): continue
             if ln.startswith("["): sec = ln[1:ln.index("]")].strip(); cfg.setdefault(sec, {}); continue

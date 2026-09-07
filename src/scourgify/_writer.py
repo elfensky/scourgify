@@ -27,7 +27,7 @@ except ImportError:
 
 LIB = os.path.expanduser(os.environ.get("CALIBRE_LIBRARY", ""))
 if not LIB: raise SystemExit("_writer: CALIBRE_LIBRARY not set")
-ops = json.load(open(sys.argv[-1]))
+ops = json.load(open(sys.argv[-1], encoding="utf-8"))
 legacy = DB(LIB)
 apply_ops(legacy.new_api, ops, legacy=legacy, reopen=lambda: DB(LIB))
 print("WROTE.")

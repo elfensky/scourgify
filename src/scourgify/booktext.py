@@ -52,5 +52,5 @@ def extract(path: str | None, limit: int = 6000) -> str:
         with tempfile.TemporaryDirectory() as td:
             o = os.path.join(td, "o.txt")
             subprocess.run(["ebook-convert", path, o], capture_output=True, timeout=CONVERT_TIMEOUT)
-            return re.sub(r"\s+", " ", open(o, errors="ignore").read()).strip()[:limit] if os.path.exists(o) else ""
+            return re.sub(r"\s+", " ", open(o, encoding="utf-8", errors="ignore").read()).strip()[:limit] if os.path.exists(o) else ""
     except Exception: return ""

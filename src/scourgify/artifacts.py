@@ -65,7 +65,7 @@ def join_tags(ts) -> str:
 
 def read_rows(path: str) -> list:
     """Raw DictReader rows; [] if the file doesn't exist."""
-    return list(csv.DictReader(open(path))) if os.path.exists(path) else []
+    return list(csv.DictReader(open(path, encoding="utf-8"))) if os.path.exists(path) else []
 
 
 def read_proposal(path: str | None = None) -> list:
@@ -82,7 +82,7 @@ def write_proposal(rows: list, path: str | None = None) -> None:
     proposal (the rows are paid LLM results)."""
     path = path or prop()
     tmp = path + ".tmp"
-    with open(tmp, "w", newline="") as f:
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=PROP_COLS, extrasaction="ignore")
         w.writeheader()
         for r in rows:
@@ -96,7 +96,7 @@ def write_proposal(rows: list, path: str | None = None) -> None:
 def write_ranked(rows: list, path: str | None = None) -> None:
     """rows: RANK_COLS-ordered lists (annotate_new's output)."""
     path = path or rank()
-    with open(path, "w", newline="") as f:
+    with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f); w.writerow(RANK_COLS); w.writerows(rows)
 
 
@@ -114,7 +114,7 @@ def read_ranked(path: str | None = None) -> list:
 def write_review(rows: list, path: str | None = None) -> None:
     """rows: REVIEW_COLS dicts (promote's verdicts)."""
     path = path or review()
-    with open(path, "w", newline="") as f:
+    with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=REVIEW_COLS, extrasaction="ignore")
         w.writeheader()
         for r in rows: w.writerow({k: r.get(k, "") for k in REVIEW_COLS})
@@ -124,7 +124,7 @@ def append_ledger(tag: str, verdict: str, target: str, path: str | None = None) 
     """Append one decided candidate to the promote ledger (header on first write)."""
     path = path or ledger()
     new = not os.path.exists(path)
-    with open(path, "a", newline="") as f:
+    with open(path, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         if new: w.writerow(LEDGER_COLS)
         w.writerow([tag, verdict, target])
@@ -148,7 +148,7 @@ def write_failures(rows: list, path: str | None = None) -> None:
     """rows: FAIL_COLS-ordered lists — the books an engine errored on. Always rewrites the file
     (an empty `rows` clears it), so a clean run does not leave a stale log behind."""
     path = path or fail()
-    with open(path, "w", newline="") as f:
+    with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f); w.writerow(FAIL_COLS); w.writerows(rows)
 
 
