@@ -41,13 +41,22 @@ def test_user_dir_scourgify_home_wins():
 
 
 def test_user_dir_xdg_config_home():
-    with env(SCOURGIFY_HOME=None, XDG_CONFIG_HOME="/tmp/xdg"):
+    # APPDATA neutralized too: on a real Windows host (os.name == "nt" for real, not mocked
+    # here) an ambient APPDATA would otherwise win over XDG_CONFIG_HOME per user_dir()'s own
+    # precedence, and this test's XDG expectation would never be reached (run 34150153653's
+    # sibling test_user_dir_default_is_dot_config hit exactly this).
+    with env(SCOURGIFY_HOME=None, APPDATA=None, XDG_CONFIG_HOME="/tmp/xdg"):
         assert user_dir() == os.path.join("/tmp/xdg", "scourgify")
 
 
 def test_user_dir_default_is_dot_config():
-    # both unset -> ~/.config/scourgify (whatever ~ expands to on this machine)
-    with env(SCOURGIFY_HOME=None, XDG_CONFIG_HOME=None):
+    # all three neutralized -> ~/.config/scourgify (whatever ~ expands to on this machine).
+    # APPDATA must be unset too: on a real Windows host (run 34150153653, test-windows job)
+    # os.name is genuinely "nt" and APPDATA is always set by the OS, so without neutralizing it
+    # user_dir() correctly takes the %APPDATA%\scourgify branch (D-05) and this assertion's
+    # POSIX-only expectation fails — not a user_dir() bug, a test that never neutralized the
+    # variable that selects the branch it wasn't trying to test.
+    with env(SCOURGIFY_HOME=None, APPDATA=None, XDG_CONFIG_HOME=None):
         assert user_dir() == os.path.join(os.path.expanduser("~/.config"), "scourgify")
 
 
