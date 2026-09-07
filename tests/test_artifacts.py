@@ -138,47 +138,54 @@ def test_ao3_defaults_decode_as_utf8_not_the_platform_locale_default():
     but cp1252 on Windows. The bundled AO3 taxonomy CSVs (src/scourgify/defaults/ao3/*.csv) are
     UTF-8 and contain bytes cp1252 cannot decode (byte 0x90 crashed wrangle.load_maps() ->
     ao3_pairs() -> artifacts.read_rows() with UnicodeDecodeError on the real Windows runner).
-    Every text-mode `open()` in src/scourgify/ must now pass `encoding="utf-8"` explicitly.
+    Every text-mode `open()` in src/scourgify/ AND tests/ must now pass `encoding="utf-8"`
+    explicitly — the class recurred once already (run 34145323639, test_layers.py:61) because the
+    original guard below scanned only src/scourgify/, which is structurally why it could not
+    catch a bare `open()` living in the tests directory itself. Widened here so it cannot come
+    back from either tree.
 
     Two checks, because a real Windows host isn't available to run this suite against:
-    1. A static source-grep — the actual regression guard, host-independent — asserting no
-       text-mode `open(` call in src/scourgify/*.py lacks `encoding=` (binary-mode "rb"/"wb"/"ab"
-       opens are exempt; they carry no text encoding).
+    1. A static AST-based scan — the actual regression guard, host-independent — asserting no
+       text-mode `open(...)` CALL in src/scourgify/*.py or tests/*.py lacks `encoding=`
+       (binary-mode "rb"/"wb"/"ab" opens are exempt; they carry no text encoding). AST, not a
+       text/regex scan: this file's own docstring and its `f"...open({args})..."` message text
+       literally contain the substring `open(` — a regex would flag them; the AST sees a string
+       constant and an f-string, not a Call to open, so they are never false positives here.
     2. A behavioral check that the real bundled AO3 characters.csv is genuinely non-ASCII
        (so check 1 isn't guarding an empty case) and that artifacts.read_rows() decodes it
        without raising, on whatever locale this host happens to run under.
     """
-    import re as _re
+    import ast as _ast
 
-    def _open_calls(src: str) -> list:
-        """Every `open(...)` call's argument text, paren-balanced (a plain regex stops at the
-        first ')', which is wrong the moment an argument is itself a call, e.g.
-        `open(_ao3_vocab_path(), encoding="utf-8")`)."""
-        out = []
-        for m in _re.finditer(r"\bopen\(", src):
-            depth, i = 1, m.end()
-            start = i
-            while depth and i < len(src):
-                if src[i] == "(":
-                    depth += 1
-                elif src[i] == ")":
-                    depth -= 1
-                i += 1
-            out.append(src[start:i - 1])
-        return out
+    def _is_binary_mode(call) -> bool:
+        mode_val = None
+        if len(call.args) >= 2 and isinstance(call.args[1], _ast.Constant) and isinstance(call.args[1].value, str):
+            mode_val = call.args[1].value
+        for kw in call.keywords:
+            if kw.arg == "mode" and isinstance(kw.value, _ast.Constant) and isinstance(kw.value.value, str):
+                mode_val = kw.value.value
+        return mode_val is not None and "b" in mode_val
 
-    core_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src", "scourgify")
+    def _has_encoding(call) -> bool:
+        return any(kw.arg == "encoding" for kw in call.keywords)
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    core_dir = os.path.join(repo_root, "src", "scourgify")
+    tests_dir = os.path.join(repo_root, "tests")
     offenders = []
-    for fn in sorted(os.listdir(core_dir)):
-        if not fn.endswith(".py"):
-            continue
-        src = open(os.path.join(core_dir, fn), encoding="utf-8").read()
-        for args in _open_calls(src):
-            if "encoding=" in args:
+    for scan_dir, label in ((core_dir, "src/scourgify"), (tests_dir, "tests")):
+        for fn in sorted(os.listdir(scan_dir)):
+            if not fn.endswith(".py"):
                 continue
-            if any(mode in args for mode in ('"rb"', "'rb'", '"wb"', "'wb'", '"ab"', "'ab'")):
-                continue                                    # binary mode — no text encoding to pin
-            offenders.append(f"{fn}: open({args})")
+            path = os.path.join(scan_dir, fn)
+            src = open(path, encoding="utf-8").read()
+            tree = _ast.parse(src, filename=path)
+            for node in _ast.walk(tree):
+                if not (isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name) and node.func.id == "open"):
+                    continue
+                if _has_encoding(node) or _is_binary_mode(node):
+                    continue
+                offenders.append(f"{label}/{fn}:{node.lineno}")
     assert not offenders, f"text-mode open() missing encoding=\"utf-8\":\n  " + "\n  ".join(offenders)
 
     ao3_path = os.path.join(core_dir, "defaults", "ao3", "characters.csv")

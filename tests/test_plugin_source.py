@@ -25,7 +25,7 @@ BANNED = ["run_writer(", "subprocess", "multiprocessing", "ThreadPoolExecutor", 
 
 
 def _src(name):
-    return open(os.path.join(PLUGIN, name)).read()
+    return open(os.path.join(PLUGIN, name), encoding="utf-8").read()
 
 
 def _tree(name):

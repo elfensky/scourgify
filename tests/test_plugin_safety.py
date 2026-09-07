@@ -39,7 +39,7 @@ def _imports(path):
     Parsed, not grepped: the docstrings here talk ABOUT the forbidden imports."""
     import ast
     out = set()
-    for n in ast.walk(ast.parse(open(path).read())):
+    for n in ast.walk(ast.parse(open(path, encoding="utf-8").read())):
         if isinstance(n, ast.Import): out |= {a.name for a in n.names}
         elif isinstance(n, ast.ImportFrom) and n.module: out.add(n.module)
     return out
@@ -125,7 +125,7 @@ def _system_exit_sites(path):
     """-> [(function name, line)] for every `raise SystemExit(...)`. Parsed, not grepped: the
     docstrings in these modules discuss SystemExit at length."""
     import ast
-    tree = ast.parse(open(path).read())
+    tree = ast.parse(open(path, encoding="utf-8").read())
     owner = {}
     for n in ast.walk(tree):
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):

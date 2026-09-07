@@ -45,7 +45,7 @@ def _read(home=None):
     now, so it is resolved through editlog.log_path() (which reads the CALIBRE_LIBRARY still set
     by the enclosing _pointed_at() block) rather than a literal os.path.join(home, "data", ...)."""
     p = editlog.log_path()
-    return [json.loads(l) for l in open(p)] if os.path.exists(p) else []
+    return [json.loads(l) for l in open(p, encoding="utf-8")] if os.path.exists(p) else []
 
 
 def _quiet(fn, *a, **k):

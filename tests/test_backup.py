@@ -50,7 +50,7 @@ def test_backup_path_never_collides_within_a_second():
     seen = set()
     for _ in range(6):                       # all in the same wall-clock second
         p = common._backup_path(d)
-        open(p, "w").close()                 # occupy it, as a real snapshot would
+        open(p, "w", encoding="utf-8").close()                 # occupy it, as a real snapshot would
         assert p not in seen, "backup path collided — a snapshot would have been overwritten"
         seen.add(p)
 
@@ -59,7 +59,7 @@ def test_prune_keeps_only_the_newest():
     d = tempfile.mkdtemp()
     for name in ("ff_20260101T000001.db", "ff_20260101T000002.db",
                  "ff_20260101T000003.db", "ff_20260101T000004.db", "ff_20260101T000005.db"):
-        open(os.path.join(d, name), "w").close()
+        open(os.path.join(d, name), "w", encoding="utf-8").close()
     common._prune_backups(d, keep=3)
     left = sorted(os.path.basename(p) for p in
                   __import__("glob").glob(os.path.join(d, "ff_*.db")))
@@ -68,7 +68,7 @@ def test_prune_keeps_only_the_newest():
 
 def _snaps(d, sizes):
     for name, n in sizes:
-        with open(os.path.join(d, name), "w") as f: f.write("x" * n)
+        with open(os.path.join(d, name), "w", encoding="utf-8") as f: f.write("x" * n)
 
 
 def test_prune_enforces_a_byte_budget_not_just_a_count():

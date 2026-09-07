@@ -238,7 +238,7 @@ def _plant_legacy_tree(home: str, backup_uuid="__none__",
     legacy = os.path.join(home, "data")
     os.makedirs(legacy, exist_ok=True)
     for name in files:
-        with open(os.path.join(legacy, name), "w") as f:
+        with open(os.path.join(legacy, name), "w", encoding="utf-8") as f:
             f.write("stub\n")
     if backup_uuid != "__none__":
         os.makedirs(os.path.join(legacy, "backups"), exist_ok=True)
@@ -425,9 +425,9 @@ def test_config_and_overrides_stay_at_the_user_dir_root():
         lib = _fixture_lib(td, "lib", uuid="uuid-cfg")
         legacy = _plant_legacy_tree(home, backup_uuid="uuid-cfg")
         os.makedirs(os.path.join(home, "overrides"), exist_ok=True)
-        with open(os.path.join(home, "config.toml"), "w") as f:
+        with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as f:
             f.write("[columns]\n")
-        with open(os.path.join(home, "overrides", "fandoms.csv"), "w") as f:
+        with open(os.path.join(home, "overrides", "fandoms.csv"), "w", encoding="utf-8") as f:
             f.write("a,b\n")
         common.clear_uuid_cache()
         with env(CALIBRE_LIBRARY=lib):

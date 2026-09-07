@@ -42,7 +42,7 @@ def main() -> int:
                 "desc": "Another perfectly serviceable description. " * 3}],
               custom=cols).close()
         home = os.path.join(td, "home"); os.makedirs(home)
-        open(os.path.join(home, "config.toml"), "w").write('[columns]\n[behavior]\n[overrides]\ndir = "overrides"\n')
+        open(os.path.join(home, "config.toml"), "w", encoding="utf-8").write('[columns]\n[behavior]\n[overrides]\ndir = "overrides"\n')
 
         # data_dir() is uuid-scoped now — resolve it here (in THIS process, briefly pointed at the
         # same lib/home the child subprocess below gets) so the seeded proposal lands exactly
@@ -58,7 +58,7 @@ def main() -> int:
             common.clear_uuid_cache()
         os.makedirs(data_dir, exist_ok=True)
         prop_path = os.path.join(data_dir, "classify_proposal.csv")
-        open(prop_path, "w").write("book_id,title,added_tags,proposed_new\n"
+        open(prop_path, "w", encoding="utf-8").write("book_id,title,added_tags,proposed_new\n"
                                    "1,Fixture Book A,Time Loop,\n2,Fixture Book B,Fix-It,\n")
 
         env = {**os.environ, "SCOURGIFY_HOME": home, "CALIBRE_LIBRARY": lib,

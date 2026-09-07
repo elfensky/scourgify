@@ -23,7 +23,7 @@ def test_append_rows_creates_with_header_and_dedupes():
 
 def test_append_rows_honors_an_existing_semicolon_file():
     p = os.path.join(tempfile.mkdtemp(), "tropes.csv")
-    open(p, "w").write("variant;canonical;route\nX;Y;tag\n")     # legacy ';' file (old promote format)
+    open(p, "w", encoding="utf-8").write("variant;canonical;route\nX;Y;tag\n")     # legacy ';' file (old promote format)
     overrides.append_rows(p, HDR, [["Amoral Deity", "Morality", "tag"]])
     rows = read_tropes(p)                                        # read_tropes sniffs the delimiter
     assert ("X", "Y", "tag") in rows and ("Amoral Deity", "Morality", "tag") in rows
@@ -33,7 +33,7 @@ def test_append_lines_dedupes():
     p = os.path.join(tempfile.mkdtemp(), "classify_vocab.txt")
     assert overrides.append_lines(p, ["Soul Bond", "Dream Logic"]) == ["Soul Bond", "Dream Logic"]
     assert overrides.append_lines(p, ["Dream Logic", "Gacha System"]) == ["Gacha System"]
-    assert open(p).read().splitlines() == ["Soul Bond", "Dream Logic", "Gacha System"]
+    assert open(p, encoding="utf-8").read().splitlines() == ["Soul Bond", "Dream Logic", "Gacha System"]
 
 
 def test_ov_path_resolves_under_scourgify_home():
@@ -61,7 +61,7 @@ def test_ov_path_honors_config_overrides_dir():
     """The dir resolution wrangle/setup already honor (cfg[overrides].dir) must be the one the
     override WRITERS use too — one owner, or promote --apply writes where wrangle never reads."""
     with tempfile.TemporaryDirectory() as td, _home(td):
-        open(os.path.join(td, "config.toml"), "w").write("[overrides]\ndir = \"myrules\"\n")
+        open(os.path.join(td, "config.toml"), "w", encoding="utf-8").write("[overrides]\ndir = \"myrules\"\n")
         assert overrides.ov_path("x.csv") == os.path.join(td, "myrules", "x.csv")
 
 
@@ -71,7 +71,7 @@ def test_promote_writes_land_where_wrangle_reads():
     from scourgify.common import load_config
     from scourgify import wrangle as wr
     with tempfile.TemporaryDirectory() as td, _home(td):
-        open(os.path.join(td, "config.toml"), "w").write("[overrides]\ndir = \"myrules\"\n")
+        open(os.path.join(td, "config.toml"), "w", encoding="utf-8").write("[overrides]\ndir = \"myrules\"\n")
         overrides.append_rows(overrides.ov_path("tropes.csv"), HDR, [["Slowburn", "Slow Burn", "tag"]])
         dflt = os.path.join(td, "empty_defaults"); os.makedirs(dflt)
         m = wr.load_maps(load_config(), defaults_dir=dflt)       # production overrides-dir resolution
@@ -83,9 +83,9 @@ def test_read_aliases_sniffs_delimiter():
     """promote_aliases.csv is written by a ';'-honoring writer — the reader must sniff too."""
     td = tempfile.mkdtemp()
     pc = os.path.join(td, "comma.csv")
-    open(pc, "w").write("candidate,target\nSlowburn,Slow Burn\n")
+    open(pc, "w", encoding="utf-8").write("candidate,target\nSlowburn,Slow Burn\n")
     ps = os.path.join(td, "semi.csv")
-    open(ps, "w").write("candidate;target\nFix-it;Fix-It\n")
+    open(ps, "w", encoding="utf-8").write("candidate;target\nFix-it;Fix-It\n")
     assert overrides.read_aliases(pc) == {"slowburn": "Slow Burn"}
     assert overrides.read_aliases(ps) == {"fix-it": "Fix-It"}
     assert overrides.read_aliases(os.path.join(td, "absent.csv")) == {}
@@ -96,7 +96,7 @@ def test_classify_reads_semicolon_alias_file():
     from scourgify import classify
     with tempfile.TemporaryDirectory() as td, _home(td):
         os.makedirs(os.path.join(td, "overrides"))
-        open(os.path.join(td, "overrides", "promote_aliases.csv"), "w").write(
+        open(os.path.join(td, "overrides", "promote_aliases.csv"), "w", encoding="utf-8").write(
             "candidate;target\nSlowburn;Slow Burn\n")
         classify.clear_caches()
         try:
@@ -110,7 +110,7 @@ def test_merge_vocab_minus_semantics():
     (later lines win), comments/blanks ignored. Owned next to the writer that appends to the file."""
     td = tempfile.mkdtemp()
     p = os.path.join(td, "classify_vocab.txt")
-    open(p, "w").write("# comment\n-slow burn\nFound Family\nfound family\n")
+    open(p, "w", encoding="utf-8").write("# comment\n-slow burn\nFound Family\nfound family\n")
     assert overrides.merge_vocab(["Slow Burn", "Time Loop"], p) == ["Time Loop", "Found Family"]
     assert overrides.merge_vocab(["A"], os.path.join(td, "absent.txt")) == ["A"]
 

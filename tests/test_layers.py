@@ -12,7 +12,7 @@ AO3_DIR = os.path.join(os.path.dirname(wrangle.__file__), "defaults", "ao3")
 
 def _write(path, header, rows):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", newline="") as f:
+    with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f); w.writerow(header); w.writerows(rows)
 
 
@@ -28,7 +28,7 @@ def test_layer_precedence_ao3_defaults_overrides():
         _write(f"{dflt}/ao3/characters.csv", ["master", "name", "rel"], [["Canon Name", "Nickname", "alias"]])
         _write(f"{dflt}/fandoms.csv", ["alias", "canonical"], [["Alias B", "Curated Master"]])
         _write(f"{dflt}/tropes.csv", ["variant", "canonical", "route"], [["Slowburn", "Slow Build", "tag"]])
-        open(f"{dflt}/genres_allow.txt", "w").write("Action\nFantasy\n")
+        open(f"{dflt}/genres_allow.txt", "w", encoding="utf-8").write("Action\nFantasy\n")
         _write(f"{over}/fandoms.csv", ["alias", "canonical"], [["Alias A", "User Master"]])
 
         # the dirs are load_maps parameters — no module-global reassignment, no env juggling
@@ -47,7 +47,7 @@ def test_loader_tolerates_missing_ao3_layer():
     with tempfile.TemporaryDirectory() as td:
         dflt = os.path.join(td, "defaults")
         os.makedirs(dflt)
-        open(f"{dflt}/genres_allow.txt", "w").write("Action\n")
+        open(f"{dflt}/genres_allow.txt", "w", encoding="utf-8").write("Action\n")
         m = wrangle.load_maps({"columns": {}, "behavior": {}, "overrides": {"dir": "overrides"}},
                               defaults_dir=dflt, overrides_dir=os.path.join(td, "overrides"))
         assert m["fan"] == {} and m["trope"] == {}           # no layer, no crash
@@ -58,7 +58,7 @@ def test_shipped_ao3_layer_well_formed():
     if not os.path.isdir(AO3_DIR):
         print("  (ao3 layer not generated — skipping)"); return
     for fn in os.listdir(AO3_DIR):
-        rows = list(csv.DictReader(open(os.path.join(AO3_DIR, fn))))
+        rows = list(csv.DictReader(open(os.path.join(AO3_DIR, fn), encoding="utf-8")))
         assert rows and set(rows[0]) == {"master", "name", "rel"}, fn
         names = [r["name"] for r in rows]
         assert len(names) == len(set(names)), f"duplicate variant names in {fn}"

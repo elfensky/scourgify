@@ -94,14 +94,14 @@ def test_candidates_join_and_ledger_skip():
     from scourgify.promote import candidates
     d = tempfile.mkdtemp()
     ranked = os.path.join(d, "r.csv"); prop = os.path.join(d, "p.csv"); ledger = os.path.join(d, "l.csv")
-    with open(ranked, "w", newline="") as f:
+    with open(ranked, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f); w.writerow(["proposed_tag", "count"])
         w.writerow(["Gacha Mechanic", "2"]); w.writerow(["Amoral Deity", "1"]); w.writerow(["Old Tag", "3"])
-    with open(prop, "w", newline="") as f:
+    with open(prop, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f); w.writerow(["book_id", "title", "added_tags", "proposed_new"])
         w.writerow(["1", "Rolls of Fate", "", "Gacha Mechanic"])
         w.writerow(["2", "Cruel God", "", "Amoral Deity; Gacha Mechanic"])
-    with open(ledger, "w", newline="") as f:
+    with open(ledger, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f); w.writerow(["tag", "verdict", "target"]); w.writerow(["Old Tag", "reject", ""])
     cs = candidates(ranked, prop, ledger)
     assert [c["tag"] for c in cs] == ["Gacha Mechanic", "Amoral Deity"]        # Old Tag skipped, count-sorted
@@ -136,20 +136,20 @@ def test_apply_decisions_routing():
     d = tempfile.mkdtemp()
     review = os.path.join(d, "review.csv"); vocab = os.path.join(d, "vocab.txt")
     tropes = os.path.join(d, "tropes.csv"); aliases = os.path.join(d, "aliases.csv"); ledger = os.path.join(d, "l.csv")
-    with open(review, "w", newline="") as f:
+    with open(review, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f); w.writerow(["tag", "count", "verdict", "target", "reason", "confidence", "contested"])
         w.writerow(["Gacha Mechanic", "2", "promote", "", "novel", "high", "False"])
         w.writerow(["Amoral Deity", "1", "alias", "Morality", "same", "med", "True"])
         w.writerow(["Chapter 3 Spoiler", "1", "reject", "", "plot", "high", "False"])
     n = apply_decisions(review, vocab, tropes, aliases, ledger)
     assert n == {"promote": 1, "alias": 1, "reject": 1, "skipped": 0}
-    assert "Gacha Mechanic" in open(vocab).read()
+    assert "Gacha Mechanic" in open(vocab, encoding="utf-8").read()
     # fresh override files are comma-delimited (the overrides.py owner's default; appends to a
     # legacy ';' file would sniff and keep ';' — see test_overrides_append_honors_delimiter)
-    trows = list(csv.reader(open(tropes)))
+    trows = list(csv.reader(open(tropes, encoding="utf-8")))
     assert ["Amoral Deity", "Morality", "tag"] in trows
-    assert ["Amoral Deity", "Morality"] in list(csv.reader(open(aliases)))
-    ledger_tags = {r["tag"] for r in csv.DictReader(open(ledger))}
+    assert ["Amoral Deity", "Morality"] in list(csv.reader(open(aliases, encoding="utf-8")))
+    ledger_tags = {r["tag"] for r in csv.DictReader(open(ledger, encoding="utf-8"))}
     assert ledger_tags == {"Gacha Mechanic", "Amoral Deity", "Chapter 3 Spoiler"}
     assert not os.path.exists(review)                                  # archived away
     assert any(x.startswith("review_applied_") or "applied" in x for x in os.listdir(d))
@@ -159,7 +159,7 @@ def test_parse_resp_applied_alias_snap(tmp=None):
     import os, tempfile, csv
     from scourgify import classify
     d = tempfile.mkdtemp(); os.makedirs(os.path.join(d, "overrides"))
-    with open(os.path.join(d, "overrides", "promote_aliases.csv"), "w", newline="") as f:
+    with open(os.path.join(d, "overrides", "promote_aliases.csv"), "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f); w.writerow(["candidate", "target"]); w.writerow(["Post-Apocalyptic", "Angst"])
     old = os.environ.get("SCOURGIFY_HOME"); os.environ["SCOURGIFY_HOME"] = d   # overrides resolve under user_dir()
     classify.clear_caches()
@@ -177,9 +177,9 @@ def test_promote_run_writes_review(tmp=None):
     from scourgify import promote
     d = tempfile.mkdtemp()
     ranked = os.path.join(d, "r.csv"); prop = os.path.join(d, "p.csv")
-    with open(ranked, "w", newline="") as f:
+    with open(ranked, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f); w.writerow(["proposed_tag", "count"]); w.writerow(["Reality Warping", "3"])
-    with open(prop, "w", newline="") as f:
+    with open(prop, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f); w.writerow(["book_id", "title", "added_tags", "proposed_new"]); w.writerow(["1", "Bend It", "", "Reality Warping"])
     review = os.path.join(d, "promote_review.csv")
     # candidates()'s default ledger_path (run() takes no ledger_path of its own) needs a
@@ -189,7 +189,7 @@ def test_promote_run_writes_review(tmp=None):
         # ask is an injected callable — the same seam decide() has; no engine registry to fake
         promote.run(a, ranked_path=ranked, proposal_path=prop, review_path=review, existing=["Time Travel", "Fluff"],
                     ask=lambda p: '{"verdict":"promote","reason":"novel reusable trope","confidence":"high"}')
-        rows = list(csv.DictReader(open(review)))
+        rows = list(csv.DictReader(open(review, encoding="utf-8")))
         assert len(rows) == 1 and rows[0]["tag"] == "Reality Warping" and rows[0]["verdict"] == "promote"
 
 
@@ -199,15 +199,15 @@ def test_apply_decisions_normalizes_verdict():
     d = tempfile.mkdtemp()
     review = os.path.join(d, "review.csv"); vocab = os.path.join(d, "vocab.txt")
     tropes = os.path.join(d, "tropes.csv"); aliases = os.path.join(d, "aliases.csv"); ledger = os.path.join(d, "l.csv")
-    with open(review, "w", newline="") as f:
+    with open(review, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f); w.writerow(["tag", "count", "verdict", "target", "reason", "confidence", "contested"])
         w.writerow(["Soul Bond", "3", "Promote ", "", "novel", "high", "False"])   # capitalized + trailing space
         w.writerow(["Chapter 7 Reveal", "1", "bogus", "", "noise", "low", "False"])  # invalid verdict
     n = apply_decisions(review, vocab, tropes, aliases, ledger)
     # "Promote " normalizes to promote -> routed to vocab
-    assert "Soul Bond" in open(vocab).read()
+    assert "Soul Bond" in open(vocab, encoding="utf-8").read()
     # "bogus" -> skipped: not written to ledger
-    ledger_tags = {r["tag"] for r in csv.DictReader(open(ledger))}
+    ledger_tags = {r["tag"] for r in csv.DictReader(open(ledger, encoding="utf-8"))}
     assert "Soul Bond" in ledger_tags
     assert "Chapter 7 Reveal" not in ledger_tags
     assert n == {"promote": 1, "alias": 0, "reject": 0, "skipped": 1}   # the bogus row is COUNTED, not silent
@@ -256,13 +256,13 @@ def test_run_raises_on_existing_review():
     fake_ask = lambda p: '{"verdict":"promote","reason":"novel","confidence":"high"}'
     d = tempfile.mkdtemp()
     ranked = os.path.join(d, "r.csv"); prop = os.path.join(d, "p.csv")
-    with open(ranked, "w", newline="") as f:
+    with open(ranked, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f); w.writerow(["proposed_tag", "count"]); w.writerow(["Ghost Bond", "2"])
-    with open(prop, "w", newline="") as f:
+    with open(prop, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f); w.writerow(["book_id", "title", "added_tags", "proposed_new"])
     review = os.path.join(d, "promote_review.csv")
     # pre-create the review file to simulate a pending review
-    with open(review, "w") as f: f.write("existing content")
+    with open(review, "w", encoding="utf-8") as f: f.write("existing content")
     # without --yes, should refuse
     a = promote.build_parser().parse_args([])
     raised = False
@@ -301,13 +301,13 @@ def test_apply_skips_hand_edited_self_alias():
     d = tempfile.mkdtemp()
     review = os.path.join(d, "review.csv"); vocab = os.path.join(d, "v.txt")
     tropes = os.path.join(d, "t.csv"); aliases = os.path.join(d, "a.csv"); ledger = os.path.join(d, "l.csv")
-    with open(review, "w", newline="") as f:
+    with open(review, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f); w.writerow(["tag", "count", "verdict", "target", "reason", "confidence", "contested"])
         w.writerow(["Self Ref", "1", "alias", "Self Ref", "oops", "low", "False"])   # self-alias
         w.writerow(["Empty Tgt", "1", "alias", "", "oops", "low", "False"])          # empty target
     apply_decisions(review, vocab, tropes, aliases, ledger)
     assert not os.path.exists(tropes) and not os.path.exists(aliases)   # nothing junk written
-    assert not os.path.exists(ledger) or "Self Ref" not in open(ledger).read()
+    assert not os.path.exists(ledger) or "Self Ref" not in open(ledger, encoding="utf-8").read()
 
 
 def test_decide_transport_failure_is_not_a_reject():
@@ -354,7 +354,7 @@ def test_wrangle_stable_rejects_a_renamed_tag(tmp=None):
         old = os.environ.get("SCOURGIFY_HOME"); os.environ["SCOURGIFY_HOME"] = d
         try:
             os.makedirs(os.path.join(d, "overrides"))
-            with open(os.path.join(d, "overrides", "tropes.csv"), "w") as f:
+            with open(os.path.join(d, "overrides", "tropes.csv"), "w", encoding="utf-8") as f:
                 f.write("variant,canonical,route\nSoul Bonded,Soul Bond,tag\n")
             keep = wrangle_stable({"Soul Bonded", "Soul Bond"})
             assert "Soul Bonded" not in keep, keep      # wrangle renames it -> never a backfill target
@@ -371,7 +371,7 @@ def test_apply_decisions_counts_rows_it_could_not_decide():
     from scourgify import promote, artifacts
     with tempfile.TemporaryDirectory() as d, _fixture_library_env(d, "uuid-apply-decisions"):
         os.makedirs(common.data_dir()); os.makedirs(os.path.join(d, "home", "overrides"))
-        with open(artifacts.review(), "w") as f:
+        with open(artifacts.review(), "w", encoding="utf-8") as f:
             f.write("tag,count,verdict,target,reason,confidence,contested\n"
                     "Good,3,promote,,ok,high,False\n"
                     "Flaky,2,error,,transport failure,low,False\n"

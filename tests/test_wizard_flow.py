@@ -49,11 +49,11 @@ def wizard_lib(proposal=None):
         home = os.path.join(td, "home")
         with env(SCOURGIFY_HOME=home, CALIBRE_LIBRARY=lib, COLUMNS="100", NONINTERACTIVE=None):
             os.makedirs(common.data_dir())
-            with open(os.path.join(home, "config.toml"), "w") as f:
+            with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as f:
                 f.write('[columns]\n[behavior]\n[overrides]\ndir = "overrides"\n')
             prop = os.path.join(common.data_dir(), "classify_proposal.csv")
             if proposal:
-                with open(prop, "w") as f: f.write(proposal)
+                with open(prop, "w", encoding="utf-8") as f: f.write(proposal)
             classify.clear_caches()
             try:
                 yield prop
@@ -92,7 +92,7 @@ def test_step_review_skipping_every_book_leaves_the_proposal_byte_identical():
         with common.scripted_answers(["2", "s", "s"]), transcript() as buf:
             wizard.stage_review()
         assert "nothing decided" in buf.getvalue()
-        with open(prop) as f:
+        with open(prop, encoding="utf-8") as f:
             assert f.read() == PROPOSAL
 
 
@@ -111,7 +111,7 @@ def test_review_keep_leaves_the_proposal_pending():
         with common.scripted_answers(["3"]), transcript() as buf:
             wizard.stage_review()
         assert "kept pending" in buf.getvalue()
-        with open(prop) as f:
+        with open(prop, encoding="utf-8") as f:
             assert f.read() == PROPOSAL
 
 
@@ -178,7 +178,7 @@ def test_a_full_menu_lap_runs_every_task_without_writing():
                               ("no rejected changes logged", "overrides")]:
             assert marker in out, f"{stage} stage did not run"
         assert "pick up where you left off" in out                # quit landed on the clean-exit line
-        with open(prop) as f:
+        with open(prop, encoding="utf-8") as f:
             assert f.read() == PROPOSAL                           # skip-all review touched nothing
         # every write funnels through run_writer, which snapshots metadata.db first — so an empty
         # backups dir is proof no stage wrote, whatever it claimed on screen.
@@ -200,7 +200,7 @@ def dirty_lib():
         home = os.path.join(td, "home")
         with env(SCOURGIFY_HOME=home, CALIBRE_LIBRARY=lib, COLUMNS="100", NONINTERACTIVE=None):
             os.makedirs(common.data_dir())
-            with open(os.path.join(home, "config.toml"), "w") as f:
+            with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as f:
                 f.write('[columns]\n[behavior]\n[overrides]\ndir = "overrides"\n')
             yield
 

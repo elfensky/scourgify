@@ -224,7 +224,7 @@ def test_vocab_overrides_merge():
     from scourgify import classify
     with tempfile.TemporaryDirectory() as td:
         os.makedirs(os.path.join(td, "overrides"))
-        with open(os.path.join(td, "overrides", "classify_vocab.txt"), "w") as f:
+        with open(os.path.join(td, "overrides", "classify_vocab.txt"), "w", encoding="utf-8") as f:
             f.write("# my terms\nSentient Toaster Romance\n-Time Travel\n")
         old = os.environ.get("SCOURGIFY_HOME")
         os.environ["SCOURGIFY_HOME"] = td; classify.clear_caches()     # overrides resolve under user_dir()
