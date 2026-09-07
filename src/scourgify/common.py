@@ -96,8 +96,150 @@ def data_dir() -> str:
     (gitignored), namespaced per library so two libraries opened in one process never share an
     artifact path. Raises GuardrailError (never a library-less path) when no library resolves.
     A FUNCTION, never memoized at the user_dir() level: $SCOURGIFY_HOME set after import must
-    still redirect the whole tree."""
-    return os.path.join(user_dir(), "data", _resolve_uuid())
+    still redirect the whole tree. Runs the one-time guarded migration of the legacy flat data/
+    tree (migrate_legacy_data()) on every resolution, until its marker exists — cheap after the
+    first call (an os.path.exists check) and self-disabling once the tree has moved."""
+    d = os.path.join(user_dir(), "data", _resolve_uuid())
+    migrate_legacy_data()
+    return d
+
+
+# Attempts are keyed by (user_dir(), resolved uuid), NOT a single process-global boolean: a
+# throwaway library resolved first fails the owner proof, and a global flag would then
+# permanently suppress migration for the real library opened later in the same Calibre session
+# — exactly the multi-library case this phase exists for.
+_MIGRATION_TRIED: set[tuple[str, str]] = set()
+
+
+def _same_bytes(a: str, b: str) -> bool:
+    try:
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            return fa.read() == fb.read()
+    except OSError:
+        return False
+
+
+def migrate_legacy_data() -> str | None:
+    """One-time guarded auto-move of the legacy flat data/ tree into data/<library uuid>/ (D-02).
+
+    Owner proof (D-03): move ONLY when the uuid read from the newest data/backups/ff_*.db equals
+    the resolving library's uuid. No legacy backup, an unreadable one, one with no library_id
+    table (library_uuid() returns None — NOT a proof, treated exactly like a mismatch), or a
+    mismatched uuid: move NOTHING, print the reason, return None. A throwaway library resolved
+    first must never claim the real library's history.
+
+    The marker (data/MIGRATED) is the ONLY "already migrated" gate — never data/<uuid>/ merely
+    existing, which a rolled-back or interrupted attempt can leave behind; skipping on it would
+    make a split tree permanent and silent. When data/<uuid>/ exists AND legacy entries are still
+    present AND there is no marker, this is a resumable prior attempt: the owner proof runs again
+    and the remaining entries move in.
+
+    The move is all-or-nothing: each legacy entry renames in one at a time (never a copy — the
+    real tree is hundreds of MB), journalled as it succeeds. Any failure rolls every already-moved
+    entry back and raises GuardrailError (never SystemExit — this runs on the read path of every
+    Calibre job) naming what failed and what was restored. The marker is written LAST, so a
+    failed or rolled-back attempt never gets marked "done"."""
+    home = user_dir()
+    uid = _resolve_uuid()
+    key = (home, uid)
+    if key in _MIGRATION_TRIED:
+        return None
+    _MIGRATION_TRIED.add(key)
+
+    legacy_root = os.path.join(home, "data")
+    marker = os.path.join(legacy_root, "MIGRATED")
+    if os.path.exists(marker):
+        return None
+    if not os.path.isdir(legacy_root):
+        return None
+
+    # A legacy entry is a FILE directly under data/, or the "backups" directory itself — never
+    # the destination uuid/nouuid- directory a (possibly interrupted) prior attempt already made.
+    def _is_legacy(name: str) -> bool:
+        if name in ("MIGRATED",):
+            return False
+        full = os.path.join(legacy_root, name)
+        if os.path.isdir(full):
+            return name == "backups"
+        return True
+
+    legacy_entries = sorted(n for n in os.listdir(legacy_root) if _is_legacy(n))
+    if not legacy_entries:
+        return None
+
+    # ---- owner proof ----
+    candidates = glob.glob(os.path.join(legacy_root, "backups", "ff_*.db"))
+    if not candidates:
+        print(f"scourgify: no legacy backup under {os.path.join(legacy_root, 'backups')} to prove "
+              f"ownership of the legacy data/ tree — leaving it untouched.")
+        return None
+    newest = max(candidates, key=os.path.getmtime)
+    try:
+        con = sqlite3.connect(f"file:{newest}?mode=ro", uri=True)
+        try:
+            backup_uuid = library_uuid(con)
+        finally:
+            con.close()
+    except Exception as e:
+        print(f"scourgify: could not read {newest} ({e}) to prove ownership of the legacy data/ "
+              f"tree — leaving it untouched.")
+        return None
+    if backup_uuid is None:
+        print(f"scourgify: {newest} carries no library_id table — ownership of the legacy data/ "
+              f"tree could not be proved; leaving it untouched.")
+        return None
+    if backup_uuid != uid:
+        print(f"scourgify: legacy backup uuid {backup_uuid!r} does not match this library's uuid "
+              f"{uid!r} — leaving the legacy data/ tree untouched.")
+        return None
+
+    # ---- the move: all-or-nothing, journalled ----
+    # Journal entries are (src, dst, kind): kind="moved" needs an os.rename(dst, src) reversal on
+    # failure; kind="deduped" (a resumed attempt's destination already held byte-identical
+    # content, so src was removed rather than moved) must NOT be reversed — dst pre-dates this
+    # call and reversing would both resurrect a duplicate at src and destroy the prior attempt's
+    # already-correct file at dst.
+    dest_root = os.path.join(legacy_root, uid)
+    os.makedirs(dest_root, exist_ok=True)
+    journal: list[tuple[str, str, str]] = []
+    try:
+        for name in legacy_entries:
+            src, dst = os.path.join(legacy_root, name), os.path.join(dest_root, name)
+            if os.path.exists(dst):
+                if os.path.isdir(src) or os.path.isdir(dst):
+                    raise GuardrailError(f"migrate_legacy_data: refusing — {dst} already exists "
+                                         f"(a directory collision is never silently merged).")
+                if not _same_bytes(src, dst):
+                    raise GuardrailError(f"migrate_legacy_data: refusing — {dst} already exists "
+                                         f"with different content than {src}.")
+                os.remove(src)          # a prior attempt already moved this one; tidy the duplicate
+                journal.append((src, dst, "deduped"))
+                continue
+            os.rename(src, dst)
+            journal.append((src, dst, "moved"))
+    except BaseException as e:
+        restored, unrestorable = [], []
+        for src, dst, kind in reversed(journal):
+            if kind == "deduped":
+                continue             # dst pre-dates this call — never reverse a dedupe
+            try:
+                os.rename(dst, src)
+                restored.append(src)
+            except OSError as re_err:
+                unrestorable.append((src, dst, str(re_err)))
+        msg = f"migrate_legacy_data: aborted moving the legacy data/ tree ({e}). Restored: {restored}."
+        if unrestorable:
+            msg += f" COULD NOT RESTORE (manual recovery needed): {unrestorable}."
+        raise GuardrailError(msg) from e
+
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with open(marker, "w") as f:
+        f.write(f"uuid: {uid}\nts: {ts}\nmoved:\n")
+        for name in legacy_entries:
+            f.write(f"  - {name}\n")
+    print(f"scourgify: migrated the legacy data/ tree ({', '.join(legacy_entries)}) into {dest_root} "
+          f"(marker: {marker}).")
+    return dest_root
 
 
 def backups_dir() -> str:

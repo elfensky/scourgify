@@ -226,6 +226,220 @@ def test_set_library_does_not_clear_the_uuid_memo_but_clear_uuid_cache_does():
             common.set_library(None)
 
 
+# ---------------- one-time guarded migration of the legacy flat data/ tree (D-02/D-03) ----------------
+
+def _plant_legacy_tree(home: str, backup_uuid="__none__",
+                        files=("classify_proposal_applied_20260726-000000.csv", "promote_ledger.csv")) -> str:
+    """A data/ tree shaped like the real one (D-03's "Specific Ideas" note): a couple of flat
+    archive files plus data/backups/ff_*.db carrying `backup_uuid`. backup_uuid="__none__"
+    (default) plants NO backups/ directory at all — the "no legacy backup" case; backup_uuid=None
+    plants a backup with no library_id table; any other value plants a backup carrying that uuid.
+    Returns the legacy data/ root."""
+    legacy = os.path.join(home, "data")
+    os.makedirs(legacy, exist_ok=True)
+    for name in files:
+        with open(os.path.join(legacy, name), "w") as f:
+            f.write("stub\n")
+    if backup_uuid != "__none__":
+        os.makedirs(os.path.join(legacy, "backups"), exist_ok=True)
+        fixture_db.build(os.path.join(legacy, "backups", "ff_old.db"), [{"id": 1}], uuid=backup_uuid).close()
+    return legacy
+
+
+def _snapshot_bytes(root: str) -> dict:
+    """{relpath: bytes} for every FILE under `root`, recursively — the "byte-identical afterwards"
+    proof for a migration that must not have touched anything."""
+    out = {}
+    for dirpath, _dirs, files in os.walk(root):
+        for f in files:
+            p = os.path.join(dirpath, f)
+            out[os.path.relpath(p, root)] = open(p, "rb").read()
+    return out
+
+
+def test_legacy_tree_moves_when_the_backup_proves_ownership():
+    with tempfile.TemporaryDirectory() as td, env(SCOURGIFY_HOME=os.path.join(td, "home")):
+        home = os.path.join(td, "home")
+        lib = _fixture_lib(td, "lib", uuid="uuid-migrate-match")
+        legacy = _plant_legacy_tree(home, backup_uuid="uuid-migrate-match")
+        common.clear_uuid_cache()
+        with env(CALIBRE_LIBRARY=lib):
+            dd = common.data_dir()
+
+        assert dd == os.path.join(legacy, "uuid-migrate-match")
+        assert os.path.exists(os.path.join(dd, "backups", "ff_old.db"))
+        for name in ("classify_proposal_applied_20260726-000000.csv", "promote_ledger.csv"):
+            assert os.path.exists(os.path.join(dd, name))
+            assert not os.path.exists(os.path.join(legacy, name))
+        assert os.path.exists(os.path.join(legacy, "MIGRATED"))
+        remaining = set(os.listdir(legacy)) - {"uuid-migrate-match", "MIGRATED"}
+        assert not remaining, f"legacy tree still has loose entries: {remaining}"
+
+
+def test_legacy_tree_is_untouched_when_the_backup_belongs_to_another_library():
+    with tempfile.TemporaryDirectory() as td, env(SCOURGIFY_HOME=os.path.join(td, "home")):
+        home = os.path.join(td, "home")
+        lib = _fixture_lib(td, "lib", uuid="uuid-mine")
+        legacy = _plant_legacy_tree(home, backup_uuid="uuid-other")
+        before = _snapshot_bytes(legacy)
+        common.clear_uuid_cache()
+        with env(CALIBRE_LIBRARY=lib):
+            common.data_dir()
+
+        assert _snapshot_bytes(legacy) == before
+        assert not os.path.exists(os.path.join(legacy, "MIGRATED"))
+        assert not os.path.isdir(os.path.join(legacy, "uuid-mine"))
+
+
+def test_legacy_tree_is_untouched_when_the_backup_has_no_library_id_table():
+    with tempfile.TemporaryDirectory() as td, env(SCOURGIFY_HOME=os.path.join(td, "home")):
+        home = os.path.join(td, "home")
+        lib = _fixture_lib(td, "lib", uuid="uuid-mine2")
+        legacy = _plant_legacy_tree(home, backup_uuid=None)
+        before = _snapshot_bytes(legacy)
+        common.clear_uuid_cache()
+        with env(CALIBRE_LIBRARY=lib):
+            common.data_dir()
+
+        assert _snapshot_bytes(legacy) == before
+        assert not os.path.exists(os.path.join(legacy, "MIGRATED"))
+
+
+def test_legacy_tree_is_untouched_when_there_is_no_backup_to_prove_ownership():
+    with tempfile.TemporaryDirectory() as td, env(SCOURGIFY_HOME=os.path.join(td, "home")):
+        home = os.path.join(td, "home")
+        lib = _fixture_lib(td, "lib", uuid="uuid-mine3")
+        legacy = _plant_legacy_tree(home, backup_uuid="__none__")
+        before = _snapshot_bytes(legacy)
+        common.clear_uuid_cache()
+        with env(CALIBRE_LIBRARY=lib):
+            common.data_dir()
+
+        assert _snapshot_bytes(legacy) == before
+        assert not os.path.exists(os.path.join(legacy, "MIGRATED"))
+
+
+def test_a_failed_rename_rolls_every_moved_entry_back():
+    """os.rename stubbed (module-level, restored in a finally) to succeed for the first legacy
+    entry and fail for the second: every legacy file must be back at its original path,
+    byte-identical, and no MIGRATED marker written."""
+    with tempfile.TemporaryDirectory() as td, env(SCOURGIFY_HOME=os.path.join(td, "home")):
+        home = os.path.join(td, "home")
+        lib = _fixture_lib(td, "lib", uuid="uuid-rename-fail")
+        legacy = _plant_legacy_tree(home, backup_uuid="uuid-rename-fail", files=("a.csv", "b.csv"))
+        before = _snapshot_bytes(legacy)
+        common.clear_uuid_cache()
+
+        real_rename = os.rename
+        calls = {"n": 0}
+
+        def flaky_rename(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise OSError("simulated failure")
+            return real_rename(src, dst)
+
+        os.rename = flaky_rename
+        try:
+            with env(CALIBRE_LIBRARY=lib):
+                try:
+                    common.data_dir()
+                except common.GuardrailError:
+                    pass
+                else:
+                    raise AssertionError("expected a GuardrailError on the failed rename")
+        finally:
+            os.rename = real_rename
+
+        assert _snapshot_bytes(legacy) == before
+        assert not os.path.exists(os.path.join(legacy, "MIGRATED"))
+
+
+def test_a_leftover_uuid_directory_does_not_suppress_the_migration():
+    """A pre-existing EMPTY data/<uuid>/ with no marker and legacy entries still beside it must
+    not be read as "already migrated" — the migration runs and completes."""
+    with tempfile.TemporaryDirectory() as td, env(SCOURGIFY_HOME=os.path.join(td, "home")):
+        home = os.path.join(td, "home")
+        lib = _fixture_lib(td, "lib", uuid="uuid-leftover")
+        legacy = _plant_legacy_tree(home, backup_uuid="uuid-leftover")
+        os.makedirs(os.path.join(legacy, "uuid-leftover"), exist_ok=True)
+        common.clear_uuid_cache()
+        with env(CALIBRE_LIBRARY=lib):
+            dd = common.data_dir()
+
+        assert dd == os.path.join(legacy, "uuid-leftover")
+        assert os.path.exists(os.path.join(legacy, "MIGRATED"))
+        assert os.path.exists(os.path.join(dd, "promote_ledger.csv"))
+
+
+def test_migration_does_not_repeat_once_the_marker_exists():
+    with tempfile.TemporaryDirectory() as td, env(SCOURGIFY_HOME=os.path.join(td, "home")):
+        home = os.path.join(td, "home")
+        lib = _fixture_lib(td, "lib", uuid="uuid-once")
+        legacy = _plant_legacy_tree(home, backup_uuid="uuid-once")
+        common.clear_uuid_cache()
+        with env(CALIBRE_LIBRARY=lib):
+            dd = common.data_dir()
+        assert os.path.exists(os.path.join(legacy, "MIGRATED"))
+        after_first = _snapshot_bytes(legacy)
+
+        # Simulate a fresh process re-evaluating the same on-disk state: clear BOTH in-process
+        # memos so only the on-disk marker (never the in-process _MIGRATION_TRIED set) can be
+        # the thing stopping a second pass.
+        common.clear_uuid_cache()
+        common._MIGRATION_TRIED.clear()
+        with env(CALIBRE_LIBRARY=lib):
+            dd2 = common.data_dir()
+
+        assert dd2 == dd
+        assert _snapshot_bytes(legacy) == after_first
+
+
+def test_a_failed_owner_proof_for_one_library_does_not_suppress_another():
+    """The keyed-attempt test: a throwaway library resolved first fails the owner proof (nothing
+    moves); the REAL library, resolved next in the same process against the same legacy tree,
+    still migrates. A single process-global "attempted" boolean would get this wrong."""
+    with tempfile.TemporaryDirectory() as td, env(SCOURGIFY_HOME=os.path.join(td, "home")):
+        home = os.path.join(td, "home")
+        legacy = _plant_legacy_tree(home, backup_uuid="uuid-real")
+        throwaway = _fixture_lib(td, "throwaway", uuid="uuid-throwaway")
+        real_lib = _fixture_lib(td, "real", uuid="uuid-real")
+
+        common.clear_uuid_cache()
+        with env(CALIBRE_LIBRARY=throwaway):
+            common.data_dir()
+        assert not os.path.exists(os.path.join(legacy, "MIGRATED"))
+        assert os.path.exists(os.path.join(legacy, "promote_ledger.csv")), "the throwaway must not claim the real tree"
+
+        common.clear_uuid_cache()
+        with env(CALIBRE_LIBRARY=real_lib):
+            dd = common.data_dir()
+        assert dd == os.path.join(legacy, "uuid-real")
+        assert os.path.exists(os.path.join(legacy, "MIGRATED"))
+        assert os.path.exists(os.path.join(dd, "promote_ledger.csv"))
+
+
+def test_config_and_overrides_stay_at_the_user_dir_root():
+    with tempfile.TemporaryDirectory() as td, env(SCOURGIFY_HOME=os.path.join(td, "home")):
+        home = os.path.join(td, "home")
+        lib = _fixture_lib(td, "lib", uuid="uuid-cfg")
+        legacy = _plant_legacy_tree(home, backup_uuid="uuid-cfg")
+        os.makedirs(os.path.join(home, "overrides"), exist_ok=True)
+        with open(os.path.join(home, "config.toml"), "w") as f:
+            f.write("[columns]\n")
+        with open(os.path.join(home, "overrides", "fandoms.csv"), "w") as f:
+            f.write("a,b\n")
+        common.clear_uuid_cache()
+        with env(CALIBRE_LIBRARY=lib):
+            dd = common.data_dir()
+
+        assert os.path.exists(os.path.join(legacy, "MIGRATED"))
+        assert os.path.exists(os.path.join(home, "config.toml"))
+        assert os.path.exists(os.path.join(home, "overrides", "fandoms.csv"))
+        assert not os.path.exists(os.path.join(dd, "config.toml"))
+        assert not os.path.exists(os.path.join(dd, "overrides"))
+
+
 # ---------------- Windows branch of user_dir() (FOUND-02, XPLAT-01, D-05) ----------------
 
 def _as_windows():
