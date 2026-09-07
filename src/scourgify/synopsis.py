@@ -271,18 +271,23 @@ def options(n: int) -> list:
     ]
 
 
-def step(made: dict, titles: dict) -> dict:
+def step(made: dict, titles: dict, decide=None) -> dict:
     """1-by-1 review of the generated synopses -> the ACCEPTED subset ({} = nothing decided).
 
     Lives here, not in the wizard: CLAUDE.md's rule is that a wizard stage calls the same engine
     function the subcommand does, so `synopsis --apply --step` and the wizard share one path. An
     unticked book gets neither its new description NOR the stamp — it stays in the queue, which is
-    the point of rejecting it."""
-    from scourgify import ui
-    if not ui.interactive():
-        raise GuardrailError("--step needs an interactive terminal (omit it to write every synopsis).")
+    the point of rejecting it.
+
+    `decide(title, items) -> (accepted_idx, rejected_idx, action)` defaults to ui.checklist
+    (D-11) — the lazy import of ui moves BEHIND that default."""
+    if decide is None:
+        from scourgify import ui
+        if not ui.interactive():
+            raise GuardrailError("--step needs an interactive terminal (omit it to write every synopsis).")
+        decide = ui.checklist
     ids = sorted(made)
-    acc, _, action = ui.checklist(
+    acc, _, action = decide(
         "new synopses — untick one to leave that book's description alone",
         [f"[bold]#{b}[/] {str(titles.get(b, ''))[:36]:<36} [dim]{made[b][:120]}…[/]" for b in ids])
     if action in ("skip", "quit"): return {}

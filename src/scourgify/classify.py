@@ -263,15 +263,21 @@ def apply_proposal(rows: list | None = None) -> None:
     print(f"applied tags to {len(chg)} books + stamped #wrangled on {len(processed)} processed{tail}")
 
 
-def apply_proposal_step() -> None:
+def apply_proposal_step(decide=None) -> None:
     """1-by-1 review of the proposal: each book's proposed tags as a checklist. Accepted tags are
     applied + the book stamped; rejected tags are dropped and logged (class=ai, a hallucination filter,
-    NOT a rule bug). Skip/quit leave a book's row pending in the proposal for a later run."""
+    NOT a rule bug). Skip/quit leave a book's row pending in the proposal for a later run.
+
+    `decide(title, items, subtitle=) -> (accepted_idx, rejected_idx, action)` defaults to
+    ui.checklist (D-11) — the lazy import of ui moves BEHIND that default, so a front door
+    injecting its own callback never imports the interactive module."""
     if not os.path.exists(prop()):
         raise GuardrailError(f"no proposal to apply ({os.path.basename(prop())} not found — run a classify pass first).")
-    from scourgify import ui
-    if not ui.interactive():
-        raise GuardrailError("--step needs an interactive terminal (omit it to apply the whole proposal).")
+    if decide is None:
+        from scourgify import ui
+        if not ui.interactive():
+            raise GuardrailError("--step needs an interactive terminal (omit it to apply the whole proposal).")
+        decide = ui.checklist
     from scourgify.common import log_rejects
     with contextlib.closing(ro_connect()) as con:
         desc = {b: strip_html(t) for b, t in con.execute("SELECT book, text FROM comments")}
@@ -282,7 +288,7 @@ def apply_proposal_step() -> None:
         if quit_: pending.append(r); continue
         if not tags: decided.append(r); continue               # no-tag book: stamp only (else re-sent forever)
         b = r["book_id"]; title = str(r.get("title") or titles.get(b, ""))
-        acc, rej, action = ui.checklist(f"[bold]#{b}[/]  {title[:64]}", tags, subtitle=(desc.get(b, "")[:280] or "(no description)"))
+        acc, rej, action = decide(f"[bold]#{b}[/]  {title[:64]}", tags, subtitle=(desc.get(b, "")[:280] or "(no description)"))
         if action == "quit": quit_ = True; pending.append(r); continue
         if action == "skip": pending.append(r); continue
         for i in rej:

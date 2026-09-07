@@ -189,30 +189,35 @@ def verdict_line(r: dict) -> str:
     return f"[bold]{r.get('tag','')}[/]{warn}  ({n} book(s))  {what}  [dim]{(r.get('reason') or '')[:70]}[/]"
 
 
-def apply_decisions_step(review_path: str | None = None) -> dict:
+def apply_decisions_step(review_path: str | None = None, decide=None) -> dict:
     """1-by-1 review of the adjudicated verdicts: untick any you disagree with.
 
     Ticked verdicts are applied and land in the ledger. An unticked one gets NO ledger row, so the
     candidate stays undecided and is offered again — the same "this was not a durable decision"
     rule an engine error already follows. Before this, disagreeing with 3 of 50 verdicts meant
     'keep' and hand-editing a CSV; the whole point of an adjudicated list is judging it item by
-    item, which is how the wrangle and classify reviews already work."""
-    from scourgify import ui
+    item, which is how the wrangle and classify reviews already work.
+
+    `decide(title, items, subtitle=) -> (accepted_idx, rejected_idx, action)` defaults to
+    ui.checklist (D-11) — the lazy import of ui moves BEHIND that default."""
     from scourgify.artifacts import archive_rows
     review_path = review_path or review()
     if not os.path.exists(review_path):
         raise GuardrailError(f"no review to apply ({os.path.basename(review_path)} not found — run promote first).")
-    if not interactive():
-        raise GuardrailError("--step needs an interactive terminal (omit it to apply the whole review).")
+    if decide is None:
+        from scourgify import ui
+        if not interactive():
+            raise GuardrailError("--step needs an interactive terminal (omit it to apply the whole review).")
+        decide = ui.checklist
     rows = read_rows(review_path)
     actionable = [r for r in rows if (r.get("verdict") or "").strip().lower() in VERDICTS]
     other = [r for r in rows if r not in actionable]          # errors: never applicable, stay pending
     if not actionable:
         print("(no applicable verdicts — nothing to review.)"); return {}
-    acc, rej, action = ui.checklist("verdicts — untick any you disagree with", 
-                                    [verdict_line(r) for r in actionable],
-                                    subtitle="ticked verdicts are applied; unticked ones stay undecided "
-                                             "and are offered again")
+    acc, rej, action = decide("verdicts — untick any you disagree with",
+                              [verdict_line(r) for r in actionable],
+                              subtitle="ticked verdicts are applied; unticked ones stay undecided "
+                                       "and are offered again")
     if action in ("skip", "quit") or not acc:
         print("(nothing decided — review left untouched.)"); return {}
     decided = [actionable[i] for i in acc]
@@ -333,14 +338,19 @@ def backfill_plan(ledger_path: str | None = None) -> tuple[dict, dict]:
     return chg, adds
 
 
-def backfill_step(chg: dict, adds: dict, titles: dict) -> dict:
+def backfill_step(chg: dict, adds: dict, titles: dict, decide=None) -> dict:
     """1-by-1 review of the backfill -> the ACCEPTED {book: tags} ({} = nothing decided). Shared by
-    `promote --backfill --step` and the wizard stage, per CLAUDE.md's same-engine-function rule."""
-    from scourgify import ui
+    `promote --backfill --step` and the wizard stage, per CLAUDE.md's same-engine-function rule.
+
+    `decide(title, items) -> (accepted_idx, rejected_idx, action)` defaults to ui.checklist
+    (D-11) — the lazy import of ui moves BEHIND that default."""
+    if decide is None:
+        from scourgify import ui
+        decide = ui.checklist
     books = sorted(adds)
-    acc, _, action = ui.checklist("backfill — untick a book to leave it untagged",
-                                  [f"[bold]#{b}[/] {str(titles.get(b, ''))[:44]}  + "
-                                   f"[cyan]{', '.join(sorted(adds[b]))}[/]" for b in books])
+    acc, _, action = decide("backfill — untick a book to leave it untagged",
+                            [f"[bold]#{b}[/] {str(titles.get(b, ''))[:44]}  + "
+                             f"[cyan]{', '.join(sorted(adds[b]))}[/]" for b in books])
     if action in ("skip", "quit"): return {}
     keep = {books[i] for i in acc}
     return {b: v for b, v in chg.items() if b in keep}

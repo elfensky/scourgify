@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Pins the PURE helpers in wizard.py — the file-signal / menu-hint logic where a regression
 would silently mis-flag pending work — plus the six pure option builders now relocated to their
-owning tool modules (classify/engines/synopsis — FOUND-06/D-10). The rich-interactive shells
-(menus, prompts, the live dashboard) are deliberately NOT tested — mocking a console is coverage
-theater. No framework:  uv run tests/test_wizard.py  (also pytest-collectable). No Calibre/library/network."""
-import os, subprocess, sys
+owning tool modules (classify/engines/synopsis — FOUND-06/D-10) and the decide= injection seam
+on all seven review-checklist call sites (D-11). The rich-interactive shells (menus, prompts, the
+live dashboard) are deliberately NOT tested — mocking a console is coverage theater.
+No framework:  uv run tests/test_wizard.py  (also pytest-collectable). No Calibre/library/network
+except where a fixture library is explicitly built below (ro_connect()-backed helpers)."""
+import contextlib, os, subprocess, sys, tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from scourgify import wizard          # hard-imports rich (a declared dependency), so importable in any install
-from scourgify import classify, engines, synopsis
+from scourgify import artifacts, classify, common, engines, overrides, promote, staleness, synopsis
+import fixture_db
 
 SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
 
@@ -213,6 +217,165 @@ def test_no_relocated_builder_introduces_an_import_cycle():
         p = subprocess.run([sys.executable, "-c", f"import sys; sys.path.insert(0, {SRC!r})\n{code}"],
                            capture_output=True, text=True)
         assert p.returncode == 0, f"importing {name} alone failed:\n{p.stdout}{p.stderr}"
+
+
+# ---------------- decide= seam on the seven review-checklist call sites (D-11) ----------------
+@contextlib.contextmanager
+def _env(**kv):
+    saved = {k: os.environ.get(k) for k in kv}
+    for k, v in kv.items():
+        os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+
+@contextlib.contextmanager
+def _fixture_env(books=None):
+    """A throwaway fixture library + a redirected $SCOURGIFY_HOME — for the three sites that read
+    titles through ro_connect() (classify.apply_proposal_step, overrides._step_walk,
+    staleness.step). Clears the classify vocab cache and the uuid memo both ways."""
+    books = books or [{"id": 1, "added": "2026-01-01 10:00:00", "title": "Book One"}]
+    with tempfile.TemporaryDirectory() as td:
+        lib = os.path.join(td, "lib"); os.makedirs(lib)
+        fixture_db.build(os.path.join(lib, "metadata.db"), books).close()
+        with _env(SCOURGIFY_HOME=os.path.join(td, "home"), CALIBRE_LIBRARY=lib):
+            common.clear_uuid_cache()
+            os.makedirs(common.data_dir())
+            classify.clear_caches()
+            try:
+                yield td
+            finally:
+                classify.clear_caches()
+                common.clear_uuid_cache()
+
+
+def _no_ui_import(fn):
+    """Run the zero-arg callable `fn` with scourgify.ui popped from sys.modules first; assert it
+    was never re-imported as a side effect of the call (T-01-19 / Codex plan-05 LOW), restoring
+    the saved entry afterward regardless of outcome."""
+    saved = sys.modules.pop("scourgify.ui", None)
+    try:
+        result = fn()
+        assert "scourgify.ui" not in sys.modules, "decide= must not import the interactive module"
+        return result
+    finally:
+        if saved is not None:
+            sys.modules["scourgify.ui"] = saved
+
+
+def test_apply_proposal_step_decide_seam():
+    with _fixture_env([{"id": 1, "added": "2026-01-01 10:00:00", "title": "Book One", "desc": "x"}]):
+        artifacts.write_proposal([{"book_id": 1, "title": "Book One", "added_tags": ["Fluff"], "proposed_new": []}])
+        recorded = {}
+        def stub(title, items, subtitle=""):
+            recorded["title"], recorded["items"] = title, items
+            return [0], [], "apply"                        # accept the one tag
+        recorded_ops = []
+        saved_rw = classify.run_writer
+        classify.run_writer = lambda ops, force=False, **kw: recorded_ops.append(ops)
+        try:
+            _no_ui_import(lambda: classify.apply_proposal_step(decide=stub))
+        finally:
+            classify.run_writer = saved_rw
+        assert recorded["items"] == ["Fluff"]                          # what the interactive path would see
+        assert "#1" in recorded["title"] and "Book One" in recorded["title"]
+        (ops,) = recorded_ops
+        assert any(o.get("op") == "set_field" and o.get("field") == "tags"
+                  and o["values"].get("1") == ["Fluff"] for o in ops)
+
+
+def test_step_walk_decide_seam():
+    with _fixture_env([{"id": 1, "added": "2026-01-01 10:00:00", "title": "Book One"}]):
+        recorded = {}
+        def stub(title, items, subtitle=""):
+            recorded["title"], recorded["items"] = title, items
+            return [0], [], "apply"                        # accept — no rejects to log
+        unique = {1: [("rename", "fandoms", "OldF", "NewF")]}
+        rejects = _no_ui_import(lambda: overrides._step_walk(
+            {}, {}, {"fandoms": "fandoms"}, {}, {}, unique, set(), {}, decide=stub))
+        assert rejects == []
+        assert recorded["items"] == [overrides._edit_label("rename", "fandoms", "OldF", "NewF")]
+        assert "#1" in recorded["title"] and "Book One" in recorded["title"]
+
+
+def test_step_pick_decide_seam():
+    recorded = {}
+    def stub(title, items, subtitle=""):
+        recorded["title"], recorded["items"] = title, items
+        return [0], [], "apply"
+    auto = {"fandoms.csv": ["A,A"], "tropes.csv": ["B,B,tag"]}
+    result = _no_ui_import(lambda: overrides.step_pick(auto, decide=stub))
+    pairs = [(fn, l) for fn in sorted(auto) for l in sorted(set(auto[fn]))]
+    assert recorded["items"] == [f"[dim]{fn}[/]  {l}" for fn, l in pairs]
+    assert result == {pairs[0]}
+
+
+def test_apply_decisions_step_decide_seam():
+    with _fixture_env():
+        review_path = os.path.join(common.data_dir(), "promote_review.csv")
+        row = {"tag": "Foo", "count": "3", "verdict": "promote", "target": "",
+              "reason": "r", "confidence": "high", "contested": "False"}
+        artifacts.write_review([row], review_path)
+        recorded = {}
+        def stub(title, items, subtitle=""):
+            recorded["title"], recorded["items"] = title, items
+            return [0], [], "apply"                        # accept the one verdict
+        n = _no_ui_import(lambda: promote.apply_decisions_step(review_path, decide=stub))
+        assert n["promote"] == 1
+        assert recorded["items"] == [promote.verdict_line(row)]
+        assert not os.path.exists(review_path)                     # fully applied -> removed, not archived-with-leftover
+
+
+def test_backfill_step_decide_seam():
+    recorded = {}
+    def stub(title, items, subtitle=""):
+        recorded["title"], recorded["items"] = title, items
+        return [0], [], "apply"
+    chg = {1: ["A", "B"]}
+    adds = {1: {"B"}}
+    titles = {1: "Book One"}
+    result = _no_ui_import(lambda: promote.backfill_step(chg, adds, titles, decide=stub))
+    assert result == chg
+    expected_items = [f"[bold]#{b}[/] {str(titles.get(b, ''))[:44]}  + "
+                      f"[cyan]{', '.join(sorted(adds[b]))}[/]" for b in sorted(adds)]
+    assert recorded["items"] == expected_items
+
+
+def test_staleness_step_decide_seam():
+    with _fixture_env([{"id": 1, "added": "2026-01-01 10:00:00", "title": "Book One"}]):
+        recorded = {}
+        def stub(title, items, subtitle=""):
+            recorded["title"], recorded["items"] = title, items
+            return [0], [], "apply"
+        rows = [(1, "Hiatus", "Abandoned", 6.0)]
+        result = _no_ui_import(lambda: staleness.step("#status", rows, decide=stub))
+        assert result == rows
+        assert recorded["items"] == [staleness.status_line(rows[0], "Book One")]
+
+
+def test_synopsis_step_decide_seam():
+    recorded = {}
+    def stub(title, items, subtitle=""):
+        recorded["title"], recorded["items"] = title, items
+        return [0], [], "apply"
+    made = {2: "A generated synopsis " * 3, 1: "Another one " * 3}
+    titles = {1: "Book One", 2: "Book Two"}
+    result = _no_ui_import(lambda: synopsis.step(made, titles, decide=stub))
+    ids = sorted(made)
+    expected_items = [f"[bold]#{b}[/] {str(titles.get(b, ''))[:36]:<36} [dim]{made[b][:120]}…[/]" for b in ids]
+    assert recorded["items"] == expected_items
+    assert result == {ids[0]: made[ids[0]]}
+
+
+def test_all_seven_decide_sites_carry_the_parameter():
+    """Acceptance criterion: every one of the seven functions has a `decide` parameter."""
+    import inspect
+    fns = [classify.apply_proposal_step, overrides._step_walk, overrides.step_pick,
+          promote.apply_decisions_step, promote.backfill_step, staleness.step, synopsis.step]
+    assert all("decide" in inspect.signature(f).parameters for f in fns)
 
 
 if __name__ == "__main__":

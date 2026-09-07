@@ -61,17 +61,22 @@ def status_line(r: tuple, title: str = "") -> str:
     return f"[bold]#{b}[/] {title[:44]}  [dim]{old or '(none)'}[/] → [cyan]{new}[/]  [dim]{age:.1f}y[/]"
 
 
-def step(status_label: str, rows: list) -> list:
+def step(status_label: str, rows: list, decide=None) -> list:
     """1-by-1 review of the proposed #status changes -> the ACCEPTED rows ([] = nothing decided).
     Lives here, not in the wizard: CLAUDE.md's rule is that a wizard stage calls the same engine
-    function the subcommand does, so `staleness --apply --step` and the wizard share one path."""
-    from scourgify import ui
-    if not ui.interactive():
-        raise GuardrailError("--step needs an interactive terminal (omit it to apply every change).")
+    function the subcommand does, so `staleness --apply --step` and the wizard share one path.
+
+    `decide(title, items) -> (accepted_idx, rejected_idx, action)` defaults to ui.checklist
+    (D-11) — the lazy import of ui moves BEHIND that default."""
+    if decide is None:
+        from scourgify import ui
+        if not ui.interactive():
+            raise GuardrailError("--step needs an interactive terminal (omit it to apply every change).")
+        decide = ui.checklist
     with contextlib.closing(ro_connect()) as con:
         titles = book_titles(con)
-    acc, _, action = ui.checklist(f"{status_label} changes — untick to leave a book alone",
-                                  [status_line(r, str(titles.get(r[0], ""))) for r in rows])
+    acc, _, action = decide(f"{status_label} changes — untick to leave a book alone",
+                            [status_line(r, str(titles.get(r[0], ""))) for r in rows])
     return [] if action in ("skip", "quit") else [rows[i] for i in acc]
 
 

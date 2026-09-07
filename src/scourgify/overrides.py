@@ -163,11 +163,16 @@ def _reject_row(lab2key: dict, b: int, title: str, kind: str, where: str, before
 
 
 def _step_walk(m: dict, beh: dict, cols: dict, perbook: dict, changes: dict,
-               unique: dict, known_chars, tagcanon: dict) -> list:
+               unique: dict, known_chars, tagcanon: dict, decide=None) -> list:
     """Interactive 1-by-1 review of the per-book UNIQUE edits. Mass folds are already baked into
     `changes` and never shown. Mutates `changes` in place (revert-rejected-from-full-result) and
-    returns the rejects to log. rich-only — the caller guards with ui.interactive()."""
-    from scourgify import ui
+    returns the rejects to log. rich-only — the caller guards with ui.interactive().
+
+    `decide(title, items, subtitle=) -> (accepted_idx, rejected_idx, action)` defaults to
+    ui.checklist (D-11) — the lazy import of ui moves BEHIND that default."""
+    if decide is None:
+        from scourgify import ui
+        decide = ui.checklist
     from scourgify.common import titles as book_titles
     from scourgify.wrangle import transform            # lazy: wrangle imports this module at top
     lab2key = {v: k for k, v in cols.items()}
@@ -182,7 +187,7 @@ def _step_walk(m: dict, beh: dict, cols: dict, perbook: dict, changes: dict,
         edits = unique[b]
         title = str(titles.get(b, ""))
         items = [_edit_label(*e) for e in edits]
-        acc, rej, action = ui.checklist(f"[bold]#{b}[/]  {title[:64]}", items, subtitle=f"book {pos + 1}/{len(ids)}")
+        acc, rej, action = decide(f"[bold]#{b}[/]  {title[:64]}", items, subtitle=f"book {pos + 1}/{len(ids)}")
         if action == "quit":                                   # leave this + all remaining un-walked books untouched
             for bb in ids[pos:]:
                 for lab in cols.values(): changes.get(lab, {}).pop(bb, None)
@@ -223,15 +228,20 @@ def _append_override(path: str, lines: list) -> list:
     return added
 
 
-def step_pick(auto: dict) -> set | None:
+def step_pick(auto: dict, decide=None) -> set | None:
     """1-by-1 review of the synthesized override lines -> the accepted {(file, line)} set, or None
-    for "nothing decided". Shared by `overrides --apply --step` and the wizard stage."""
-    from scourgify import ui
-    if not ui.interactive():
-        raise GuardrailError("--step needs an interactive terminal (omit it to write every line).")
+    for "nothing decided". Shared by `overrides --apply --step` and the wizard stage.
+
+    `decide(title, items) -> (accepted_idx, rejected_idx, action)` defaults to ui.checklist
+    (D-11) — the lazy import of ui moves BEHIND that default."""
+    if decide is None:
+        from scourgify import ui
+        if not ui.interactive():
+            raise GuardrailError("--step needs an interactive terminal (omit it to write every line).")
+        decide = ui.checklist
     pairs = [(fn, l) for fn in sorted(auto) for l in sorted(set(auto[fn]))]
-    acc, _, action = ui.checklist("override rules — untick one you don't want",
-                                  [f"[dim]{fn}[/]  {l}" for fn, l in pairs])
+    acc, _, action = decide("override rules — untick one you don't want",
+                            [f"[dim]{fn}[/]  {l}" for fn, l in pairs])
     if action in ("skip", "quit") or not acc: return None
     return {pairs[i] for i in acc}
 
