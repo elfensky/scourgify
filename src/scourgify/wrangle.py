@@ -8,9 +8,9 @@ writes shell out to calibre-debug automatically):
   scourgify apply --apply    # write changes  (Calibre must be CLOSED)
 """
 import os, sys, re, csv, collections, contextlib
-from scourgify import report
+from scourgify import common, report
 from scourgify.artifacts import read_rows as read_csv     # the ONE "DictReader or []" reader
-from scourgify.common import (DEFAULTS as DEFAULTS_DIR, GuardrailError, norm, ascii_fold, load_config, library,
+from scourgify.common import (GuardrailError, norm, ascii_fold, load_config, library,
                               read_lines, ro_connect, read_custom_column, run_writer,
                               titles as book_titles, op_set_field)
 from scourgify.overrides import overrides_dir as _overrides_dir, _delim_of   # overrides.py owns dir + formats
@@ -53,14 +53,16 @@ def load_maps(cfg: dict, defaults_dir: str | None = None, overrides_dir: str | N
     """Build the in-memory fold maps from the data layers (ao3 ← defaults ← overrides, later wins).
     The dirs are parameters with production defaults so tests pass temp layers instead of
     reassigning module globals."""
-    DEF = defaults_dir or DEFAULTS_DIR
+    DEF = defaults_dir or common.defaults_dir()
     if not os.path.isdir(DEF):
         # Fail closed instead of normalizing against nothing. Every layer here is read through
         # read_csv/read_lines, which answer [] for a path that doesn't exist — so an unreadable
         # defaults/ produces maps that are EMPTY rather than absent, and a run against them is
         # silently wrong (junk tags kept, fandoms unaliased) instead of loudly broken. Found in
         # phase 4: inside the plugin zip, common.HERE points at a path inside the zip, so
-        # os.path.exists() is False for every bundled CSV. Phase 6 gives DEFAULTS a resource seam.
+        # os.path.exists() is False for every bundled CSV — common.defaults_dir() (called above,
+        # not the raw HERE constant) is the resource seam that fixes that; this check now only
+        # fires on a genuinely broken/missing defaults tree, zip or not.
         raise GuardrailError(f"scourgify's data layer is unreadable ({DEF}) — refusing to normalize "
                              "against an empty taxonomy.")
     odir = overrides_dir or _overrides_dir(cfg)   # the one dir resolution (overrides.py owns it)

@@ -277,6 +277,53 @@ def test_the_built_plugin_zip_holds_every_member_the_resolver_expects():
         assert not any(n == "scourgify/afm" for n in names)
 
 
+def _real_defaults_file(name: str) -> str:
+    with open(os.path.join(common.HERE, "defaults", name), encoding="utf-8") as f:
+        return f.read()
+
+
+def test_cost_estimate_is_identical_from_the_zip_and_from_the_package():
+    """ROADMAP success criterion 1: a classify cost estimate over a fixed scope, computed from the
+    package defaults and from a zip extraction, must be identical — proof that classify.load_vocab()
+    routes through the SAME resolver either way."""
+    from scourgify import classify
+
+    classify.clear_caches()
+    cost_package = classify.est_cost(10, "openai")
+    vocab_package = classify.load_vocab()
+    assert len(vocab_package) > 100
+
+    with tempfile.TemporaryDirectory() as td:
+        zp = _write_test_plugin_zip(os.path.join(td, "p.zip"),
+                                    extra_defaults={"classify_vocab.txt": _real_defaults_file("classify_vocab.txt"),
+                                                     "classify_vocab_ao3.txt": _real_defaults_file("classify_vocab_ao3.txt")})
+        with env(SCOURGIFY_HOME=os.path.join(td, "home")), _patched_archive(zp):
+            classify.clear_caches()
+            cost_zip = classify.est_cost(10, "openai")
+            vocab_zip = classify.load_vocab()
+    classify.clear_caches()
+
+    assert vocab_zip == vocab_package
+    assert cost_zip == cost_package
+
+
+def test_an_empty_vocabulary_refuses():
+    from scourgify import classify
+
+    with tempfile.TemporaryDirectory() as td:
+        zp = _write_test_plugin_zip(os.path.join(td, "p.zip"),
+                                    extra_defaults={"classify_vocab.txt": "# nothing but a comment\n",
+                                                     "classify_vocab_ao3.txt": "# also nothing\n"})
+        with env(SCOURGIFY_HOME=os.path.join(td, "home")), _patched_archive(zp):
+            classify.clear_caches()
+            try:
+                classify.load_vocab()
+                assert False, "expected GuardrailError"
+            except common.GuardrailError:
+                pass
+    classify.clear_caches()
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

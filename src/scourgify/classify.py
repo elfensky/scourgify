@@ -19,9 +19,9 @@ Engines (--engine):  apple = on-device Apple Foundation Models via ./afm (free; 
           file. Selection semantics live in select.py (shared with the wizard header)."""
 import argparse, os, csv, json, re, collections, difflib, contextlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from scourgify import engines as engines_mod, report, select
+from scourgify import common, engines as engines_mod, report, select
 from scourgify.booktext import strip_html
-from scourgify.common import (HERE, data_dir, user_dir, ro_connect, custom_column_id, run_writer, library,
+from scourgify.common import (data_dir, user_dir, ro_connect, custom_column_id, run_writer, library,
                               GuardrailError,
                               current_tags, titles as book_titles, op_create_column, op_set_field, op_stamp_now,
                               interactive as _interactive, confirm as _confirm)
@@ -55,18 +55,30 @@ def _read_vocab_file(path: str) -> list:
 def load_vocab() -> list:
     """Curated core ∪ AO3 high-frequency seed, then the user's overrides classify_vocab.txt (a line appends
     a term; '-term' removes one — and can trim a seeded term too; semantics in overrides.merge_vocab). Lazy so
-    a packaging problem gives a real error at use, not at import, and installed users can override."""
+    a packaging problem gives a real error at use, not at import, and installed users can override.
+
+    Reads through common.defaults_dir() — never a raw HERE-built path — so this resolves correctly
+    whether running from an installed wheel or from inside the Calibre plugin zip. Fails closed
+    (GuardrailError, never an empty list) if the resolved vocabulary is empty: an empty controlled
+    vocabulary under-quotes the engine picker and turns every tag into a 'new candidate' instead of
+    a smaller, still-usable run."""
     global _VOCAB
     if _VOCAB is None:
-        curated = f"{HERE}/defaults/classify_vocab.txt"
+        d = common.defaults_dir()
+        curated = os.path.join(d, "classify_vocab.txt")
         terms, have = [], set()                                                   # curated core first, then AO3 seed;
         for t in (_read_vocab_file(curated)                                        # first spelling of a norm wins,
-                  + _read_vocab_file(f"{HERE}/defaults/classify_vocab_ao3.txt")):  # so a hand-edit dup can't sneak in
+                  + _read_vocab_file(os.path.join(d, "classify_vocab_ao3.txt"))):  # so a hand-edit dup can't sneak in
             if t.lower() not in have: terms.append(t); have.add(t.lower())
         # the curated layer runs through merge_vocab too, so its '-term' lines can trim a term from the
         # GENERATED ao3 seed (which must never be hand-edited — regeneration overwrites it). Its plain
         # lines are already in `terms`, so that pass is a no-op for everything but the removals.
-        _VOCAB = merge_vocab(merge_vocab(terms, curated))   # '-term' semantics live with the writer (overrides.py)
+        vocab = merge_vocab(merge_vocab(terms, curated))    # '-term' semantics live with the writer (overrides.py)
+        if not vocab:
+            raise GuardrailError(
+                f"scourgify's controlled vocabulary is empty (resolved defaults dir: {d}) — "
+                "refusing to classify against an empty vocabulary.")
+        _VOCAB = vocab
     return _VOCAB
 
 _ALIASES = None
