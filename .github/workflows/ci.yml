@@ -5,6 +5,9 @@ name: CI
 # current release — turning the pyproject `requires-python = ">=3.10"` claim into
 # an enforced fact. (No lint leg: scourgify ships no ruff config or dev deps — the
 # tests are the gate.)
+#
+# test-windows below runs the same suite on windows-latest because Windows is
+# one of this milestone's acceptance targets (see 01-02-PLAN.md).
 
 on:
   push:
@@ -42,4 +45,28 @@ jobs:
 
       - name: Tests
         run: |  # every test file — a new tests/test_*.py is in CI by existing (bash -e: first failure aborts)
+          for t in tests/test_*.py; do uv run "$t"; done
+
+  test-windows:
+    # D-14: the floor (3.10/3.13) stays proven on ubuntu above; this job proves the
+    # whole plain-assert suite — including plan 01-03's platform-gate tests in
+    # tests/test_engines.py — on a natively win32 host, on 3.14 only (the version
+    # Calibre 9.11 bundles). Blocking within this workflow from day one (D-12);
+    # making it a REQUIRED check on `main` is a branch-protection setting, not
+    # something this file can express (see 01-02-PLAN.md Task 3).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          python-version: "3.14"
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: Tests
+        shell: bash
+        run: |  # same loop, same meaning of "in CI by existing", as the ubuntu job above
           for t in tests/test_*.py; do uv run "$t"; done
