@@ -257,6 +257,20 @@ class Plan:
                    f"{len(kept)} existing blurbs kept.")
 
 
+def options(n: int) -> list:
+    """PURE half of the synopsis menu (relocated from wizard._synopsis_options — FOUND-06/D-10):
+    one fixed slot layout whatever the queue holds."""
+    return [
+        ("1", "apply" if n else None, f"settle {n:,} books" if n else "settle — nothing outstanding",
+         "judge each existing blurb; keep the good ones untouched, write a back cover for the rest"
+         if n else "every book's synopsis is already settled"),
+        ("2", "step" if n else None, "review 1-by-1",
+         "generate first, then walk each NEW synopsis; untick to leave that description alone"
+         if n else "nothing to walk"),
+        ("3", "skip", "skip", "leave descriptions unchanged (it is free, but slow — a chunk at a time is fine)"),
+    ]
+
+
 def step(made: dict, titles: dict) -> dict:
     """1-by-1 review of the generated synopses -> the ACCEPTED subset ({} = nothing decided).
 

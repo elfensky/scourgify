@@ -237,6 +237,40 @@ def usable_engines(env=None) -> list:
     return out
 
 
+def engine_rows(env=None) -> list:
+    """[(name, usable, hint)] for the engine menu (relocated from wizard._engines — FOUND-06/D-10):
+    derived from ENGINES + usable_engines() + TRAITS, so a newly registered engine shows up here
+    automatically instead of silently missing. `env` passes through to usable_engines (tests
+    inject a dict)."""
+    ok = set(usable_engines(env))
+    return [(e, e in ok, trait(e, "hint" if e in ok else "unusable")) for e in ENGINES]
+
+
+def default_engine_id(opts: list, judge: bool = False, usable=None) -> str:
+    """PURE half of the engine-menu default (relocated from wizard._default_engine_id —
+    FOUND-06/D-10): the first option normally; for judge work (promote's adversarial refereeing)
+    the first judge-capable engine. Both prefer a USABLE engine when `usable` is given —
+    defaulting to one with no API key turns ⏎ into an error the picker has to reject and re-ask.
+    `usable` also excludes the non-engine `extra` rows, which is right."""
+    ok = (lambda ident: usable is None or ident in usable)
+    fallback = next((i for _, i, _, _ in opts if ok(i)), opts[0][1])
+    if not judge: return fallback
+    return next((i for _, i, _, _ in opts if trait(i, "judge") and ok(i)), fallback)
+
+
+def engine_options(engs: list, n_todo: int, cost_fn) -> list:
+    """PURE half of the engine menu (relocated from wizard._engine_options — FOUND-06/D-10):
+    numbered rows with per-engine cost over the books that will actually be billed (the plan's
+    todo set). `cost_fn(n_books, engine) -> float` is INJECTED (classify.est_cost in production)
+    rather than imported, because classify.py already imports engines and the reverse edge would
+    be a cycle (REVIEW: Codex agreed concern 5) — engines.py must gain no import of classify."""
+    opts = []
+    for i, (e, ok, hint) in enumerate(engs, 1):
+        cost = cost_fn(n_todo, e)
+        opts.append((str(i), e, e, f"{hint}  ·  {'free' if not cost else f'~${cost:.2f}'} for {n_todo} books"))
+    return opts
+
+
 # The normalized failure taxonomy (NLSpec B3.6). It exists because the GUI derives a RECOVERY VERB
 # from it: only a refusal is another engine's problem, so only a refusal earns B1's "Retry on
 # <engine>" — a 401 retried on gemini is the same 401 plus a wasted click. `f"{type(e).__name__}: {e}"`

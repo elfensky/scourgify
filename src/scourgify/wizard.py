@@ -177,19 +177,6 @@ def stage_staleness():
     ui.say("done ✓", "green")
 
 
-def _synopsis_options(n: int) -> list:
-    """PURE half of the synopsis menu — one fixed slot layout whatever the queue holds."""
-    return [
-        ("1", "apply" if n else None, f"settle {n:,} books" if n else "settle — nothing outstanding",
-         "judge each existing blurb; keep the good ones untouched, write a back cover for the rest"
-         if n else "every book's synopsis is already settled"),
-        ("2", "step" if n else None, "review 1-by-1",
-         "generate first, then walk each NEW synopsis; untick to leave that description alone"
-         if n else "nothing to walk"),
-        ("3", "skip", "skip", "leave descriptions unchanged (it is free, but slow — a chunk at a time is fine)"),
-    ]
-
-
 def stage_synopsis():
     """Asks; synopsis.py does the work — the pass, its FanFicFare guard, its checklist and its
     write all live there, so `scourgify synopsis` and this stage cannot diverge.
@@ -202,7 +189,7 @@ def stage_synopsis():
     if n:
         ui.say(f"[cyan]{n:,}[/] book(s) have no settled synopsis. A good blurb is kept exactly as "
                "the author wrote it; only a thin one is written from the book's own prose.", "dim")
-    choice = ui.menu("synopsis", _synopsis_options(n), default="apply" if n else "skip")
+    choice = ui.menu("synopsis", synopsis.options(n), default="apply" if n else "skip")
     if choice == "skip":
         ui.say("(skipped — nothing settled)", "dim"); return
     batch = 0
@@ -218,81 +205,27 @@ def stage_synopsis():
     ui.say("done ✓", "green")
 
 
-def _engines(env=None):
-    """[(name, usable, hint)] for the engine menu — derived from engines.ENGINES + usable_engines()
-    + TRAITS, so a newly registered engine shows up here automatically instead of silently missing.
-    `env` passes through to usable_engines (tests inject a dict)."""
-    ok = set(engines.usable_engines(env))
-    return [(e, e in ok, engines.trait(e, "hint" if e in ok else "unusable")) for e in engines.ENGINES]
-
-
-def _default_engine_id(opts: list, judge: bool = False, usable=None) -> str:
-    """PURE half of the menu default: the first option normally; for judge work (promote's
-    adversarial refereeing) the first judge-capable engine. Both prefer a USABLE engine when
-    `usable` is given — defaulting to one with no API key turns ⏎ into an error the picker has
-    to reject and re-ask. `usable` also excludes the non-engine `extra` rows, which is right."""
-    ok = (lambda ident: usable is None or ident in usable)
-    fallback = next((i for _, i, _, _ in opts if ok(i)), opts[0][1])
-    if not judge: return fallback
-    return next((i for _, i, _, _ in opts if engines.trait(i, "judge") and ok(i)), fallback)
-
-
 def _ask_engine(n_todo: int | None = None, judge: bool = False, extra: tuple = ()):
     """The ONE engine-menu drive loop (classify + promote share it): numbered engines (with a
     per-engine cost column when n_todo is given), `extra` rows appended verbatim (their key is
     returned as-is), re-ask on an unusable choice. -> engine name, an extra key, or None when
     no engine is usable at all."""
     while True:
-        engs = _engines()
+        engs = engines.engine_rows()
         if not any(ok for _, ok, _ in engs):
             ui.error("no engine is usable — set an API key, or install the afm binary / a swift toolchain.")
             return None
-        opts = (_engine_options(engs, n_todo) if n_todo is not None
+        opts = (engines.engine_options(engs, n_todo, classify.est_cost) if n_todo is not None
                 else [(str(i), e, e, h) for i, (e, _, h) in enumerate(engs, 1)])
         # extras continue the engine numbering but keep their own symbolic id, so the caller never
         # has to know how many engines exist (renumbering them by position used to return a digit
         # as the engine name -> KeyError, which _stage_guard does not absorb: session over)
         opts += [(str(len(engs) + i), ident, lbl, hint) for i, (ident, lbl, hint) in enumerate(extra, 1)]
-        name = ui.menu("engine", opts, default=_default_engine_id(opts, judge, {e for e, ok, _ in engs if ok}))
+        name = ui.menu("engine", opts, default=engines.default_engine_id(opts, judge, {e for e, ok, _ in engs if ok}))
         if name in {ident for ident, _, _ in extra}: return name
         if not {e: ok for e, ok, _ in engs}[name]:
             ui.error(f"{name} isn't usable here — {dict((e, h) for e, _, h in engs)[name]}"); continue
         return name
-
-
-def _scope_options(ch: dict, total: int, outstanding: int = 0) -> tuple[list, str]:
-    """PURE half of the scope menu: (options, default). Every row keeps a FIXED slot whether or
-    not it applies — an empty one greys out (id=None) instead of vanishing, so the number a user
-    has memorised never comes to mean something else. Slot 1 hiding used to make '2' mean either
-    'whole library (real money)' or 'never classified' depending on library state."""
-    why = collections.Counter(ch.values())
-    opts = [
-        ("1", "changed" if ch else None, f"new/changed — {len(ch)} books" if ch else "new/changed — none",
-         ("books added or updated since the last classify: "
-          + ", ".join(f"{n} {r}" for r, n in why.most_common())) if ch
-         else "nothing added or updated since the last classify"),
-        ("2", "unclassified" if outstanding else None,
-         f"never classified — {outstanding:,} books" if outstanding else "never classified — none",
-         "books classify has never attempted; work through them a chunk at a time" if outstanding
-         else "every sendable book has been classified at least once"),
-        ("3", "last" if total else None, "most recent N books",
-         "re-classify a chosen number of the newest books — a targeted redo; these have usually been "
-         "classified before, so a paid engine bills them again"),
-        ("4", "all", f"whole library — {total:,} books · full pass",
-         "re-tag EVERY book regardless of tag count — a paid engine over this many books costs real money"),
-        ("5", "skip", "skip", "tag nothing this run (a targeted redo any time: scourgify classify --books / --since DATE)"),
-    ]
-    return opts, ("changed" if ch else ("unclassified" if outstanding else "all"))
-
-
-def _engine_options(engs: list, n_todo: int) -> list:
-    """PURE half of the engine menu: numbered rows with per-engine cost over the books that will
-    actually be billed (the plan's todo set)."""
-    opts = []
-    for i, (e, ok, hint) in enumerate(engs, 1):
-        cost = classify.est_cost(n_todo, e)
-        opts.append((str(i), e, e, f"{hint}  ·  {'free' if not cost else f'~${cost:.2f}'} for {n_todo} books"))
-    return opts
 
 
 def stage_classify():
@@ -303,7 +236,7 @@ def stage_classify():
         outstanding = len(select.pick(con, "unclassified"))
     if not ch:
         ui.say("no new or changed books since the last classify.", "dim")
-    opts, default = _scope_options(ch, total, outstanding)
+    opts, default = classify.scope_options(ch, total, outstanding)
     scope = ui.menu("classify scope", opts, default=default)
     if scope == "skip":
         ui.say("(skipped — nothing tagged)", "dim"); return
@@ -363,25 +296,8 @@ def stage_classify():
     p.run()                                       # the SAME plan that was priced — no second gather
 
 
-def _proposal_options(n_rows: int, n_tagged: int) -> list:
-    """ONE slot layout for the proposal menu whether or not any book got tags. There used to be
-    two menus under the same title with different rows, so the same key meant 'review 1-by-1' in
-    one and 'discard' in the other. Now 'review 1-by-1' simply greys out (keeping slot 2) when
-    there is nothing to walk. Pure — see tests."""
-    return [
-        ("1", "apply", "apply",
-         f"write tags to {n_tagged} books + stamp all {n_rows} processed (Calibre closed; auto-backup)" if n_tagged
-         else f"stamp {n_rows} processed books so they aren't re-classified (no tags to add)"),
-        ("2", "step" if n_tagged else None, "review 1-by-1",
-         "walk each book's tags; untick to reject an AI-guessed tag before it's written" if n_tagged
-         else "nothing to walk — no book got tags this run"),
-        ("3", "keep", "keep", "leave it pending — hand-review the CSV first; the wizard offers it again next run"),
-        ("4", "discard", "discard", "set it aside without applying (archived as *_discarded_*.csv, nothing written)"),
-    ]
-
-
 def _do_proposal(choice: str) -> None:
-    """Act on a _proposal_options id — shared by both entries into the menu."""
+    """Act on a classify.proposal_options id — shared by both entries into the menu."""
     if choice == "apply":
         classify.apply_proposal(); ui.say("done ✓", "green")
     elif choice == "step":
@@ -404,7 +320,7 @@ def stage_review():
     if not tagged:                                    # every book was classified but matched no new vocab tags
         ui.say(f"{len(rows)} books were classified but got no new vocab tags this run.", "yellow")
         ui.say("apply to STAMP them as processed — else they're re-sent to the LLM every run.", "dim")
-        choice = ui.menu("proposal", _proposal_options(len(rows), 0), default="apply")
+        choice = ui.menu("proposal", classify.proposal_options(len(rows), 0), default="apply")
         _do_proposal(choice)
         return
     cnt = collections.Counter(t for r in tagged for t in r["added_tags"])
@@ -421,7 +337,7 @@ def stage_review():
     if n_failed:
         ui.say(f"⚠ {n_failed} books failed classification — see {artifacts.fail()} (recover with --engine apple)", "yellow")
     ui.say(f"full proposal: {artifacts.prop()}", "dim")
-    _do_proposal(ui.menu("proposal", _proposal_options(len(rows), len(tagged)), default="apply"))
+    _do_proposal(ui.menu("proposal", classify.proposal_options(len(rows), len(tagged)), default="apply"))
 
 
 def _promote_review_menu():

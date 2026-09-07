@@ -122,6 +122,49 @@ def est_cost(n_books: int, engine: str) -> float:
     return n_books * (tokens_in * i + engines_mod.trait(engine, "out_tokens") * o) / 1e6
 
 
+def scope_options(ch: dict, total: int, outstanding: int = 0) -> tuple[list, str]:
+    """PURE half of the classify scope menu (relocated from wizard._scope_options — FOUND-06/D-10):
+    (options, default). Every row keeps a FIXED slot whether or not it applies — an empty one
+    greys out (id=None) instead of vanishing, so the number a user has memorised never comes to
+    mean something else. Slot 1 hiding used to make '2' mean either 'whole library (real money)'
+    or 'never classified' depending on library state."""
+    why = collections.Counter(ch.values())
+    opts = [
+        ("1", "changed" if ch else None, f"new/changed — {len(ch)} books" if ch else "new/changed — none",
+         ("books added or updated since the last classify: "
+          + ", ".join(f"{n} {r}" for r, n in why.most_common())) if ch
+         else "nothing added or updated since the last classify"),
+        ("2", "unclassified" if outstanding else None,
+         f"never classified — {outstanding:,} books" if outstanding else "never classified — none",
+         "books classify has never attempted; work through them a chunk at a time" if outstanding
+         else "every sendable book has been classified at least once"),
+        ("3", "last" if total else None, "most recent N books",
+         "re-classify a chosen number of the newest books — a targeted redo; these have usually been "
+         "classified before, so a paid engine bills them again"),
+        ("4", "all", f"whole library — {total:,} books · full pass",
+         "re-tag EVERY book regardless of tag count — a paid engine over this many books costs real money"),
+        ("5", "skip", "skip", "tag nothing this run (a targeted redo any time: scourgify classify --books / --since DATE)"),
+    ]
+    return opts, ("changed" if ch else ("unclassified" if outstanding else "all"))
+
+
+def proposal_options(n_rows: int, n_tagged: int) -> list:
+    """ONE slot layout for the proposal menu whether or not any book got tags (relocated from
+    wizard._proposal_options — FOUND-06/D-10). There used to be two menus under the same title with
+    different rows, so the same key meant 'review 1-by-1' in one and 'discard' in the other. Now
+    'review 1-by-1' simply greys out (keeping slot 2) when there is nothing to walk. Pure — see tests."""
+    return [
+        ("1", "apply", "apply",
+         f"write tags to {n_tagged} books + stamp all {n_rows} processed (Calibre closed; auto-backup)" if n_tagged
+         else f"stamp {n_rows} processed books so they aren't re-classified (no tags to add)"),
+        ("2", "step" if n_tagged else None, "review 1-by-1",
+         "walk each book's tags; untick to reject an AI-guessed tag before it's written" if n_tagged
+         else "nothing to walk — no book got tags this run"),
+        ("3", "keep", "keep", "leave it pending — hand-review the CSV first; the wizard offers it again next run"),
+        ("4", "discard", "discard", "set it aside without applying (archived as *_discarded_*.csv, nothing written)"),
+    ]
+
+
 def prompt_for(desc: str, maxtags: int) -> str:
     return ("You are tagging a fanfiction story. Return ONLY a JSON object with two arrays:\n"
             f'  "tags": tags from the CONTROLLED LIST below that clearly apply (exact spelling, at most {maxtags}; '
