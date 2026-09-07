@@ -7,7 +7,7 @@ writes shell out to calibre-debug automatically):
   scourgify audit            # read-only dry-run report of every pass
   scourgify apply --apply    # write changes  (Calibre must be CLOSED)
 """
-import os, sys, re, csv, collections
+import os, sys, re, csv, collections, contextlib
 from scourgify import report
 from scourgify.artifacts import read_rows as read_csv     # the ONE "DictReader or []" reader
 from scourgify.common import (DEFAULTS as DEFAULTS_DIR, GuardrailError, norm, ascii_fold, load_config, library,
@@ -253,18 +253,19 @@ def read_library(cfg: dict) -> tuple:
     spelling, known_chars), runs in seconds, and apply only writes books that actually changed —
     scoped selection (select.py) is for the expensive LLM pass, not this one."""
     cols = col_key_label(cfg)
-    con = ro_connect(); c = con.cursor()
-    perbook = collections.defaultdict(lambda: collections.defaultdict(list)); present = {}
-    for key, label in cols.items():
-        if label == "tags":
-            present[key] = True
-            for b, v in c.execute("SELECT l.book,t.name FROM books_tags_link l JOIN tags t ON t.id=l.tag"): perbook[b][key].append(v)
-            continue
-        vals = read_custom_column(con, label, multi=True)
-        present[key] = vals is not None
-        for b, vs in (vals or {}).items(): perbook[b][key].extend(vs)
-    nb = c.execute("SELECT count(*) FROM books").fetchone()[0]
-    allb = set(perbook) | {r[0] for r in c.execute("SELECT id FROM books")}
+    with contextlib.closing(ro_connect()) as con:
+        c = con.cursor()
+        perbook = collections.defaultdict(lambda: collections.defaultdict(list)); present = {}
+        for key, label in cols.items():
+            if label == "tags":
+                present[key] = True
+                for b, v in c.execute("SELECT l.book,t.name FROM books_tags_link l JOIN tags t ON t.id=l.tag"): perbook[b][key].append(v)
+                continue
+            vals = read_custom_column(con, label, multi=True)
+            present[key] = vals is not None
+            for b, vs in (vals or {}).items(): perbook[b][key].extend(vs)
+        nb = c.execute("SELECT count(*) FROM books").fetchone()[0]
+        allb = set(perbook) | {r[0] for r in c.execute("SELECT id FROM books")}
     return cols, perbook, present, nb, allb
 
 def audit(cfg: dict, m: dict) -> None:
@@ -534,7 +535,11 @@ def _preview_report(m: dict, diffs: dict, top: int = 15, books: int = DETAIL_BOO
     top_mass = sorted(mass.items(), key=lambda kv: -kv[1])[:top]
     rest = len(mass) - len(top_mass)
     ids = sorted(unique)[-books:]                               # highest ids = newest books
-    titles = book_titles(ro_connect(), ids) if ids else {}
+    if ids:
+        with contextlib.closing(ro_connect()) as con:
+            titles = book_titles(con, ids)
+    else:
+        titles = {}
     def grouped(edits):
         """[(kind, where, joined-values)] — one line per relation, values joined."""
         g = {}
@@ -604,7 +609,8 @@ def main() -> None:
                 want = select.parse_books(a.books)
             else:                                  # --last N: the N most recently added, resolved to ids
                 from scourgify.common import ro_connect
-                con = ro_connect(); want = select.pick(con, "last", n=a.last); con.close()
+                with contextlib.closing(ro_connect()) as con:
+                    want = select.pick(con, "last", n=a.last)
             p.restrict(want)                       # narrows the WRITE set; the read stays library-wide
             print(f"  scope: {len(want)} book(s) by id -> {p.n_books} with changes")
             absent = sum(1 for b in want if b not in p.tagn)

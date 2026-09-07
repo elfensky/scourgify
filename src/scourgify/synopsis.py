@@ -29,6 +29,7 @@ to run in the background for weeks. A cloud engine is an explicit `--engine` opt
 that stalls, never a default. Unlike classify, a BARE run here costs nothing at all: there is no
 intermediate proposal artifact to build, because resume is off the stamp."""
 import argparse
+import contextlib
 import copy
 import os
 import re
@@ -177,21 +178,20 @@ class Plan:
 
     def __init__(self, a: argparse.Namespace):
         self.opts = a = copy.copy(a)
-        con = ro_connect()
-        guard_comments(con, a.force)   # before any work: hours of compute a re-fetch would erase
-        if a.books is not None:
-            ids = select.pick(con, "ids", ids=select.parse_books(a.books))
-        elif a.last:
-            ids = select.pick(con, "last", n=a.last)
-        else:
-            ids = select.pick(con, "unsynopsized")
-        self.scope = ("named ids" if a.books is not None else
-                      f"last {a.last} added" if a.last else "the synopsis queue")
-        self.blurbs = {b: strip_html(t) for b, t in con.execute("SELECT book, text FROM comments")}
-        self.files = booktext.paths(con)
-        self.titles = book_titles(con)
-        self.have_stamp = custom_column_id(con, STAMP) is not None
-        con.close()
+        with contextlib.closing(ro_connect()) as con:
+            guard_comments(con, a.force)   # before any work: hours of compute a re-fetch would erase
+            if a.books is not None:
+                ids = select.pick(con, "ids", ids=select.parse_books(a.books))
+            elif a.last:
+                ids = select.pick(con, "last", n=a.last)
+            else:
+                ids = select.pick(con, "unsynopsized")
+            self.scope = ("named ids" if a.books is not None else
+                          f"last {a.last} added" if a.last else "the synopsis queue")
+            self.blurbs = {b: strip_html(t) for b, t in con.execute("SELECT book, text FROM comments")}
+            self.files = booktext.paths(con)
+            self.titles = book_titles(con)
+            self.have_stamp = custom_column_id(con, STAMP) is not None
         self.todo = ids[:a.batch] if a.batch else ids
 
     def preview(self) -> None:

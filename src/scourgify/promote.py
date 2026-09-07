@@ -8,7 +8,7 @@ proposed_new list should be promoted to the vocab, aliased to an existing tag, o
 
 Reasons each candidate against a difflib shortlist of the master tag list (curated vocab ∪ ao3_vocab)
 plus the example books that proposed it. Audit-first: verdicts are a reviewed artifact you apply."""
-import argparse, glob, json, os, re, collections
+import argparse, glob, json, os, re, collections, contextlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import difflib
 
@@ -318,14 +318,14 @@ def backfill_plan(ledger_path: str | None = None) -> tuple[dict, dict]:
     rows = [r for pf in _proposal_files() for r in read_rows(pf)]
     want = backfill_wanted(res, rows)
     if not want: return {}, {}
-    con = ro_connect()
-    cur = current_tags(con)
-    adds = {}
-    for b, w in want.items():
-        new = w - cur.get(b, set())
-        if new: adds[b] = new
-    # never propose a tag wrangle will strip as redundant — that is an endless add/strip loop
-    adds = backfill_drop_redundant(adds, _homes(con))
+    with contextlib.closing(ro_connect()) as con:
+        cur = current_tags(con)
+        adds = {}
+        for b, w in want.items():
+            new = w - cur.get(b, set())
+            if new: adds[b] = new
+        # never propose a tag wrangle will strip as redundant — that is an endless add/strip loop
+        adds = backfill_drop_redundant(adds, _homes(con))
     # …nor one it renames or junk-drops, which loops the same way with nothing in `homes` to catch it.
     # Last, and only over the handful of tags the cheap filters left: it loads the wrangle maps.
     if adds: adds = backfill_drop_unstable(adds, wrangle_stable({t for v in adds.values() for t in v}))
@@ -360,9 +360,8 @@ def backfill(yes: bool = False, step: bool = False, decide=None) -> int:
     total = sum(len(v) for v in adds.values())
     print(f"backfill: {len(chg)} book(s) gain {total} promoted/aliased tag-assignment(s), e.g.:")
     preview = list(adds)[:8]
-    con = ro_connect()
-    titles = book_titles(con, preview)
-    con.close()
+    with contextlib.closing(ro_connect()) as con:
+        titles = book_titles(con, preview)
     for b in preview: print(f"  #{b} {str(titles.get(b, ''))[:50]}: + {', '.join(sorted(adds[b]))}")
     if len(adds) > 8: print(f"  … +{len(adds) - 8} more books")
     if decide is not None:                     # a front door supplying its own question
@@ -372,7 +371,8 @@ def backfill(yes: bool = False, step: bool = False, decide=None) -> int:
     elif step:                                 # the checklist IS the confirmation
         if not interactive():
             raise GuardrailError("--step needs an interactive terminal (omit it to apply the whole backfill).")
-        con = ro_connect(); chg = backfill_step(chg, adds, book_titles(con)); con.close()
+        with contextlib.closing(ro_connect()) as con:
+            chg = backfill_step(chg, adds, book_titles(con))
         if not chg:
             print("(nothing decided — nothing written.)"); return 0
         print(f"  {len(chg)} book(s) accepted")

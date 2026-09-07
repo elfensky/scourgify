@@ -12,7 +12,7 @@ files can't corrupt.
 `apply --step` walks each book's unique edits and lets you untick individual changes; the rejected
 ones are logged to data/rejects.csv. `scourgify overrides` then turns the deterministic (wrangle)
 rejects into identity-override lines so the same wrong change never recurs."""
-import os, csv, time, collections
+import os, csv, time, collections, contextlib
 from scourgify.artifacts import read_rows as read_csv
 from scourgify.common import DEFAULTS as DEF, GuardrailError, load_config, user_dir, norm, read_lines, ro_connect
 
@@ -172,7 +172,11 @@ def _step_walk(m: dict, beh: dict, cols: dict, perbook: dict, changes: dict,
     from scourgify.wrangle import transform            # lazy: wrangle imports this module at top
     lab2key = {v: k for k, v in cols.items()}
     ids = sorted(unique, reverse=True)                         # newest ids first
-    titles = book_titles(ro_connect(), ids) if ids else {}     # large sets fetch all (IN() cap lives in common)
+    if ids:                                                    # large sets fetch all (IN() cap lives in common)
+        with contextlib.closing(ro_connect()) as con:
+            titles = book_titles(con, ids)
+    else:
+        titles = {}
     rejects = []
     for pos, b in enumerate(ids):
         edits = unique[b]

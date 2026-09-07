@@ -6,7 +6,7 @@ Split out of wrangle.py: it shares nothing with normalization. It shells out to
 known gotchas (fandom-vs-series, include_in_series, newonly protection), queues column-creation
 ops, and writes config.toml. Writes funnel through run_writer like everywhere else.
 `yes=True` (CLI --yes / non-TTY) takes the recommended default for every prompt."""
-import os
+import os, contextlib
 
 from scourgify.common import (user_dir, library, ro_connect, interactive, confirm,
                               run_writer, op_create_column, op_set_pref)
@@ -79,48 +79,48 @@ def setup(cfg: dict, yes: bool = False) -> None:
     print("=" * 64); print("  scourgify — setup & health check"); print("=" * 64)
     if not asking: print("(non-interactive — taking recommended defaults; run in a terminal to choose per item)")
     ops = []                                          # column/pref writes queued here, applied via calibre-debug at the end
-    con = ro_connect()
+    with contextlib.closing(ro_connect()) as con:
 
-    # [1] library
-    print("\n[1] Library");  print(f"  {OK} metadata.db  ({library()})")
+        # [1] library
+        print("\n[1] Library");  print(f"  {OK} metadata.db  ({library()})")
 
-    # [2] FanFicFare: installed? configured? known gotchas?
-    print("\n[2] FanFicFare")
-    try:
-        out = subprocess.run(["calibre-customize", "-l"], capture_output=True, text=True, timeout=30).stdout if shutil.which("calibre-customize") else ""
-        installed = ("fanficfare" in out.lower()) if out else None
-    except Exception: installed = None
-    print(f"  {OK} plugin installed" if installed else
-          f"  {BAD} plugin NOT installed (Calibre → Preferences → Plugins → Get new plugins → FanFicFare)" if installed is False else
-          f"  {WARN} couldn't query plugins (continuing)")
-    settings = fff_settings(con)                  # the ONE parser (the synopsis guard reads it too)
-    fff = settings.get("custom_cols") or {}
-    if not settings:
-        print(f"  {WARN} no FanFicFare config for this library yet — configure FFF + import a story, then re-run setup")
-    else:
-        print(f"  {OK} configured — Calibre column ← FFF field:")
-        for col, fld in sorted(fff.items()): print(f"        {col:16} ← {fld}")
-        ini = settings.get("personal.ini", ""); no = settings.get("custom_cols_newonly", {}) or {}
-        issues = []
-        if fff.get("#fandoms") == "series": issues.append("#fandoms ← series  (fandom-vs-series gotcha: fandoms land in the numbered Series field)")
-        if any(l.strip().lower() == "include_in_series:category" for l in ini.splitlines()): issues.append("personal.ini: include_in_series:category  (stuffs the fandom into Series)")
-        if no.get("#genres") is not True: issues.append("#genres not newonly-protected  (a metadata re-fetch would re-pollute your cleaned genres)")
-        if not (settings.get("std_cols_newonly") or {}).get("comments"):
-            issues.append("Comments not newonly-protected  (a metadata re-fetch would overwrite the "
-                          "synopses `scourgify synopsis` writes into the description)")
-        for i in issues: print(f"  {WARN} {i}")
-        if not issues: print(f"  {OK} config looks correct (no known gotchas)")
-        elif _ask("  → Fix these now (map #fandoms←category, drop include_in_series, protect #genres + Comments)?"):
-            import copy; s = copy.deepcopy(settings)
-            s["personal.ini"] = "\n".join(l for l in s.get("personal.ini", "").splitlines() if l.strip().lower() != "include_in_series:category")
-            if fff.get("#fandoms") == "series": s.setdefault("custom_cols", {})["#fandoms"] = "category"
-            s.setdefault("custom_cols_newonly", {})["#genres"] = True
-            s.setdefault("std_cols_newonly", {})["comments"] = True
-            ops.append(op_set_pref("namespaced:FanFicFarePlugin:settings", s)); print(f"  {OK} queued FanFicFare config fix")
+        # [2] FanFicFare: installed? configured? known gotchas?
+        print("\n[2] FanFicFare")
+        try:
+            out = subprocess.run(["calibre-customize", "-l"], capture_output=True, text=True, timeout=30).stdout if shutil.which("calibre-customize") else ""
+            installed = ("fanficfare" in out.lower()) if out else None
+        except Exception: installed = None
+        print(f"  {OK} plugin installed" if installed else
+              f"  {BAD} plugin NOT installed (Calibre → Preferences → Plugins → Get new plugins → FanFicFare)" if installed is False else
+              f"  {WARN} couldn't query plugins (continuing)")
+        settings = fff_settings(con)                  # the ONE parser (the synopsis guard reads it too)
+        fff = settings.get("custom_cols") or {}
+        if not settings:
+            print(f"  {WARN} no FanFicFare config for this library yet — configure FFF + import a story, then re-run setup")
+        else:
+            print(f"  {OK} configured — Calibre column ← FFF field:")
+            for col, fld in sorted(fff.items()): print(f"        {col:16} ← {fld}")
+            ini = settings.get("personal.ini", ""); no = settings.get("custom_cols_newonly", {}) or {}
+            issues = []
+            if fff.get("#fandoms") == "series": issues.append("#fandoms ← series  (fandom-vs-series gotcha: fandoms land in the numbered Series field)")
+            if any(l.strip().lower() == "include_in_series:category" for l in ini.splitlines()): issues.append("personal.ini: include_in_series:category  (stuffs the fandom into Series)")
+            if no.get("#genres") is not True: issues.append("#genres not newonly-protected  (a metadata re-fetch would re-pollute your cleaned genres)")
+            if not (settings.get("std_cols_newonly") or {}).get("comments"):
+                issues.append("Comments not newonly-protected  (a metadata re-fetch would overwrite the "
+                              "synopses `scourgify synopsis` writes into the description)")
+            for i in issues: print(f"  {WARN} {i}")
+            if not issues: print(f"  {OK} config looks correct (no known gotchas)")
+            elif _ask("  → Fix these now (map #fandoms←category, drop include_in_series, protect #genres + Comments)?"):
+                import copy; s = copy.deepcopy(settings)
+                s["personal.ini"] = "\n".join(l for l in s.get("personal.ini", "").splitlines() if l.strip().lower() != "include_in_series:category")
+                if fff.get("#fandoms") == "series": s.setdefault("custom_cols", {})["#fandoms"] = "category"
+                s.setdefault("custom_cols_newonly", {})["#genres"] = True
+                s.setdefault("std_cols_newonly", {})["comments"] = True
+                ops.append(op_set_pref("namespaced:FanFicFarePlugin:settings", s)); print(f"  {OK} queued FanFicFare config fix")
 
-    # [3] columns: the engine's 5 + the datetime markers staleness/classify need
-    print("\n[3] Columns")
-    have = {"#" + l for (l,) in con.execute("SELECT label FROM custom_columns")} | {"tags"}
+        # [3] columns: the engine's 5 + the datetime markers staleness/classify need
+        print("\n[3] Columns")
+        have = {"#" + l for (l,) in con.execute("SELECT label FROM custom_columns")} | {"tags"}
     for label, name, dt, mult in REC:
         if label in have: print(f"  {OK} {label}"); continue
         why = "  (staleness + classify --incremental need this)" if label in ("#updated", "#wrangled") else ""

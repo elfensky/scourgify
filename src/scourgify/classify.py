@@ -17,7 +17,7 @@ Engines (--engine):  apple = on-device Apple Foundation Models via ./afm (free; 
           the sparse-book default (< --min-tags) applies only when no scope flag is given. --apply auto-creates the
           #wrangled datetime column and stamps EVERY processed book, so the state lives IN the library — no external
           file. Selection semantics live in select.py (shared with the wizard header)."""
-import argparse, os, csv, json, re, collections, difflib
+import argparse, os, csv, json, re, collections, difflib, contextlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from scourgify import engines as engines_mod, report, select
 from scourgify.booktext import strip_html
@@ -177,10 +177,10 @@ def apply_proposal(rows: list | None = None) -> None:
         if not os.path.exists(prop()):
             raise GuardrailError(f"no proposal to apply ({os.path.basename(prop())} not found — run a classify pass first).")
         rows = read_proposal()
-    con = ro_connect()
-    cur = current_tags(con)
-    known = {b for (b,) in con.execute("SELECT id FROM books")}
-    have_wrangled = custom_column_id(con, "wrangled") is not None
+    with contextlib.closing(ro_connect()) as con:
+        cur = current_tags(con)
+        known = {b for (b,) in con.execute("SELECT id FROM books")}
+        have_wrangled = custom_column_id(con, "wrangled") is not None
     chg, processed, stale = {}, [], []
     for r in rows:
         b = r["book_id"]
@@ -218,9 +218,9 @@ def apply_proposal_step() -> None:
     if not ui.interactive():
         raise GuardrailError("--step needs an interactive terminal (omit it to apply the whole proposal).")
     from scourgify.common import log_rejects
-    con = ro_connect()
-    desc = {b: strip_html(t) for b, t in con.execute("SELECT book, text FROM comments")}
-    titles = book_titles(con)
+    with contextlib.closing(ro_connect()) as con:
+        desc = {b: strip_html(t) for b, t in con.execute("SELECT book, text FROM comments")}
+        titles = book_titles(con)
     decided, pending, rejects, quit_ = [], [], [], False
     for r in read_proposal():
         tags = r["added_tags"]
@@ -260,36 +260,37 @@ def gather(a: argparse.Namespace) -> tuple:
     explicitly scoped books — the resume logic uses it to re-process them even if already proposed.
     A book whose description is too thin is DROPPED here (not sampled from its prose): that book
     is synopsis work, and `scourgify synopsis` returns it with a real description."""
-    con = ro_connect(); c = con.cursor()
-    missing = 0
-    if a.books is not None:                       # explicit ids win over every other scope flag
-        want = select.parse_books(a.books)
-        ids = select.pick(con, "ids", ids=want)
-        missing, scope = len(want) - len(ids), f"{len(want)} book(s) by id"
-    elif a.all:       ids, scope = select.pick(con, "all"), "whole library"
-    elif a.incremental: ids, scope = select.pick(con, "incremental"), "new/changed since last classify"
-    elif a.unclassified:                          # the advancing scope: never attempted, and sendable
-        ids = select.pick(con, "unclassified")    # seen + the sendable filter default inside pick
-        scope = f"never classified ({len(ids)} outstanding)"
-    elif a.last:      ids, scope = select.pick(con, "last", n=a.last), f"last {a.last} added"
-    elif a.since:     ids, scope = select.pick(con, "since", since=a.since), f"added/updated since {a.since}"
-    else:             ids, scope = select.pick(con, "sparse", min_tags=a.min_tags), f"fewer than {a.min_tags} tags"
-    explicit = set(ids) if (a.books is not None or a.all or a.incremental or a.unclassified
-                            or a.last or a.since) else set()
-    def needs(b): return b in explicit
-    desc = {b: t for b, t in c.execute("SELECT book, text FROM comments")}
-    # A thin description is SYNOPSIS work now, not a raw-prose sample taken at tag time (#69):
-    # `scourgify synopsis` writes those books a real description and they graduate back here.
-    targets = [(b, strip_html(desc.get(b, ""))) for b in ids]
-    kept = [(b, t) for b, t in targets if t and len(t) >= 40]
-    # flush: the live dashboard writes straight through, so an unflushed plain print lands
-    # AFTER it when stdout is a pipe (scripting/CI) rather than a terminal
-    print(f"  scope: {scope} -> {len(ids)} books", flush=True)
-    if missing: print(f"  note: {missing} requested id(s) not in the library")
-    if len(kept) < len(targets):                  # no silent drops: thin descriptions are reported, not vanished
-        print(f"  note: {len(targets) - len(kept)} dropped (description under 40 chars — "
-              "`scourgify synopsis` gives these books a real one)")
-    titles = book_titles(con)
+    with contextlib.closing(ro_connect()) as con:
+        c = con.cursor()
+        missing = 0
+        if a.books is not None:                       # explicit ids win over every other scope flag
+            want = select.parse_books(a.books)
+            ids = select.pick(con, "ids", ids=want)
+            missing, scope = len(want) - len(ids), f"{len(want)} book(s) by id"
+        elif a.all:       ids, scope = select.pick(con, "all"), "whole library"
+        elif a.incremental: ids, scope = select.pick(con, "incremental"), "new/changed since last classify"
+        elif a.unclassified:                          # the advancing scope: never attempted, and sendable
+            ids = select.pick(con, "unclassified")    # seen + the sendable filter default inside pick
+            scope = f"never classified ({len(ids)} outstanding)"
+        elif a.last:      ids, scope = select.pick(con, "last", n=a.last), f"last {a.last} added"
+        elif a.since:     ids, scope = select.pick(con, "since", since=a.since), f"added/updated since {a.since}"
+        else:             ids, scope = select.pick(con, "sparse", min_tags=a.min_tags), f"fewer than {a.min_tags} tags"
+        explicit = set(ids) if (a.books is not None or a.all or a.incremental or a.unclassified
+                                or a.last or a.since) else set()
+        def needs(b): return b in explicit
+        desc = {b: t for b, t in c.execute("SELECT book, text FROM comments")}
+        # A thin description is SYNOPSIS work now, not a raw-prose sample taken at tag time (#69):
+        # `scourgify synopsis` writes those books a real description and they graduate back here.
+        targets = [(b, strip_html(desc.get(b, ""))) for b in ids]
+        kept = [(b, t) for b, t in targets if t and len(t) >= 40]
+        # flush: the live dashboard writes straight through, so an unflushed plain print lands
+        # AFTER it when stdout is a pipe (scripting/CI) rather than a terminal
+        print(f"  scope: {scope} -> {len(ids)} books", flush=True)
+        if missing: print(f"  note: {missing} requested id(s) not in the library")
+        if len(kept) < len(targets):                  # no silent drops: thin descriptions are reported, not vanished
+            print(f"  note: {len(targets) - len(kept)} dropped (description under 40 chars — "
+                  "`scourgify synopsis` gives these books a real one)")
+        titles = book_titles(con)
     if a.limit: kept = kept[:a.limit]
     return kept, titles, needs
 

@@ -13,7 +13,7 @@ exactly its ids; omitting --books keeps the normal unscoped path working.
 No framework:  uv run tests/test_books_cli.py   (also pytest-collectable). No Calibre, no network,
 no real Calibre library ever touched — every test points CALIBRE_LIBRARY at a temp fixture and
 intercepts the writer."""
-import contextlib, os, sys, tempfile
+import contextlib, os, sqlite3, sys, tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 from fixture_db import build
@@ -93,6 +93,49 @@ def test_wrangle_apply_books_empty_fails_closed_and_writes_nothing():
         finally:
             restore()
         assert recorded == [], "a rejected --books spec reached the writer"
+
+
+def test_wrangle_apply_books_empty_closes_its_read_connection():
+    """The Windows regression found on ci.yml run 34142905483 (test-windows job, the lane's
+    first real run): wrangle.read_library() opened a read-only sqlite connection and never
+    called .close() on it. CPython's refcounting happens to close the underlying file the
+    instant the connection object becomes unreachable, so on macOS/Linux the OS-level lock was
+    released fast enough that this was invisible — but an explicitly-open sqlite3.Connection
+    holds a lock Windows won't release for an unlink, and tempfile.TemporaryDirectory()'s cleanup
+    right after this exact call path failed with WinError 32 (PermissionError) on metadata.db.
+
+    Asserting this from macOS/Linux without forcing a timing race: capture the connection(s)
+    wrangle.read_library() actually opens (via a thin wrapper around wrangle.ro_connect) and hold
+    OUR OWN extra reference to them for the duration of the test. That extra reference means
+    CPython's refcounting can never close the connection for us — only an explicit .close() (the
+    fix: `with contextlib.closing(ro_connect()) as con:`) can. So the assertion is a direct check
+    of "did the code call close()", not a race against garbage collection, and it fails
+    identically on every platform if the explicit close regresses."""
+    with library(TAGGED):
+        captured = []
+        real_ro_connect = wrangle.ro_connect
+
+        def capturing(*a, **kw):
+            con = real_ro_connect(*a, **kw)
+            captured.append(con)
+            return con
+
+        wrangle.ro_connect = capturing
+        recorded, restore = _intercept(wrangle)
+        try:
+            with argv("apply", "--apply", "--books", ""):
+                expect_exit(wrangle.main)
+        finally:
+            restore()
+            wrangle.ro_connect = real_ro_connect
+        assert captured, "expected wrangle.main() to open at least one read-only connection"
+        for con in captured:
+            try:
+                con.execute("SELECT 1")
+                assert False, ("a connection opened on the --books '' path was never explicitly "
+                                "closed — it would hold a lock on Windows (WinError 32)")
+            except sqlite3.ProgrammingError:
+                pass                                    # closed, as expected
 
 
 def test_wrangle_audit_books_is_rejected():

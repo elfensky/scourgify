@@ -423,6 +423,7 @@ def test_step_apply_preserves_pending_rows_when_writer_refuses():
 
     class FakeCon:
         def execute(self, *a): return []
+        def close(self): pass
 
     tmp = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
     tmp.write(b"book_id,title,added_tags,proposed_new\n"); tmp.close()

@@ -7,7 +7,7 @@ Idempotent & self-correcting — re-run after an #updated refresh and the status
 
 Rule: <STALE yrs -> In-Progress | STALE..DEAD -> Hiatus | >=DEAD -> Abandoned. Tunable: --stale-years 2 --dead-years 5.
 Completed/Dropped/Rewritten and books without an #updated date are NEVER changed."""
-import argparse, datetime, collections
+import argparse, datetime, collections, contextlib
 from scourgify.common import (GuardrailError, load_config, ro_connect, read_custom_column, run_writer,
                               op_set_field, titles as book_titles)
 from scourgify import select
@@ -28,25 +28,25 @@ def compute(stale_years: float = 2.0, dead_years: float = 5.0,
     """-> (status_label, [(book, old, new, age_years), ...]) for books whose status would change.
     books: an iterable of ids to restrict to, or None for the whole library. Each book's status
     depends only on its own #updated age, so a plain filter is the whole of the scoping."""
-    con = ro_connect()
-    status_label = load_config()["columns"].get("status") or "#status"
-    status = read_custom_column(con, status_label)
-    updated = read_custom_column(con, "#updated")
-    if status is None or updated is None:
-        missing = [l for l, v in ((status_label, status), ("#updated", updated)) if v is None]
-        raise GuardrailError(f"missing column(s): {', '.join(missing)} — run `scourgify setup` first.")
-    today = datetime.date.today()
-    def age(b):
-        try: return (today - datetime.date.fromisoformat(str(updated.get(b))[:10])).days / 365.25
-        except Exception: return None
-    want = None if books is None else set(books)
-    if want is not None:
-        # membership is the BOOKS table, not the #status column: a book with no status set is
-        # still in the library (about a fifth of a real FanFicFare library), and counting it as
-        # absent turned an informational note into a lie about the user's own ids.
-        known = {r[0] for r in con.execute("SELECT id FROM books")}
-        absent = [b for b in want if b not in known]
-        if absent: print(f"  note: {len(absent)} requested id(s) not in the library")
+    with contextlib.closing(ro_connect()) as con:
+        status_label = load_config()["columns"].get("status") or "#status"
+        status = read_custom_column(con, status_label)
+        updated = read_custom_column(con, "#updated")
+        if status is None or updated is None:
+            missing = [l for l, v in ((status_label, status), ("#updated", updated)) if v is None]
+            raise GuardrailError(f"missing column(s): {', '.join(missing)} — run `scourgify setup` first.")
+        today = datetime.date.today()
+        def age(b):
+            try: return (today - datetime.date.fromisoformat(str(updated.get(b))[:10])).days / 365.25
+            except Exception: return None
+        want = None if books is None else set(books)
+        if want is not None:
+            # membership is the BOOKS table, not the #status column: a book with no status set is
+            # still in the library (about a fifth of a real FanFicFare library), and counting it as
+            # absent turned an informational note into a lie about the user's own ids.
+            known = {r[0] for r in con.execute("SELECT id FROM books")}
+            absent = [b for b in want if b not in known]
+            if absent: print(f"  note: {len(absent)} requested id(s) not in the library")
     rows = []
     for b, s in status.items():
         if want is not None and b not in want: continue
@@ -68,7 +68,8 @@ def step(status_label: str, rows: list) -> list:
     from scourgify import ui
     if not ui.interactive():
         raise GuardrailError("--step needs an interactive terminal (omit it to apply every change).")
-    con = ro_connect(); titles = book_titles(con); con.close()
+    with contextlib.closing(ro_connect()) as con:
+        titles = book_titles(con)
     acc, _, action = ui.checklist(f"{status_label} changes — untick to leave a book alone",
                                   [status_line(r, str(titles.get(r[0], ""))) for r in rows])
     return [] if action in ("skip", "quit") else [rows[i] for i in acc]
@@ -107,7 +108,8 @@ def main() -> None:
     books = select.parse_books(a.books) if a.books is not None else None
     if a.last:
         from scourgify.common import ro_connect
-        con = ro_connect(); books = select.pick(con, "last", n=a.last); con.close()
+        with contextlib.closing(ro_connect()) as con:
+            books = select.pick(con, "last", n=a.last)
     label, rows = compute(a.stale_years, a.dead_years, books)
     print(f"staleness audit  (today={datetime.date.today()}, stale>={a.stale_years}y, dead>={a.dead_years}y"
           + (f", scoped to {len(books)} book(s)" if books is not None else "") + ")")

@@ -13,7 +13,7 @@ auto-back-up metadata.db (everything funnels through common.run_writer). Single
 steps stay available as CLI subcommands: scourgify setup / audit / apply /
 classify / staleness. This module has no main()/argparse entry of its own — it is
 invoked via wrangle.main() (bare `scourgify`); see cli.py and CLAUDE.md."""
-import os, time, collections
+import os, time, collections, contextlib
 
 from scourgify import ui                    # first: gives the friendly error if rich is missing
 from scourgify.ui import console
@@ -43,22 +43,21 @@ def _proposal_counts(rows: list) -> tuple[int, int]:
 
 def snapshot():
     try:
-        con = ro_connect()
-        books = common.book_count(con)
-        missing = [c for c in COLS if custom_column_id(con, c) is None]
-        # new/changed since the last classify-apply — same select.changed() the classify stage uses
-        changed = len(select.changed(con)) if "#updated" not in missing and "#wrangled" not in missing else None
-        # the largest single piece of outstanding work in most libraries, and it used to be
-        # invisible here — the header cheerfully said "up to date" with thousands never attempted.
-        # Bare pick: the whole invariant (seen, sendable) lives in select now, so this header,
-        # the plugin, and the classify stage measure the same way. ~0.03s on a 7,949-book library.
-        try: unclassified = len(select.pick(con, "unclassified"))
-        except Exception: unclassified = 0
-        # the synopsis sweep is the other large outstanding job, and the same rule applies: the
-        # header must never read "up to date" while thousands of books have no settled synopsis.
-        try: unsynopsized = len(select.pick(con, "unsynopsized"))
-        except Exception: unsynopsized = 0
-        con.close()
+        with contextlib.closing(ro_connect()) as con:
+            books = common.book_count(con)
+            missing = [c for c in COLS if custom_column_id(con, c) is None]
+            # new/changed since the last classify-apply — same select.changed() the classify stage uses
+            changed = len(select.changed(con)) if "#updated" not in missing and "#wrangled" not in missing else None
+            # the largest single piece of outstanding work in most libraries, and it used to be
+            # invisible here — the header cheerfully said "up to date" with thousands never attempted.
+            # Bare pick: the whole invariant (seen, sendable) lives in select now, so this header,
+            # the plugin, and the classify stage measure the same way. ~0.03s on a 7,949-book library.
+            try: unclassified = len(select.pick(con, "unclassified"))
+            except Exception: unclassified = 0
+            # the synopsis sweep is the other large outstanding job, and the same rule applies: the
+            # header must never read "up to date" while thousands of books have no settled synopsis.
+            try: unsynopsized = len(select.pick(con, "unsynopsized"))
+            except Exception: unsynopsized = 0
     except Exception as e:
         raise SystemExit(f"can't read {db_path()} — is CALIBRE_LIBRARY correct? ({e})")
     pending, to_stamp = _proposal_counts(artifacts.read_proposal())
@@ -132,10 +131,11 @@ def stage_wrangle():
     if choice == "skip":
         ui.say("(skipped — nothing written)", "dim"); return
     if choice == "last":
-        con = ro_connect(); total = common.book_count(con)
-        n = ui.ask_int(f"how many of the most recent books?  {total:,} in the library",
-                       LAST_DEFAULT, lo=1, hi=total)
-        p.restrict(select.pick(con, "last", n=n)); con.close()   # narrows the WRITE set, not the read
+        with contextlib.closing(ro_connect()) as con:
+            total = common.book_count(con)
+            n = ui.ask_int(f"how many of the most recent books?  {total:,} in the library",
+                           LAST_DEFAULT, lo=1, hi=total)
+            p.restrict(select.pick(con, "last", n=n))   # narrows the WRITE set, not the read
         if not p.n_books:
             ui.say("none of those books need changes ✓", "green"); return
         ui.say(f"scoped to {p.n_books} of the newest {n} books", "dim")
@@ -164,10 +164,11 @@ def stage_staleness():
             ui.say("(nothing decided — nothing written)", "dim"); return
         ui.say(f"{len(rows)} book(s) accepted", "dim")
     if choice == "last":
-        con = ro_connect(); total = common.book_count(con)
-        n = ui.ask_int(f"how many of the most recent books?  {total:,} in the library",
-                       LAST_DEFAULT, lo=1, hi=total)
-        want = set(select.pick(con, "last", n=n)); con.close()
+        with contextlib.closing(ro_connect()) as con:
+            total = common.book_count(con)
+            n = ui.ask_int(f"how many of the most recent books?  {total:,} in the library",
+                           LAST_DEFAULT, lo=1, hi=total)
+            want = set(select.pick(con, "last", n=n))
         rows = [r for r in rows if r[0] in want]
         if not rows:
             ui.say("none of those books need a status change ✓", "green"); return
@@ -196,7 +197,8 @@ def stage_synopsis():
     The engine is apple and deliberately NOT offered here: free, on-device, and the engine this
     pass is designed for. A cloud engine is a per-stalled-book CLI opt-in (--engine), not
     something to fat-finger over a 7,949-book sweep."""
-    con = ro_connect(); n = len(select.pick(con, "unsynopsized")); con.close()
+    with contextlib.closing(ro_connect()) as con:
+        n = len(select.pick(con, "unsynopsized"))
     if n:
         ui.say(f"[cyan]{n:,}[/] book(s) have no settled synopsis. A good blurb is kept exactly as "
                "the author wrote it; only a thin one is written from the book's own prose.", "dim")
@@ -294,11 +296,11 @@ def _engine_options(engs: list, n_todo: int) -> list:
 
 
 def stage_classify():
-    con = ro_connect(); ch = select.changed(con)
-    total = common.book_count(con)
-    # bare pick = the wizard's own measure: the whole invariant lives in select
-    outstanding = len(select.pick(con, "unclassified"))
-    con.close()
+    with contextlib.closing(ro_connect()) as con:
+        ch = select.changed(con)
+        total = common.book_count(con)
+        # bare pick = the wizard's own measure: the whole invariant lives in select
+        outstanding = len(select.pick(con, "unclassified"))
     if not ch:
         ui.say("no new or changed books since the last classify.", "dim")
     opts, default = _scope_options(ch, total, outstanding)
@@ -340,7 +342,8 @@ def stage_classify():
         usable_engs = engines.usable_engines()         # NB: don't shadow the module-level `engines` import
         ui.say(f"comparing: {n_sample} books × {', '.join(usable_engs)} (sequential — a minute or two)…", "dim")
         res = classify.bakeoff(p.opts, targets, usable_engs, n=n_sample)
-        con = ro_connect(); titles = common.titles(con, res); con.close()
+        with contextlib.closing(ro_connect()) as con:
+            titles = common.titles(con, res)
         t = Table(box=box.SIMPLE, title="engine comparison — vocab tags (+new candidates dimmed)")
         t.add_column("book", max_width=32)
         for e in usable_engs: t.add_column(e, overflow="fold")
@@ -485,7 +488,8 @@ def stage_backfill():
     """Asks; promote.backfill() does the work. The write itself (and its preview, guards and
     auto-backup) lives there, so `promote --backfill` and this stage cannot diverge."""
     def decide(chg, adds):
-        con = ro_connect(); titles = common.titles(con); con.close()
+        with contextlib.closing(ro_connect()) as con:
+            titles = common.titles(con)
         choice = ui.menu(f"backfill {len(chg)} book(s)? (Calibre closed; auto-backup)", [
             ("1", "apply", "apply all", "write the promoted/aliased tags onto every book that proposed them"),
             ("2", "step", "review 1-by-1", "walk each book; untick one to leave it untagged"),
