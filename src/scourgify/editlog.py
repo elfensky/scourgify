@@ -14,6 +14,8 @@ answers "what did scourgify do to book 6585" and is small enough to keep forever
      "before":["Harem"],"after":["Harem","Isekai"],"undo":true}
     {"kind":"op","run":ID,"op":"stamp_now","field":"#wrangled","books":112,"undo":false}
     {"kind":"end","run":ID,"ts":…,"outcome":"ok","ops":3,"books":112}
+    {"kind":"end","run":ID,"ts":…,"outcome":"skipped","ops":0,"books":0,
+     "skipped":[[6585,"tags"]],"n_skipped":1}     # every op conflicted — see below
 
 **A missing footer marks a partial run** — the process died mid-write. Its op lines are still
 real and still undoable.
@@ -32,6 +34,13 @@ guard was making anyway.
 A failure to write the log is NOT swallowed. It raises before any op applies (the header and op
 lines go down first), so a log that cannot be written means the library is untouched — the same
 fail-closed posture as a failed backup.
+
+**An op whose current value no longer matches the `expected` it was planned against is SKIPPED,
+not clobbered** (plan 01-06, FOUND-05): the apply-time conflict filter drops it before either the
+snapshot or the log's op lines are written, using this module's own `conflict()` predicate — the
+same one undo uses, so "conflict" cannot come to mean two things. A run where every op conflicted
+still gets a header and a footer (with zero op lines and a `skipped` list) so the attempt is
+visible in History rather than disappearing, and it costs no snapshot.
 
 `stamp_now`/`set_pref`/`create_column` are logged with `"undo": false` and excluded from replay:
 their before-state is worthless (a stamp) or structural (a column). Stamps are logged as ONE
@@ -126,10 +135,18 @@ def start(tool: str, ops: list, before: dict, scope=None, library=None,
     return {"run": run, "ops": len(lines), "books": len(books), "path": path}
 
 
-def finish(rec: dict, outcome: str = "ok") -> None:
-    """Close the run. Any outcome but a written footer means partial — see the module docstring."""
-    append([{"kind": "end", "run": rec["run"], "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
-             "outcome": outcome, "ops": rec["ops"], "books": rec["books"]}], rec.get("path"))
+def finish(rec: dict, outcome: str = "ok", skipped: list | None = None) -> None:
+    """Close the run. Any outcome but a written footer means partial — see the module docstring.
+
+    `skipped` ([[book, field], ...], the apply-time conflict filter's drops — plan 01-06) is
+    folded into the footer as `skipped` plus its count `n_skipped`, only when non-empty — an
+    ordinary run's footer is byte-identical to before this parameter existed."""
+    foot = {"kind": "end", "run": rec["run"], "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "outcome": outcome, "ops": rec["ops"], "books": rec["books"]}
+    if skipped:
+        foot["skipped"] = [[b, f] for b, f in skipped]
+        foot["n_skipped"] = len(skipped)
+    append([foot], rec.get("path"))
 
 
 def conflict(current, expected, multi: bool) -> bool:

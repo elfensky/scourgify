@@ -253,6 +253,41 @@ def test_conflict_is_set_wise_for_multi_and_string_wise_for_single():
     assert editlog.conflict(None, "Hiatus", multi=False)
 
 
+def test_the_footer_carries_the_skipped_pairs_and_their_count():
+    """D-08: the run footer names each conflict-skipped (book, field) pair and a count — the
+    shape both write transports report and phase 2's diff-after reads."""
+    with _pointed_at(_lib()) as home:
+        rec = editlog.start("wrangle", [common.op_set_field("tags", {1: ["Harem", "Isekai"]})],
+                            {"tags": {1: ["Harem"]}})
+        editlog.finish(rec, "ok", skipped=[[2, "tags"], [3, "#status"]])
+        foot = _read(home)[-1]
+    assert foot["skipped"] == [[2, "tags"], [3, "#status"]]
+    assert foot["n_skipped"] == 2
+
+
+def test_an_all_skipped_run_still_writes_a_header_and_a_footer_with_no_op_lines():
+    """The all-skipped ordering: header + footer, zero op lines, the skipped list on the footer
+    — a run that will write nothing must still be visible in History (T-01-20)."""
+    with _pointed_at(_lib()) as home:
+        rec = editlog.start("wrangle", [], {}, scope="1 book", library=LIB_UUID)
+        editlog.finish(rec, "skipped", skipped=[[1, "tags"]])
+        lines = _read(home)
+    assert [l["kind"] for l in lines] == ["run", "end"]
+    assert lines[-1]["outcome"] == "skipped"
+    assert lines[-1]["skipped"] == [[1, "tags"]] and lines[-1]["n_skipped"] == 1
+    assert lines[-1]["ops"] == 0 and lines[-1]["books"] == 0
+
+
+def test_a_footer_with_no_skipped_arg_is_unchanged_from_before_this_parameter_existed():
+    """`finish()` called exactly as every pre-01-06 caller does — no `skipped=` at all — must not
+    grow a `skipped`/`n_skipped` key: an ordinary run's footer stays byte-identical."""
+    with _pointed_at(_lib()) as home:
+        rec = editlog.start("wrangle", [common.op_set_field("tags", {1: ["x"]})], {})
+        editlog.finish(rec, "ok")
+        foot = _read(home)[-1]
+    assert "skipped" not in foot and "n_skipped" not in foot
+
+
 def test_an_op_that_never_applied_reads_as_a_conflict():
     """Why logging BEFORE applying is safe: if the run died before this op landed, the book still
     holds `before`, and undo (which expects `after`) sees a conflict and skips it — reported,

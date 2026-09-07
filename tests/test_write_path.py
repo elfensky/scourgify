@@ -455,6 +455,112 @@ def test_write_locks_is_bounded_by_library_count():
     assert common._WRITE_HOLDERS == {}, "a per-run holder record leaked past its run"
 
 
+# ---------------- the apply-time conflict check (FOUND-05, D-07/D-08, plan 01-06) ----------------
+def test_an_op_without_an_expected_mapping_applies_unconditionally():
+    """Unchanged behaviour for a caller that hasn't been updated to carry `expected` yet."""
+    lib = _lib()
+    api = FakeApi(books=(1, 2, 3))
+    api.set_field("tags", {1: ("Anything",)})
+    with _pointed_at(lib):
+        result = common.write_ops(api, [common.op_set_field("tags", {1: ["New"]})])
+    assert api.fields["tags"][1] == ("New",)
+    assert result.skipped == [] and result.outcome == "ok"
+
+
+def test_a_matching_expected_value_applies_normally():
+    lib = _lib()
+    api = FakeApi(books=(1, 2, 3))
+    api.set_field("tags", {1: ("Old",)})
+    with _pointed_at(lib):
+        result = common.write_ops(api, [common.op_set_field("tags", {1: ["New"]}, expected={1: ["Old"]})])
+    assert api.fields["tags"][1] == ("New",)
+    assert result.skipped == [] and result.outcome == "ok"
+
+
+def test_an_op_whose_value_drifted_is_skipped_not_clobbered():
+    """The whole point of the plan: book 2's tags changed (in Calibre, say) since this write was
+    computed — it must be left alone and named, not silently overwritten."""
+    lib = _lib()
+    api = FakeApi(books=(1, 2, 3))
+    api.set_field("tags", {1: ("Existing",), 2: ("Existing",)})
+    with _pointed_at(lib):
+        result = common.write_ops(api, [common.op_set_field(
+            "tags", {1: ["New"], 2: ["New"]}, expected={1: ["Existing"], 2: ["Different"]})])
+    assert api.fields["tags"][1] == ("New",), "book 1 (matching expected) should have applied"
+    assert api.fields["tags"][2] == ("Existing",), "book 2's drifted value was overwritten instead of skipped"
+    assert result.skipped == [[2, "tags"]]
+    assert result.outcome == "ok"
+
+
+def test_stamp_and_pref_ops_are_never_conflict_checked():
+    """D-09: stamp_now/set_pref/create_column carry no `expected` and are excluded from the
+    filter's loop entirely — they pass through untouched whatever `before` says."""
+    ops = [common.op_stamp_now("#wrangled", [1, 2, 3]), common.op_set_pref("scourgify:x", {"a": 1}),
+           common.op_create_column("wrangled", "Wrangled", "datetime")]
+    kept, skipped = common._check_conflicts(ops, before={}, is_multi=lambda f: False)
+    assert kept == ops, "a never-checked op was altered by the filter"
+    assert skipped == []
+
+
+def test_applying_the_same_ops_list_twice_skips_everything_the_second_time():
+    """FOUND-05 idempotency: the first run makes current == after, which no longer equals the
+    plan-time `expected` — the second run writes no op line and changes no book."""
+    lib = _lib()
+    api = FakeApi(books=(1, 2, 3))
+    api.set_field("tags", {1: ("Old",)})
+    ops = [common.op_set_field("tags", {1: ["New"]}, expected={1: ["Old"]})]
+    with _pointed_at(lib):
+        first = common.write_ops(api, ops)
+        second = common.write_ops(api, ops)
+    assert first.outcome == "ok" and first.skipped == []
+    assert second.outcome == "skipped" and second.skipped == [[1, "tags"]]
+    assert api.fields["tags"][1] == ("New",)
+
+
+def test_an_all_skipped_run_takes_no_snapshot():
+    """Every op conflicts -> no snapshot, WriteResult.backup is None, outcome is 'skipped', and
+    the log still holds one header and one footer so the attempt is visible in History (T-01-20)."""
+    lib = _lib()
+    api = FakeApi(books=(1, 2, 3))
+    api.set_field("tags", {1: ("Existing",)})
+    with _pointed_at(lib):
+        result = common.write_ops(api, [common.op_set_field("tags", {1: ["New"]}, expected={1: ["Different"]})])
+        assert not glob.glob(os.path.join(common.backups_dir(), "ff_*.db")), \
+            "an all-skipped run took a snapshot"
+        from scourgify import editlog
+        lines = [json.loads(l) for l in open(editlog.log_path(), encoding="utf-8")]
+    assert result.backup is None and result.outcome == "skipped"
+    assert result.skipped == [[1, "tags"]]
+    assert [l["kind"] for l in lines] == ["run", "end"]
+    assert api.fields["tags"][1] == ("Existing",)
+
+
+def test_both_transports_skip_the_same_ops():
+    """Extends the shadow-replay pattern (test_shadow_replay_cli_and_in_process_agree): the CLI
+    (JSON-serialized ops, read-only sqlite before-read) and the plugin (live dicts, new_api
+    before-read) must agree not just on what applies but on what's skipped, from the same ops."""
+    live = [common.op_set_field("tags", {1: ["New"], 2: ["New"]}, expected={1: ["Old"], 2: ["Different"]})]
+    wire = json.loads(json.dumps(live))                        # the CLI's tempfile round-trip
+
+    d = tempfile.mkdtemp()
+    con = fixture_db.build(os.path.join(d, "metadata.db"),
+                           [{"id": 1, "tags": ["Old"]}, {"id": 2, "tags": ["Existing"]}, {"id": 3}])
+    api = FakeApi(books=(1, 2, 3))
+    api.set_field("tags", {1: ("Old",), 2: ("Existing",)})
+    try:
+        from scourgify import editlog
+        cli_before = editlog.before_values(lambda f, bs: common.column_values(con, f, bs), wire)
+        cli_ops, cli_skipped = common._check_conflicts(wire, cli_before,
+                                                        lambda f: common.column_is_multiple(con, f))
+        plugin_before = editlog.before_values(lambda f, bs: common.values_via_api(api, f, bs), live)
+        plugin_ops, plugin_skipped = common._check_conflicts(live, plugin_before,
+                                                             lambda f: common.field_is_multiple_via_api(api, f))
+    finally:
+        con.close()
+    assert cli_skipped == plugin_skipped == [[2, "tags"]]
+    assert cli_ops[0]["values"] == plugin_ops[0]["values"] == {"1": ["New"]}
+
+
 def test_a_write_run_still_prunes_past_the_backup_keep_budget():
     lib = _lib()
     old_keep = common.BACKUP_KEEP

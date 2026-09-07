@@ -664,9 +664,20 @@ def load_config(path: str | None = None) -> dict:
 # Op constructors: the ops-JSON shape (_writer.py's docstring) is built ONLY here, next to the
 # run_writer guard that parses it back — producers call these instead of hand-writing dicts,
 # so book-id stringification and key names are decided once.
-def op_set_field(field: str, values: dict) -> dict:
-    """values: {book_id: new value} (ids of any type — stringified here for JSON)."""
-    return {"op": "set_field", "field": field, "values": {str(b): v for b, v in values.items()}}
+def op_set_field(field: str, values: dict, expected: dict | None = None) -> dict:
+    """values: {book_id: new value} (ids of any type — stringified here for JSON).
+
+    `expected` (D-09), when given, is the plan-time before-value per book — the same shape as
+    `values` — the apply-time conflict filter (`_check_conflicts`, in the shared pre-write
+    protocol) compares the fresh before-read against. Stringified exactly like `values` so the
+    two dicts round-trip through JSON with matching key types and can't drift apart the way
+    `ops.coerce`'s own docstring warns `values` alone can. Omitted entirely when None — an op
+    with no `expected` key is applied unconditionally, which is what keeps every caller that
+    hasn't been updated to populate it working unchanged."""
+    op = {"op": "set_field", "field": field, "values": {str(b): v for b, v in values.items()}}
+    if expected is not None:
+        op["expected"] = {str(b): v for b, v in expected.items()}
+    return op
 
 def op_create_column(label: str, name: str, datatype: str, is_multiple: bool = False) -> dict:
     return {"op": "create_column", "label": label, "name": name, "datatype": datatype, "is_multiple": is_multiple}
@@ -869,6 +880,52 @@ def check_wipe(ops: list[dict], populated) -> None:
                                  "Re-run with --force if this is intentional.")
 
 
+def _check_conflicts(ops: list[dict], before: dict, is_multi) -> tuple[list, list]:
+    """Drop every `(book, field)` whose current value (`before`, the funnel's own before-read —
+    no fresh read happens here) no longer matches the op's plan-time `expected`, per
+    `editlog.conflict` — THE verdict apply-time checks and undo share; do not write a second
+    equality test anywhere. Runs on the near side of the `calibre-debug` subprocess, in the
+    shared pre-write protocol, between the before-read and the snapshot — ONCE for both
+    transports (D-07).
+
+    `is_multi` (field -> is it multi-valued) is INJECTED exactly like `check_wipe`'s own
+    `populated` parameter — never guessed from a value's Python type (a single-value column may
+    legitimately hold a list-shaped read).
+
+    An op with no `expected` key (or that isn't `set_field`) passes through UNTOUCHED — unchanged
+    behaviour for a caller that hasn't been updated to populate it. `stamp_now`/`set_pref`/
+    `create_column` are never checked (D-09): they carry no `expected` and are excluded here by
+    the `op != "set_field"` branch, the same one an ops list with no `expected` anywhere takes.
+
+    -> (surviving ops, `[[book, field], ...]` skipped). A conflicting `(book, field)` is dropped
+    from both `values` and `expected`; an op emptied entirely by the filter is dropped from the
+    result — it gets no op line and is never applied."""
+    from scourgify import editlog
+    skipped: list = []
+    out: list = []
+    for o in ops:
+        if o.get("op") != "set_field" or "expected" not in o:
+            out.append(o)
+            continue
+        field = o["field"]
+        multi = is_multi(field)
+        cur_map = before.get(field, {})
+        exp = o["expected"]
+        kept_values, kept_expected = {}, {}
+        for b, v in o["values"].items():
+            current = cur_map.get(int(b))
+            if editlog.conflict(current, exp.get(b), multi):
+                skipped.append([int(b), field])
+            else:
+                kept_values[b] = v
+                if b in exp:
+                    kept_expected[b] = exp[b]
+        if kept_values:
+            out.append({**o, "values": kept_values, "expected": kept_expected})
+        # else: the filter emptied this op entirely — drop it, no line, nothing applied.
+    return out, skipped
+
+
 def backup_db(dst: str | None = None, src: str | None = None) -> str:
     """Snapshot metadata.db (default: a fresh backups_dir() path) and return the snapshot's path.
 
@@ -906,8 +963,9 @@ def backup_db(dst: str | None = None, src: str | None = None) -> str:
 class WriteResult:
     """The ONE structured shape both write transports return, instead of write_ops() returning
     None and run_writer() only printing. Lets a caller (the CLI, phase 2's diff-after, a future
-    plugin dialog) read what happened without re-deriving it from local variables. `skipped` is
-    always [] in this plan — plan 01-06's apply-time conflict check is what populates it."""
+    plugin dialog) read what happened without re-deriving it from local variables. `skipped`
+    ([[book, field], ...]) is populated by the apply-time conflict filter (_check_conflicts,
+    plan 01-06) — [] when nothing conflicted."""
     run_id: str | None
     backup: str | None
     ops: int
@@ -972,26 +1030,38 @@ def _release_write_lock(key: str, lock: threading.Lock) -> None:
 def _write_run(ops, tool, scope, force, out, populated, read, is_multi, lib_uuid, lib_path,
                engine=None, model=None):
     """THE shared pre-write protocol both write_ops (in-process) and run_writer (CLI subprocess)
-    call — issue #71's "closes the pre-write protocol half". In order, and no other:
+    call — issue #71's "closes the pre-write protocol half". In order, and no other (D-07/D-08,
+    Codex agreed concern 4's pinned sequence, plan 01-06):
 
         1. drop set_field ops with an empty values map — an all-empty change-set is a no-op
         2. acquire the write-run lock, keyed by library uuid (_acquire_write_lock)
-        3. check_wipe(), unless force
+        3. check_wipe(ops, populated), unless force — on the change-set the tool ASKED for,
+           before the conflict filter below: a runaway rule is refused whether or not drift
+           happens to trim it below the threshold; a guard a race can disarm is not a guard
         4. the before-read (editlog.before_values)
-        5. the snapshot (backup_db), then the explicit prune backup_db(dst=...) disables
-        6. editlog.start()
-        7. yield the prepared state to the caller, which performs the actual apply
-        8. on exit, editlog.finish() via a `finally` and an outcome flag — never a broad
+        5. the apply-time conflict filter (_check_conflicts): drops every (book, field) whose
+           fresh before-value no longer matches the op's plan-time `expected`
+        6. if the filter emptied every op (everything conflicted): write a header + footer with
+           ZERO op lines and a skipped list, take NO snapshot, apply nothing, and stop here — a
+           run that will write nothing must not cost a snapshot of a multi-hundred-megabyte
+           metadata.db, and there is nothing to roll back TO; History still shows the attempt
+        7. otherwise: the snapshot (backup_db), then the explicit prune backup_db(dst=...)
+           disables
+        8. editlog.start(), with only the SURVIVING ops
+        9. yield the prepared state to the caller, which performs the actual apply
+        10. on exit, editlog.finish() via a `finally` and an outcome flag — never a broad
            catch-that-reraises-after-logging (the shape write_ops used before this refactor), so
            a cancelled or interrupted run still gets a footer without this protocol intercepting
            an exception it does not own (REVIEW: Codex divergent view on the broad catch)
 
+    The conflict filter therefore runs BEFORE editlog.start and before backup_db in both
+    branches, so the log records only what will be attempted — the crash-safe "log before apply"
+    rule is preserved exactly, and undo never sees a line for a write that did not happen.
+
     `populated`/`read`/`is_multi` are INJECTED exactly like check_wipe's own `populated`
     parameter (the "one verdict, two readers" pattern): the CLI reads them off read-only sqlite,
     the in-process transport off Calibre's live new_api. `is_multi` (field -> is it multi-valued)
-    is threaded here but not consumed until plan 01-06 Task 1's apply-time conflict check —
-    accepting an unused-until-then parameter now avoids a signature change in a later wave that
-    would mean re-touching both transports and every test that drives them.
+    was threaded here by plan 01-04 but unused until now — this is its first consumer.
 
     `lib_uuid`/`lib_path` are the run's library identity. `lib_path` (and the backups directory)
     are resolved ONCE, here, at the very head of the protocol, and threaded through explicitly
@@ -1009,7 +1079,7 @@ def _write_run(ops, tool, scope, force, out, populated, read, is_multi, lib_uuid
         out("  (nothing to write)")
         yield None
         return
-    # The lock spans steps 2 through 8 — editlog.start AND editlog.finish are both inside it, so
+    # The lock spans steps 2 through 10 — editlog.start AND editlog.finish are both inside it, so
     # a second run can never interleave op lines between another run's header and its footer.
     lock_key = _write_lock_key(lib_uuid)
     lock = _acquire_write_lock(lock_key, tool, scope)
@@ -1019,6 +1089,18 @@ def _write_run(ops, tool, scope, force, out, populated, read, is_multi, lib_uuid
         # ...but the log's before-read is NOT conditional on the guard: --force means "skip the
         # guard", not "write blind", and a forced run is the one most likely to need undo.
         before = editlog.before_values(read, filtered)
+        filtered, skipped = _check_conflicts(filtered, before, is_multi)
+        for book, field in skipped:
+            out(f"  skipped #{book} {field}: current value no longer matches what this run "
+               "was computed against — not overwritten")
+        if not filtered:
+            # Everything conflicted. Header + footer, zero op lines, no snapshot, nothing
+            # applied — see step 6 of the docstring's pinned order.
+            rec = editlog.start(tool, [], before, scope=scope, library=lib_uuid,
+                                engine=engine, model=model)
+            editlog.finish(rec, "skipped", skipped=skipped)
+            yield {"ops": [], "rec": rec, "backup": None, "skipped": skipped, "outcome": "skipped"}
+            return
         bak = backup_db(dst=_backup_path(bdir), src=os.path.join(lib_path, "metadata.db"))
         out(f"  backup: {bak}   (restore: scourgify rollback)")
         # backup_db(dst=...) turns its OWN prune off (it only prunes when dst is None) — the
@@ -1029,10 +1111,10 @@ def _write_run(ops, tool, scope, force, out, populated, read, is_multi, lib_uuid
                             engine=engine, model=model)
         outcome = "failed"
         try:
-            yield {"ops": filtered, "rec": rec, "backup": bak}
+            yield {"ops": filtered, "rec": rec, "backup": bak, "skipped": skipped, "outcome": "ok"}
             outcome = "ok"
         finally:
-            editlog.finish(rec, outcome)
+            editlog.finish(rec, outcome, skipped=skipped)
     finally:
         _release_write_lock(lock_key, lock)
 
@@ -1057,10 +1139,14 @@ def write_ops(api, ops: list[dict], force: bool = False, out=print,
                     lib_uuid=lib_uuid, lib_path=None, engine=engine, model=model) as state:
         if state is None:
             return WriteResult(run_id=None, backup=None, ops=0, books=0, skipped=[], outcome="noop")
+        if state["outcome"] == "skipped":
+            rec = state["rec"]
+            return WriteResult(run_id=rec["run"], backup=None, ops=rec["ops"], books=rec["books"],
+                               skipped=state["skipped"], outcome="skipped")
         apply_ops(api, state["ops"], out=out)
     rec = state["rec"]
     return WriteResult(run_id=rec["run"], backup=state["backup"], ops=rec["ops"], books=rec["books"],
-                       skipped=[], outcome="ok")
+                       skipped=state["skipped"], outcome="ok")
 
 
 def run_writer(ops: list[dict], force: bool = False, tool: str = "scourgify", scope=None) -> WriteResult:
@@ -1096,6 +1182,10 @@ def run_writer(ops: list[dict], force: bool = False, tool: str = "scourgify", sc
                             lib_uuid=lib_uuid, lib_path=lib_path) as state:
                 if state is None:
                     return WriteResult(run_id=None, backup=None, ops=0, books=0, skipped=[], outcome="noop")
+                if state["outcome"] == "skipped":
+                    rec = state["rec"]
+                    return WriteResult(run_id=rec["run"], backup=None, ops=rec["ops"], books=rec["books"],
+                                       skipped=state["skipped"], outcome="skipped")
                 f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
                 json.dump(state["ops"], f); f.close()
                 print("  → writing via calibre-debug …")
@@ -1116,7 +1206,7 @@ def run_writer(ops: list[dict], force: bool = False, tool: str = "scourgify", sc
         raise SystemExit(f"writer failed (exit {e}) — library backup at {state['backup']}")
     rec = state["rec"]
     return WriteResult(run_id=rec["run"], backup=state["backup"], ops=rec["ops"], books=rec["books"],
-                       skipped=[], outcome="ok")
+                       skipped=state["skipped"], outcome="ok")
 
 
 def rollback_cmd(argv: list[str]) -> None:
