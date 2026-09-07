@@ -178,6 +178,24 @@ def test_populated_via_api_ignores_empty_values():
     assert common.populated_via_api(api, "tags") == {1}
 
 
+def test_field_is_multiple_via_api_matches_the_sqlite_answer():
+    """One meaning of "multi", two readers (tags, a multi custom column, a single-value custom
+    column) — the in-process answer must never disagree with the sqlite one, or the apply-time
+    conflict check plan 01-06 adds could compare a book's tags as a set on one path and as a
+    string on the other."""
+    d = tempfile.mkdtemp()
+    con = fixture_db.build(os.path.join(d, "metadata.db"), [{"id": 1, "tags": ["a"]}],
+                           custom=[("fandoms", {1: ["Naruto", "Bleach"]}), ("status", {1: "Hiatus"})],
+                           multi_labels=("fandoms",))
+    con.commit()
+    api = FakeApi(fields=("tags", "#fandoms", "#status"), multi=("tags", "#fandoms"))
+    try:
+        for field in ("tags", "#fandoms", "#status"):
+            assert common.field_is_multiple_via_api(api, field) == common.column_is_multiple(con, field), field
+    finally:
+        con.close()
+
+
 # ---------------- the snapshot (NLSpec B2.2) ----------------
 def _lib(n=5):
     """A throwaway library dir with a metadata.db — never the user's $CALIBRE_LIBRARY."""

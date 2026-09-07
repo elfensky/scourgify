@@ -9,7 +9,7 @@ used to each carry a private copy of:
   - the single write funnel: run_writer() -> calibre-debug -e _writer.py
     (backs up metadata.db to data/backups/ before every write; refuses to run while Calibre is open)
 """
-import os, re, sys, csv, time, glob, hashlib, sqlite3, contextlib, collections, unicodedata
+import os, re, sys, csv, time, glob, hashlib, sqlite3, contextlib, collections, unicodedata, dataclasses
 
 HERE = os.path.dirname(os.path.abspath(__file__))   # the installed package dir (read-only)
 # Deprecated import-compat alias ONLY — nothing may read this for a runtime path any more.
@@ -824,6 +824,19 @@ def populated_via_api(api, field) -> set:
     guard would then judge a change-set against a library that no longer exists."""
     return {b for b, v in api.all_field_for(field, list(api.all_book_ids())).items() if v}
 
+
+def field_is_multiple_via_api(api, field: str) -> bool:
+    """Is `field` multi-valued, read through Calibre's live new_api — the in-process twin of
+    column_is_multiple(). `tags` is multi by definition; otherwise the same expression ops.py's
+    own `coerce()` computes for itself (ops.py:32). ops.py must stay unchanged and import nothing
+    from scourgify, so this is a DELIBERATE second copy in the module that owns the injected
+    before-state readers — not a shared import across a boundary that exists on purpose. Do not
+    "fix" this by importing across it."""
+    if field == "tags":
+        return True
+    return bool(api.field_metadata.all_metadata().get(field, {}).get("is_multiple"))
+
+
 def check_wipe(ops: list[dict], populated) -> None:
     """Raise GuardrailError if `ops` would catastrophically empty a populated column.
 
@@ -876,88 +889,164 @@ def backup_db(dst: str | None = None, src: str | None = None) -> str:
     return dst
 
 
+@dataclasses.dataclass
+class WriteResult:
+    """The ONE structured shape both write transports return, instead of write_ops() returning
+    None and run_writer() only printing. Lets a caller (the CLI, phase 2's diff-after, a future
+    plugin dialog) read what happened without re-deriving it from local variables. `skipped` is
+    always [] in this plan — plan 01-06's apply-time conflict check is what populates it."""
+    run_id: str | None
+    backup: str | None
+    ops: int
+    books: int
+    skipped: list
+    outcome: str
+
+
+@contextlib.contextmanager
+def _write_run(ops, tool, scope, force, out, populated, read, is_multi, lib_uuid, lib_path,
+               engine=None, model=None):
+    """THE shared pre-write protocol both write_ops (in-process) and run_writer (CLI subprocess)
+    call — issue #71's "closes the pre-write protocol half". In order, and no other:
+
+        1. drop set_field ops with an empty values map — an all-empty change-set is a no-op
+        2. (the write-run lock, keyed by library uuid, inserted by plan 01-04 Task 2)
+        3. check_wipe(), unless force
+        4. the before-read (editlog.before_values)
+        5. the snapshot (backup_db), then the explicit prune backup_db(dst=...) disables
+        6. editlog.start()
+        7. yield the prepared state to the caller, which performs the actual apply
+        8. on exit, editlog.finish() via a `finally` and an outcome flag — never a broad
+           catch-that-reraises-after-logging (the shape write_ops used before this refactor), so
+           a cancelled or interrupted run still gets a footer without this protocol intercepting
+           an exception it does not own (REVIEW: Codex divergent view on the broad catch)
+
+    `populated`/`read`/`is_multi` are INJECTED exactly like check_wipe's own `populated`
+    parameter (the "one verdict, two readers" pattern): the CLI reads them off read-only sqlite,
+    the in-process transport off Calibre's live new_api. `is_multi` (field -> is it multi-valued)
+    is threaded here but not consumed until plan 01-06 Task 1's apply-time conflict check —
+    accepting an unused-until-then parameter now avoids a signature change in a later wave that
+    would mean re-touching both transports and every test that drives them.
+
+    `lib_uuid`/`lib_path` are the run's library identity. `lib_path` (and the backups directory)
+    are resolved ONCE, here, at the very head of the protocol, and threaded through explicitly
+    for the rest of the run rather than re-read from the process-global common._LIBRARY after the
+    yield — a set_library() from another thread mid-run must not be able to move the snapshot to
+    a different library (REVIEW: Codex agreed concern 3). `lib_uuid`, when the caller supplied
+    one (the in-process transport's live-handle identity), is used for the edit log header and
+    for the write-run lock's key (see _write_lock_key)."""
+    from scourgify import editlog
+    # Capture the run's library state ONCE, before anything else — see the docstring above.
+    lib_path = lib_path or library()
+    bdir = backups_dir()
+    filtered = [o for o in ops if o.get("op") != "set_field" or o.get("values")]
+    if not filtered:
+        out("  (nothing to write)")
+        yield None
+        return
+    # (Task 2 inserts the write-run lock's acquire here, spanning through the release below.)
+    if not force:
+        check_wipe(filtered, populated)
+    # ...but the log's before-read is NOT conditional on the guard: --force means "skip the
+    # guard", not "write blind", and a forced run is the one most likely to need undo.
+    before = editlog.before_values(read, filtered)
+    bak = backup_db(dst=_backup_path(bdir), src=os.path.join(lib_path, "metadata.db"))
+    out(f"  backup: {bak}   (restore: scourgify rollback)")
+    # backup_db(dst=...) turns its OWN prune off (it only prunes when dst is None) — the
+    # per-library BACKUP_KEEP/BACKUP_BUDGET/BACKUP_MIN budget (D-04) still applies, so prune
+    # explicitly.
+    _prune_backups(dirpath=bdir)
+    rec = editlog.start(tool, filtered, before, scope=scope, library=lib_uuid,
+                        engine=engine, model=model)
+    outcome = "failed"
+    try:
+        yield {"ops": filtered, "rec": rec, "backup": bak}
+        outcome = "ok"
+    finally:
+        editlog.finish(rec, outcome)
+        # (Task 2 inserts the write-run lock's release here.)
+
+
 def write_ops(api, ops: list[dict], force: bool = False, out=print,
-              tool: str = "plugin", scope=None, engine=None, model=None) -> None:
+              tool: str = "plugin", scope=None, engine=None, model=None) -> WriteResult:
     """Apply write-ops IN-PROCESS through Calibre's live handle — the plugin's write path.
 
     This is why a plugin never needs run_writer(), which shells out to a SECOND process writing a
     library the GUI holds open (#53 — and the process-scan guard reads False from inside the GUI,
     so it cannot be relied on to catch that mistake; this function removes the possibility).
 
-    Same guards as the CLI, by construction: the wipe guard (read through new_api), a snapshot
-    before any write, and the edit log — all shared functions. calibre_open() is skipped BY
-    DESIGN — in-process there is no second writer to detect; we are the writer it exists to keep
-    alone."""
-    from scourgify import editlog
+    Same guards as the CLI, by construction — both funnel through the ONE shared pre-write
+    protocol, _write_run(). calibre_open() is skipped BY DESIGN — in-process there is no second
+    writer to detect; we are the writer it exists to keep alone. Never calls run_writer()."""
     from scourgify.ops import apply_ops
-    ops = [o for o in ops if o.get("op") != "set_field" or o.get("values")]
-    if not ops: out("  (nothing to write)"); return
-    if not force: check_wipe(ops, lambda f: populated_via_api(api, f))
-    before = editlog.before_values(lambda f, bs: values_via_api(api, f, bs), ops)
-    out(f"  backup: {backup_db()}   (restore: scourgify rollback)")
-    rec = editlog.start(tool, ops, before, scope=scope, library=getattr(api, "library_id", None),
-                        engine=engine, model=model)
-    try:
-        apply_ops(api, ops, out=out)
-    except BaseException:
-        editlog.finish(rec, "failed"); raise
-    editlog.finish(rec, "ok")
+    lib_uuid = getattr(api, "library_id", None)
+    with _write_run(ops, tool, scope, force, out,
+                    populated=lambda f: populated_via_api(api, f),
+                    read=lambda f, bs: values_via_api(api, f, bs),
+                    is_multi=lambda f: field_is_multiple_via_api(api, f),
+                    lib_uuid=lib_uuid, lib_path=None, engine=engine, model=model) as state:
+        if state is None:
+            return WriteResult(run_id=None, backup=None, ops=0, books=0, skipped=[], outcome="noop")
+        apply_ops(api, state["ops"], out=out)
+    rec = state["rec"]
+    return WriteResult(run_id=rec["run"], backup=state["backup"], ops=rec["ops"], books=rec["books"],
+                       skipped=[], outcome="ok")
 
 
-def run_writer(ops: list[dict], force: bool = False, tool: str = "scourgify", scope=None) -> None:
+def run_writer(ops: list[dict], force: bool = False, tool: str = "scourgify", scope=None) -> WriteResult:
     """Apply a list of write-ops through Calibre by shelling out to `calibre-debug -e _writer.py`.
     Automatically snapshots metadata.db to data/backups/ first — every write path gets a rollback
     point for free (restore with `scourgify rollback`). Refuses (before writing) a change-set that
     would catastrophically empty a populated column; --force overrides. Appends the edit log.
 
-    The guard, the snapshot and the log are the SHARED functions (check_wipe / backup_db /
-    editlog) an in-process plugin writer uses too — see write_ops(). Only the process model
-    differs. GuardrailError is converted back to SystemExit here so CLI exit codes and messages
-    are unchanged.
+    The guard, the snapshot and the log are the ONE shared pre-write protocol (_write_run) an
+    in-process plugin writer uses too — see write_ops(). Only the process model differs.
+    GuardrailError is converted back to SystemExit here so CLI exit codes and messages are
+    unchanged.
 
     The log is captured on THIS side of the subprocess (before-values read from read-only sqlite,
     lines written before `calibre-debug` is spawned), so a test can pin the record shape with the
     subprocess stubbed and no Calibre installed. `tool` names the caller — run_writer cannot know
     it, and a log that cannot say which pass made a change answers none of the questions it
     exists for."""
-    import json, time, tempfile, subprocess, shutil
-    from scourgify import editlog
-    ops = [o for o in ops if o.get("op") != "set_field" or o.get("values")]
-    if not ops: print("  (nothing to write)"); return
+    import json, tempfile, subprocess, shutil
     if calibre_open(): raise SystemExit("Calibre is running — close it first (it locks metadata.db), then re-run.")
+    lib_path = library()
+    state = None
     try:
-        con = ro_connect()
-        try:
-            if not force:                           # last-line wipe guard, before any backup/write
-                check_wipe(ops, lambda f: _populated_books(con, f))
-            # ...but the log's before-read is NOT conditional on the guard: --force means "skip
-            # the guard", not "write blind", and a forced run is the one most likely to need undo.
-            before = editlog.before_values(lambda f, bs: column_values(con, f, bs), ops)
+        with contextlib.closing(ro_connect()) as con:
             lib_uuid = library_uuid(con)
-        finally:
-            con.close()
-        cb = shutil.which("calibre-debug") or "/Applications/calibre.app/Contents/MacOS/calibre-debug"
-        if not (shutil.which("calibre-debug") or os.path.exists(cb)):
-            raise SystemExit("calibre-debug not found (install Calibre's CLI tools).")
-        bak = backup_db()
+            cb = shutil.which("calibre-debug") or "/Applications/calibre.app/Contents/MacOS/calibre-debug"
+            if not (shutil.which("calibre-debug") or os.path.exists(cb)):
+                raise SystemExit("calibre-debug not found (install Calibre's CLI tools).")
+            with _write_run(ops, tool, scope, force, print,
+                            populated=lambda f: _populated_books(con, f),
+                            read=lambda f, bs: column_values(con, f, bs),
+                            is_multi=lambda f: column_is_multiple(con, f),
+                            lib_uuid=lib_uuid, lib_path=lib_path) as state:
+                if state is None:
+                    return WriteResult(run_id=None, backup=None, ops=0, books=0, skipped=[], outcome="noop")
+                f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+                json.dump(state["ops"], f); f.close()
+                print("  → writing via calibre-debug …")
+                try:
+                    # generous ceiling: a real batch write finishes in seconds/minutes — this
+                    # only catches a wedged calibre-debug so a scripted/CI run can't hang forever.
+                    rc = subprocess.run([cb, "-e", os.path.join(HERE, "_writer.py"), "--", f.name],
+                                        env={**os.environ, "CALIBRE_LIBRARY": lib_path}, timeout=3600).returncode
+                finally:
+                    os.unlink(f.name)
+                if rc != 0:
+                    raise RuntimeError(str(rc))
     except GuardrailError as e:
         raise SystemExit(str(e))
-    print(f"  backup: {bak}   (restore: scourgify rollback)")
-    rec = editlog.start(tool, ops, before, scope=scope, library=lib_uuid)
-    f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False); json.dump(ops, f); f.close()
-    print("  → writing via calibre-debug …")
-    try:
-        # generous ceiling: a real batch write finishes in seconds/minutes — this only
-        # catches a wedged calibre-debug so a scripted/CI run can't hang forever.
-        rc = subprocess.run([cb, "-e", os.path.join(HERE, "_writer.py"), "--", f.name],
-                            env={**os.environ, "CALIBRE_LIBRARY": library()}, timeout=3600).returncode
     except subprocess.TimeoutExpired:
-        editlog.finish(rec, "timeout")
-        raise SystemExit(f"writer timed out after 1h (calibre-debug wedged?) — library backup at {bak}")
-    finally:
-        os.unlink(f.name)
-    editlog.finish(rec, "ok" if rc == 0 else "failed")
-    if rc != 0: raise SystemExit(f"writer failed (exit {rc}) — library backup at {bak}")
+        raise SystemExit(f"writer timed out after 1h (calibre-debug wedged?) — library backup at {state['backup']}")
+    except RuntimeError as e:
+        raise SystemExit(f"writer failed (exit {e}) — library backup at {state['backup']}")
+    rec = state["rec"]
+    return WriteResult(run_id=rec["run"], backup=state["backup"], ops=rec["ops"], books=rec["books"],
+                       skipped=[], outcome="ok")
 
 
 def rollback_cmd(argv: list[str]) -> None:
