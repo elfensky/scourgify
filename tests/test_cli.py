@@ -99,6 +99,61 @@ def test_the_wizard_asks_but_never_does_the_work():
         assert callable(fn)
 
 
+def test_report_glyphs_survive_a_reconfigured_cp1252_stream():
+    """The Windows regression found on ci.yml run 34144520181 (test-windows job): rendering a
+    report.py table containing U+2212 (report.py's "dropped" marker, − — not a plain hyphen)
+    raised UnicodeEncodeError when the destination stream's encoding was cp1252, Windows' legacy
+    console default. cli.main() fixes this by reconfiguring sys.stdout/sys.stderr to UTF-8 with
+    errors="replace" before dispatch (Windows only; report.py itself must never touch process
+    streams as an import-time side effect — it runs inside Calibre jobs too).
+
+    This test does not depend on sys.platform == "win32" (rich's own "legacy windows console"
+    detection wouldn't even fire on macOS/Linux) — it tests the RECONFIGURE MECHANISM ITSELF, so
+    the assertion is meaningful on every platform this suite runs on: wrap an io.TextIOWrapper
+    around an in-memory buffer with encoding="cp1252" (Windows' failure mode, reproduced without
+    Windows), confirm writing report.py's own glyphs to it actually raises without the fix (the
+    premise is not vacuous), then apply the exact fix (`stream.reconfigure(encoding="utf-8",
+    errors="replace")`) and confirm a real report.table() render through that same stream no
+    longer raises."""
+    from scourgify import report
+
+    if not report.RICH:
+        return  # nothing to reconfigure without rich; the plain-text path is plain print()
+
+    glyph_rows = [["3", "tags", "− also (dropped)"], ["1", "genres", "→ Angst · ✓ done"]]
+
+    def render_through(stream):
+        real_console = report.console
+        report.console = report.Console(file=stream)
+        try:
+            report.table("mass folds — same change on 3+ books", ["books", "where", "change"], glyph_rows)
+            stream.flush()
+        finally:
+            report.console = real_console
+
+    # 1. Premise check: an UN-reconfigured cp1252 stream really does crash on these glyphs —
+    #    otherwise this test would pass vacuously regardless of the fix.
+    buf = io.BytesIO()
+    cp1252_stream = io.TextIOWrapper(buf, encoding="cp1252")
+    raised = False
+    try:
+        render_through(cp1252_stream)
+    except UnicodeEncodeError:
+        raised = True
+    assert raised, "fixture glyphs must be un-encodable in cp1252, or this test proves nothing"
+
+    # 2. The actual fix, applied directly to the same kind of stream (mirrors cli.main() exactly,
+    #    without depending on sys.platform == "win32" to exercise it).
+    buf2 = io.BytesIO()
+    fixed_stream = io.TextIOWrapper(buf2, encoding="cp1252")
+    fixed_stream.reconfigure(encoding="utf-8", errors="replace")
+    render_through(fixed_stream)  # must not raise
+
+    # sanity: the bytes that landed are valid UTF-8 and carry the glyphs, not silently dropped
+    written = buf2.getvalue().decode("utf-8")
+    assert "−" in written or "-" in written  # the "dropped" marker, in some form
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

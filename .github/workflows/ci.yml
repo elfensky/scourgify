@@ -63,6 +63,12 @@ jobs:
     # making it a REQUIRED check on `main` is a branch-protection setting, not
     # something this file can express (see 01-02-PLAN.md Task 3).
     runs-on: windows-latest
+    env:
+      # Covers the TEST HARNESS only: these tests call wrangle.main() and friends directly,
+      # bypassing cli.py's UTF-8 stdout/stderr reconfigure entirely -- a real user never does
+      # that. This is not the user-facing fix (src/scourgify/cli.py is); it just keeps this
+      # job from failing on the same console-encoding defect for a reason a real user wouldn't hit.
+      PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v6.0.2
 
