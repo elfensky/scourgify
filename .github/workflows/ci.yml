@@ -215,7 +215,16 @@ jobs:
 
           if sh linux-installer.sh version="${{ env.CALIBRE_VERSION }}" install_dir="$PREFIX" isolated=y 2>&1 | tee calibre-install.log; then
             echo "install mode: unprivileged (install_dir=/isolated=y)" | tee -a calibre-install.log
-            echo "CALIBRE_BIN=$PREFIX/calibre-debug" >> "$GITHUB_ENV"
+            # The installer's own log says "Installing to <install_dir>/calibre" — one level
+            # deeper than install_dir itself (run 34144520181 assumed a flat layout and got
+            # "No such file or directory"). If a future installer version changes this again,
+            # print the actual tree so the run diagnoses itself instead of costing a round trip.
+            if [ ! -x "$PREFIX/calibre/calibre-debug" ]; then
+              echo "calibre-debug not found at $PREFIX/calibre/calibre-debug — actual tree:" | tee -a calibre-install.log
+              ls -R "$PREFIX" | head -50 | tee -a calibre-install.log
+              exit 1
+            fi
+            echo "CALIBRE_BIN=$PREFIX/calibre/calibre-debug" >> "$GITHUB_ENV"
           else
             echo "unprivileged install failed — falling back to sudo sh (the named fallback; GitHub Linux runners have passwordless sudo)" | tee -a calibre-install.log
             sudo sh linux-installer.sh version="${{ env.CALIBRE_VERSION }}" 2>&1 | tee -a calibre-install.log
