@@ -12,7 +12,12 @@ used to each carry a private copy of:
 import os, re, sys, csv, time, glob, hashlib, sqlite3, contextlib, collections, unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))   # the installed package dir (read-only)
-DEFAULTS = os.path.join(HERE, "defaults")            # bundled generic maps — ship inside the package
+# Deprecated import-compat alias ONLY — nothing may read this for a runtime path any more.
+# Runtime reads of every shipped read-only file (defaults/, classify_vocab*.txt, afm.swift) go
+# through defaults_dir() below, which resolves correctly whether HERE is a real directory (a
+# normal install) or a zip-internal path (the Calibre plugin, where os.path.exists() is False
+# for everything under it).
+DEFAULTS = os.path.join(HERE, "defaults")
 
 
 def user_dir() -> str:
@@ -30,6 +35,156 @@ def user_dir() -> str:
         if appdata:
             return os.path.join(appdata, "scourgify")
     return os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "scourgify")
+
+
+# ---------------- bundled read-only resources (defaults/, afm.swift) ----------------
+def _core_version() -> str:
+    """The cache key for defaults_dir()'s extraction under user_dir()/cache/<core version>/ —
+    never empty, and sanitized for use as a directory name (a version string reaches the
+    filesystem here). In order: the zip's own stamped scourgify/_plugin_version.py (written by
+    build_plugin.py into every zip, so it exists by construction whenever THIS module is actually
+    running from inside one); else importlib.metadata's installed-package version; else
+    scourgify.__version__'s own fallback; else the literal 0.0.0+local (matching
+    src/scourgify/__init__.py's own fallback). The cache is only ever POPULATED on the zip path,
+    where _plugin_version exists by construction, so a wheel install and a zip install can never
+    end up sharing one cache directory by accident (REVIEW: OpenCode agreed concern 2)."""
+    v = None
+    try:
+        from scourgify import _plugin_version
+        v = _plugin_version.VERSION
+    except ImportError:
+        v = None
+    if not v:
+        try:
+            import importlib.metadata
+            v = importlib.metadata.version("scourgify")
+        except importlib.metadata.PackageNotFoundError:
+            v = None
+    if not v:
+        try:
+            from scourgify import __version__ as pkg_version
+            v = pkg_version
+        except ImportError:
+            v = None
+    if not v:
+        v = "0.0.0+local"
+    for sep in (os.sep, "/", "\\"):
+        v = v.replace(sep, "-")
+    return v
+
+
+def _archive_path() -> str | None:
+    """The zip this module was imported from, or None on a normal (directory) install.
+
+    Asks the IMPORT SYSTEM first, the filesystem second (REVIEW: Codex agreed concern 2 — the
+    loader's own answer does not depend on the zip's internal layout, so it goes first even
+    though the walk-up happens to work for this repo's). Every return path is guarded by
+    os.path.isfile — a result that does not exist on disk is never returned; it becomes None
+    instead of a guess."""
+    if os.path.isdir(HERE):
+        return None
+    loader = getattr(globals().get("__spec__"), "loader", None) or globals().get("__loader__")
+    candidate = getattr(loader, "archive", None)
+    if not candidate:
+        p = HERE
+        while True:
+            parent = os.path.dirname(p)
+            if not parent or parent == p:
+                candidate = None
+                break
+            if os.path.isfile(parent):
+                candidate = parent
+                break
+            p = parent
+    return candidate if candidate and os.path.isfile(candidate) else None
+
+
+def _extract_defaults(archive: str, cache_root: str, version: str) -> None:
+    """Windows-safe, race-safe extraction of every shipped read-only file under the zip's
+    scourgify/defaults/ prefix (plus scourgify/afm.swift — extracted to cache_root/afm.swift,
+    a sibling of cache_root/defaults/, mirroring HERE's own layout of afm.swift beside defaults/)
+    into a UNIQUE sibling temp directory, moved into `cache_root` with a single os.rename ONLY
+    when `cache_root` is still absent.
+
+    Never a directory-replacing rename (the os.replace flavor) — replacing an existing directory is not portable to
+    Windows, and would let one process pull a tree out from under another's concurrent readers.
+    If the rename raises (another process won the race and populated cache_root first), the temp
+    tree is discarded and the now-warm cache_root is used as-is — concurrent extraction by two
+    Calibre jobs is benign, not merely unlikely. Every member's destination is checked against
+    os.path.realpath(temp_root) before it is opened, so a zip-slip name (or a symlinked
+    intermediate directory) is refused with GuardrailError rather than written (CWE-22)."""
+    import zipfile, shutil, uuid as _uuid_mod
+    cache_parent = os.path.dirname(cache_root)
+    os.makedirs(cache_parent, exist_ok=True)
+    temp_root = os.path.join(cache_parent, f".tmp-{version}-{os.getpid()}-{_uuid_mod.uuid4().hex[:8]}")
+    try:
+        os.makedirs(temp_root)
+        try:
+            zf = zipfile.ZipFile(archive)
+        except (OSError, zipfile.BadZipFile) as e:
+            raise GuardrailError(
+                f"scourgify's bundled data layer could not be opened from {archive} ({e}) — "
+                "refusing to normalize against an empty taxonomy.")
+        with zf:
+            names = [n for n in zf.namelist()
+                     if not n.endswith("/") and
+                     (n.startswith("scourgify/defaults/") or n == "scourgify/afm.swift")]
+            if not names:
+                raise GuardrailError(
+                    f"{archive} holds no scourgify/defaults members — refusing to normalize "
+                    "against an empty taxonomy.")
+            temp_real = os.path.realpath(temp_root)
+            for name in names:
+                rel = name[len("scourgify/"):]           # "defaults/..." or "afm.swift"
+                dest = os.path.join(temp_root, *rel.split("/"))
+                dest_real = os.path.realpath(dest)
+                if not (dest_real == temp_real or dest_real.startswith(temp_real + os.sep)):
+                    raise GuardrailError(
+                        f"refusing to extract {name!r} from {archive} — its destination escapes "
+                        "the extraction root.")
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with zf.open(name) as src, open(dest, "xb") as out:
+                    shutil.copyfileobj(src, out)
+        # The marker is written LAST, inside the temp tree, so a half-extraction is never
+        # mistaken for a warm cache.
+        with open(os.path.join(temp_root, ".extracted"), "w", encoding="utf-8") as f:
+            f.write("ok\n")
+    except BaseException:
+        shutil.rmtree(temp_root, ignore_errors=True)
+        raise
+    if os.path.exists(cache_root):
+        shutil.rmtree(temp_root, ignore_errors=True)      # someone else already won — discard ours
+        return
+    try:
+        os.rename(temp_root, cache_root)                  # never a directory-replacing rename
+    except OSError:
+        shutil.rmtree(temp_root, ignore_errors=True)       # lost the race — use the warm cache
+
+
+def defaults_dir() -> str:
+    """THE resolver for every shipped read-only file the core opens at runtime — defaults/
+    (including defaults/ao3/), classify_vocab*.txt, and afm.swift. On a normal install, returns
+    the package's own defaults/ directory unchanged and creates nothing on disk. Inside the
+    Calibre plugin zip, extracts once into user_dir()/cache/<core version>/defaults/ (see
+    _extract_defaults — afm.swift lands one level up, at user_dir()/cache/<core version>/afm.swift,
+    the sibling relationship engines.py's afm lookup relies on) and returns that directory. A
+    FUNCTION, never memoized at the user_dir() level: $SCOURGIFY_HOME set after import must still
+    redirect the cache location. Raises GuardrailError — never SystemExit — if the archive cannot
+    be opened or holds no defaults members; this sits on the read path of a Calibre job, where
+    SystemExit would escape ThreadedJob's `except Exception` and kill the worker thread silently."""
+    archive = _archive_path()
+    if archive is None:
+        return os.path.join(HERE, "defaults")
+    version = _core_version()
+    cache_root = os.path.join(user_dir(), "cache", version)
+    marker = os.path.join(cache_root, ".extracted")
+    if not os.path.isfile(marker):
+        _extract_defaults(archive, cache_root, version)
+        if not os.path.isfile(marker):
+            raise GuardrailError(
+                f"scourgify's bundled data layer failed to extract from {archive} into "
+                f"{cache_root} — refusing to normalize against an empty taxonomy.")
+    return os.path.join(cache_root, "defaults")
 
 
 # Per-run + per-user files live under user_dir(), not site-packages nor the invoking CWD:
