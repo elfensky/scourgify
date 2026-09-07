@@ -316,13 +316,18 @@ def _proposal_files():
     return fs
 
 
-def backfill_plan(ledger_path: str | None = None) -> tuple[dict, dict]:
-    """-> (chg {book: sorted full tag set}, adds {book: set(new tags)}) for books that
-    should carry a promoted/aliased tag but don't yet. Reads the ledger + all proposals + live tags."""
+def backfill_plan(ledger_path: str | None = None) -> tuple[dict, dict, dict]:
+    """-> (chg {book: sorted full tag set}, adds {book: set(new tags)}, before {book: sorted tag
+    set at read time}) for books that should carry a promoted/aliased tag but don't yet. Reads
+    the ledger + all proposals + live tags.
+
+    `before` (D-09) is the plan-time tag set the apply-time conflict check's `expected` is built
+    from — the SAME `cur = current_tags(con)` this function already reads, previously discarded
+    once `adds`/`chg` were computed."""
     res = resolve_ledger(read_rows(ledger_path or ledger()))
     rows = [r for pf in _proposal_files() for r in read_rows(pf)]
     want = backfill_wanted(res, rows)
-    if not want: return {}, {}
+    if not want: return {}, {}, {}
     with contextlib.closing(ro_connect()) as con:
         cur = current_tags(con)
         adds = {}
@@ -335,7 +340,8 @@ def backfill_plan(ledger_path: str | None = None) -> tuple[dict, dict]:
     # Last, and only over the handful of tags the cheap filters left: it loads the wrangle maps.
     if adds: adds = backfill_drop_unstable(adds, wrangle_stable({t for v in adds.values() for t in v}))
     chg = {b: sorted(cur.get(b, set()) | new) for b, new in adds.items()}
-    return chg, adds
+    before = {b: sorted(cur.get(b, set())) for b in adds}
+    return chg, adds, before
 
 
 def backfill_step(chg: dict, adds: dict, titles: dict, decide=None) -> dict:
@@ -364,7 +370,7 @@ def backfill(yes: bool = False, step: bool = False, decide=None) -> int:
     Plan.run(ask=)/run(verify_ask=). The wizard used to assemble its own run_writer call here,
     which silently dropped this function's per-book preview — a wizard user saw less before a
     write than a CLI user, and any guard added here would have missed them entirely."""
-    chg, adds = backfill_plan()
+    chg, adds, before = backfill_plan()
     if not chg:
         print("backfill: nothing to do — source books already carry their promoted tags ✓"); return 0
     total = sum(len(v) for v in adds.values())
@@ -391,7 +397,10 @@ def backfill(yes: bool = False, step: bool = False, decide=None) -> int:
             print("  non-interactive: re-run with --yes to write."); return 0
         if not confirm("apply this backfill? (Calibre closed)"):
             print("aborted (nothing written)."); return 0
-    run_writer([op_set_field("tags", chg)], tool="promote", scope=f"backfill, {len(chg)} books")
+    # `expected` (D-09) is built from `before` — the plan-time tag set — over exactly the books
+    # `chg` still names after decide()/backfill_step() may have narrowed it.
+    expected = {b: before[b] for b in chg if b in before}
+    run_writer([op_set_field("tags", chg, expected=expected)], tool="promote", scope=f"backfill, {len(chg)} books")
     print(f"backfilled promoted tags onto {len(chg)} book(s).")
     return len(chg)
 

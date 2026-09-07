@@ -174,6 +174,59 @@ def test_restrict_to_nothing_is_a_clean_no_op():
         os.environ.pop("CALIBRE_LIBRARY", None) if old is None else os.environ.__setitem__("CALIBRE_LIBRARY", old)
 
 
+def test_write_carries_expected_from_perbook_and_skips_drifted_books():
+    """Plan.write()'s op carries `expected` built from self.perbook (per-book state at compute
+    time), NOT self.before (library-wide distinct-value SETS — Codex agreed concern 4, the
+    previous plan text named self.before and was wrong). Mutating one book's tags between compute
+    and write must skip exactly that book. Proved at the near side of the calibre-debug subprocess
+    boundary (the JSON handed to the writer), since a real Calibre write isn't available here."""
+    import contextlib, io, json, shutil, sqlite3, subprocess
+    from scourgify import common
+    lib = tempfile.mkdtemp()
+    build(os.path.join(lib, "metadata.db"),
+          [dict(id=1, added="2026-01-01", tags=["Complete", "Keeper"]),
+           dict(id=2, added="2026-01-02", tags=["Complete", "Other"])]).close()
+    home = tempfile.mkdtemp()
+    old = {k: os.environ.get(k) for k in ("CALIBRE_LIBRARY", "SCOURGIFY_HOME")}
+    os.environ["CALIBRE_LIBRARY"] = lib
+    os.environ["SCOURGIFY_HOME"] = home
+    saved = (subprocess.run, shutil.which, common.calibre_open)
+    captured = []
+
+    def fake_run(cmd, **kw):
+        with open(cmd[-1], encoding="utf-8") as f:
+            captured.append(json.load(f))
+        return type("P", (), {"returncode": 0})()
+    subprocess.run = fake_run
+    shutil.which = lambda name, *a, **k: "/bin/true" if "calibre" in name else saved[1](name, *a, **k)
+    common.calibre_open = lambda: False
+    try:
+        cfg = load_config(path="/nonexistent/config.toml")
+        p = wrangle.plan(cfg, maps(junk_exact={"complete"}))
+        assert p.changes["tags"][1] == ["Keeper"]
+        assert p.changes["tags"][2] == ["Other"]
+        # simulate a Calibre edit between compute() and write(): book 2 gains a brand-new tag,
+        # drifting its raw tag SET away from the perbook state the plan was computed against.
+        con = sqlite3.connect(os.path.join(lib, "metadata.db"))
+        next_id = con.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM tags").fetchone()[0]
+        con.execute("INSERT INTO tags VALUES (?, ?)", (next_id, "Hand-Added"))
+        con.execute("INSERT INTO books_tags_link VALUES (2, ?)", (next_id,))
+        con.commit(); con.close()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            p.write()
+    finally:
+        subprocess.run, shutil.which, common.calibre_open = saved
+        for k, v in old.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+    (ops,) = captured
+    (op,) = [o for o in ops if o["op"] == "set_field" and o["field"] == "tags"]
+    assert set(op["values"]) == {"1"}, op["values"]        # book 2 dropped: its tags drifted
+    # `expected` is the PLAN-TIME (pre-transform) raw tag set — what the column held when the
+    # plan was computed, not the post-transform write value.
+    assert op["expected"]["1"] == ["Complete", "Keeper"], op["expected"]
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

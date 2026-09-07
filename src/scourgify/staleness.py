@@ -81,7 +81,11 @@ def step(status_label: str, rows: list, decide=None) -> list:
 
 
 def write(status_label: str, rows: list) -> None:
-    run_writer([op_set_field(status_label, {b: n for b, o, n, _ in rows})],
+    # `expected` (D-09) is the `old` value compute() already read when it built this change-set —
+    # no fresh read at write time, so a book whose status was hand-edited in between is skipped,
+    # not clobbered.
+    run_writer([op_set_field(status_label, {b: n for b, o, n, _ in rows},
+                             expected={b: o for b, o, n, _ in rows})],
                tool="staleness", scope=f"{len(rows)} books")
 
 

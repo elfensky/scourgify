@@ -300,6 +300,25 @@ def test_apply_keeps_a_good_blurb_writes_a_bad_one_and_stamps_both():
     assert not [o for o in ops if o["op"] == "create_column"]      # the column already exists
 
 
+def test_synopsis_expected_is_the_raw_stored_description_not_the_stripped_one():
+    """The comments op's `expected` (D-09) must be the RAW stored blurb (self.raw_blurbs), not
+    the stripped one (self.blurbs) — comparing a stripped string against the stored HTML would
+    always read as a conflict and silently disable the whole pass. Uses an HTML-bearing, thin
+    (under MIN_JUDGE) blurb so raw and stripped provably differ and the book goes straight to
+    generation without ever being judged."""
+    html_thin = "<i>see</i> inside"
+    books = [dict(id=2, added="2026-01-02 10:00:00", title="Thin Blurb", desc=html_thin)]
+    with lib(books), recording_writer() as recorded:
+        p = synopsis.plan(synopsis.default_opts(apply=True))
+        assert p.raw_blurbs[2] == html_thin
+        assert p.blurbs[2] != html_thin                    # stripped differs — the tags are gone
+        with contextlib.redirect_stdout(io.StringIO()):
+            p.run(ask=FakeAsk(judge="YES", back=BACK))
+    (ops,) = recorded
+    (comments_op,) = [o for o in ops if o["op"] == "set_field" and o["field"] == "comments"]
+    assert comments_op["expected"]["2"] == html_thin, comments_op["expected"]
+
+
 def test_the_stamp_column_is_created_on_first_run():
     with lib(custom=[("updated", {})]), recording_writer() as recorded:
         p = synopsis.plan(synopsis.default_opts(apply=True))

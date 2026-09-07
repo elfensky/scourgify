@@ -380,6 +380,38 @@ def test_apply_decisions_counts_rows_it_could_not_decide():
         assert n["promote"] == 1 and n["skipped"] == 2, n
 
 
+def test_backfill_plan_returns_the_before_tag_set():
+    """backfill_plan's third element is the tag set the book carried BEFORE the promoted tags are
+    added — the plan-time state 01-06's apply-time conflict check populates `expected` from.
+    Previously discarded (`cur` was read and thrown away — Codex agreed concern 4)."""
+    import tempfile
+    from scourgify import artifacts, promote
+    d = tempfile.mkdtemp()
+    home = os.path.join(d, "home"); lib = os.path.join(d, "lib")
+    os.makedirs(lib, exist_ok=True); os.makedirs(os.path.join(home, "overrides"), exist_ok=True)
+    # book 1 already has "Existing"; the promoted tag "Fluff" should backfill onto it.
+    fixture_db.build(os.path.join(lib, "metadata.db"),
+                     [{"id": 1, "tags": ["Existing"]}], uuid="uuid-backfill-before").close()
+    old = {k: os.environ.get(k) for k in ("SCOURGIFY_HOME", "CALIBRE_LIBRARY")}
+    os.environ["SCOURGIFY_HOME"] = home
+    os.environ["CALIBRE_LIBRARY"] = lib
+    common.clear_uuid_cache()
+    try:
+        os.makedirs(common.data_dir(), exist_ok=True)
+        with open(artifacts.ledger(), "w", newline="", encoding="utf-8") as f:
+            f.write("tag,verdict,target\nFluff,promote,\n")
+        artifacts.write_proposal([{"book_id": 1, "title": "b1", "added_tags": [],
+                                   "proposed_new": ["Fluff"]}])
+        chg, adds, before = promote.backfill_plan()
+    finally:
+        for k, v in old.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+        common.clear_uuid_cache()
+    assert adds == {1: {"Fluff"}}
+    assert chg == {1: ["Existing", "Fluff"]}
+    assert before == {1: ["Existing"]}                 # the book's tag set BEFORE the backfill
+
+
 def test_backfill_drop_redundant_is_case_and_punctuation_insensitive():
     """The strip wrangle performs is norm()-based, so the guard has to match on norm too or the
     loop comes straight back for 'Sci-Fi' vs 'sci fi'."""

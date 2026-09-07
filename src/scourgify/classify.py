@@ -236,20 +236,34 @@ def apply_proposal(rows: list | None = None) -> None:
         cur = current_tags(con)
         known = {b for (b,) in con.execute("SELECT id FROM books")}
         have_wrangled = custom_column_id(con, "wrangled") is not None
-    chg, processed, stale = {}, [], []
+    chg, expected, processed, stale = {}, {}, [], []
     for r in rows:
         b = r["book_id"]
         if b not in known:                         # a row can outlive its book (deleted / re-imported with
             stale.append(b); continue              # a new id) — a dead id would FK-abort the whole write
         processed.append(b)
-        if r["added_tags"]: chg[b] = sorted(cur.get(b, set()) | set(r["added_tags"]))   # union with current tags
+        if r["added_tags"]:
+            chg[b] = sorted(cur.get(b, set()) | set(r["added_tags"]))   # union with current tags
+            # `expected` (D-09) is `cur` — read right here, at the head of THIS function — not the
+            # proposal row's own (nonexistent) before-state. Why not the proposal? The proposal
+            # schema (artifacts.PROP_COLS) carries no before-state column, and adding one is
+            # deliberately rejected: the WRITE plan (cur | added_tags) is computed HERE, so `cur`
+            # IS its before-state by definition; a proposal-time expected would instead skip any
+            # book whose tags changed at all since the LLM ran, while op_stamp_now("#wrangled",
+            # processed) below still stamps it (stamps carry no expected, D-09) — permanently
+            # retiring that book from the --unclassified backlog having never been tagged. The
+            # window this producer protects is read-time -> write-time, not proposal-time ->
+            # write-time. A conflict-skipped book here is therefore still stamped and leaves the
+            # backlog untagged — accepted for this phase and visible via the skipped list on the
+            # footer/WriteResult/CLI output; phase 2's diff-after turns it into a retry.
+            expected[b] = sorted(cur.get(b, set()))
     if stale:
         print(f"  note: {len(stale)} stale proposal row(s) for books no longer in the library — skipped: {stale[:10]}")
     ops = []
     if not have_wrangled:                                             # first run: create + backfill whole library as wrangled-now
         ops.append(op_create_column("wrangled", "Wrangled", "datetime"))
         ops.append(op_stamp_now("#wrangled"))
-    ops.append(op_set_field("tags", chg))
+    ops.append(op_set_field("tags", chg, expected=expected))
     # stamp EVERY processed book, tagged or not — an unstamped no-tag book would be re-sent to the LLM forever
     ops.append(op_stamp_now("#wrangled", processed))
     # engine/model stay unset here: --apply is its own invocation and the proposal CSV does not

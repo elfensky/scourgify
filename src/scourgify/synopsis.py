@@ -188,7 +188,14 @@ class Plan:
                 ids = select.pick(con, "unsynopsized")
             self.scope = ("named ids" if a.books is not None else
                           f"last {a.last} added" if a.last else "the synopsis queue")
-            self.blurbs = {b: strip_html(t) for b, t in con.execute("SELECT book, text FROM comments")}
+            # One query, reused: self.raw_blurbs keeps the STORED (unstripped) text — the
+            # apply-time conflict check's `expected` for the comments op must compare like with
+            # like against the before-read (also unstripped, common.column_values); comparing a
+            # stripped string against stored HTML would always read as a conflict and silently
+            # write nothing (D-09).
+            comments_rows = list(con.execute("SELECT book, text FROM comments"))
+            self.raw_blurbs = dict(comments_rows)
+            self.blurbs = {b: strip_html(t) for b, t in comments_rows}
             self.files = booktext.paths(con)
             self.titles = book_titles(con)
             self.have_stamp = custom_column_id(con, STAMP) is not None
@@ -248,9 +255,15 @@ class Plan:
         if not self.have_stamp:
             ops.append(op_create_column("synopsized", "Synopsized", "datetime"))
         if made:
-            ops.append(op_set_field("comments", made))
+            # `expected` (D-09) is the RAW description each book held when this pass judged it —
+            # self.raw_blurbs, not self.blurbs (stripped). See the raw_blurbs comment above.
+            ops.append(op_set_field("comments", made, expected={b: self.raw_blurbs.get(b) for b in made}))
         # Stamp EVERY settled book, generated or kept — an unstamped kept blurb would be re-read
         # and re-judged on every future sweep, which is classify's no-tag bug in a new field.
+        # #synopsized carries no `expected` (D-09) — a conflict-skipped comments write still
+        # stamps its book, leaving it settled-but-unwritten; accepted for this phase (see the
+        # classify apply_proposal comment for the identical trade-off) and visible via the
+        # skipped list on the footer/WriteResult/CLI output.
         ops.append(op_stamp_now(STAMP, sorted(set(made) | set(kept))))
         run_writer(ops, tool="synopsis", scope=f"{len(made)} written, {len(kept)} kept")
         report.say(f"settled {len(made) + len(kept)} book(s): {len(made)} new synopses, "

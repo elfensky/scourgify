@@ -122,7 +122,9 @@ def test_apply_proposal_ops_union_stamp_archive():
         finally:
             classify.run_writer = saved
         (ops,) = recorded
-        assert common.op_set_field("tags", {1: ["New", "Old"]}) in ops       # union, sorted
+        # union, sorted; `expected` (D-09/plan 01-06) is the book's tags AT READ TIME (the state
+        # the union was computed against) — book 1 held ["Old"] before this run.
+        assert common.op_set_field("tags", {1: ["New", "Old"]}, expected={1: ["Old"]}) in ops
         assert common.op_stamp_now("#wrangled", [1, 2]) in ops               # BOTH books stamped
         assert not any(o["op"] == "create_column" for o in ops)              # column already exists
         assert not os.path.exists(artifacts.prop()) and len(artifacts.applied_proposals()) == 1
@@ -205,7 +207,7 @@ def test_apply_proposal_skips_rows_for_deleted_books():
         finally:
             classify.run_writer = saved
         (ops,) = recorded
-        assert common.op_set_field("tags", {1: ["New"]}) in ops              # live book applies
+        assert common.op_set_field("tags", {1: ["New"]}, expected={1: []}) in ops   # live book applies
         assert common.op_stamp_now("#wrangled", [1]) in ops                  # stale id 99 not stamped
         assert not any("99" in str(o.get("values", {})) or 99 in (o.get("books") or []) for o in ops)
 

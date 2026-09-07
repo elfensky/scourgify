@@ -423,8 +423,18 @@ class Plan:
     def write(self, force: bool = False) -> None:
         # pass force through: the plan's own data_loss/tag_loss guards already ran, so a deliberately
         # --forced deletion here must not be second-guessed by run_writer's coarse last-line wipe guard.
-        run_writer([op_set_field(lab, ch) for lab, ch in self.changes.items()], force=force,
-                   tool="wrangle", scope=self.scope)
+        #
+        # `expected` (D-09) is built from self.perbook — the per-book state THIS plan was computed
+        # against at __init__ time — NOT self.before, which is {column key: set of distinct values}
+        # for the library-wide audit report and holds no per-book state at all. sorted() matches the
+        # shape the transport's before-read returns for a multi-valued column, so editlog.conflict
+        # compares like with like; restrict() narrows it for free because it narrows self.changes.
+        ops = []
+        for lab, ch in self.changes.items():
+            k = next(key for key, label in self.cols.items() if label == lab)
+            expected = {b: sorted(self.perbook[b].get(k, [])) for b in ch}
+            ops.append(op_set_field(lab, ch, expected=expected))
+        run_writer(ops, force=force, tool="wrangle", scope=self.scope)
 
     def audit_report(self) -> None:
         """The full `scourgify audit` output: distinct-value deltas, SAFETY, and per-rule examples
