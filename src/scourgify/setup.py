@@ -70,8 +70,23 @@ def write_config(colmap: dict, beh: dict | None = None) -> None:
     open(os.path.join(user_dir(), "config.toml"), "w", encoding="utf-8").write("\n".join(L))
 
 
-def setup(cfg: dict, yes: bool = False) -> None:
+def _fff_installed() -> bool | None:
+    """Is the FanFicFare Calibre plugin installed? True / False / None (couldn't query) — the
+    ONE place setup()'s health check spawns a process, extracted into a NAMED function a caller
+    can replace (the same injectable-callback seam check_wipe's `populated`, `Plan.run(ask=)` and
+    `promote.backfill(decide=)` already use) rather than have the spawn buried inside setup()'s
+    flow."""
     import subprocess, shutil
+    try:
+        out = (subprocess.run(["calibre-customize", "-l"], capture_output=True, text=True,
+                              timeout=30).stdout
+               if shutil.which("calibre-customize") else "")
+    except Exception:
+        return None
+    return ("fanficfare" in out.lower()) if out else None
+
+
+def setup(cfg: dict, yes: bool = False, fff_probe=None) -> None:
     asking = interactive() and not yes
     def _ask(prompt: str, default: bool = True) -> bool:
         """y/n prompt; off a TTY (pipe / CI / --yes) take the recommended default instead of blocking."""
@@ -86,10 +101,7 @@ def setup(cfg: dict, yes: bool = False) -> None:
 
         # [2] FanFicFare: installed? configured? known gotchas?
         print("\n[2] FanFicFare")
-        try:
-            out = subprocess.run(["calibre-customize", "-l"], capture_output=True, text=True, timeout=30).stdout if shutil.which("calibre-customize") else ""
-            installed = ("fanficfare" in out.lower()) if out else None
-        except Exception: installed = None
+        installed = (fff_probe or _fff_installed)()
         print(f"  {OK} plugin installed" if installed else
               f"  {BAD} plugin NOT installed (Calibre → Preferences → Plugins → Get new plugins → FanFicFare)" if installed is False else
               f"  {WARN} couldn't query plugins (continuing)")

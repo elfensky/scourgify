@@ -121,6 +121,104 @@ JOB_REACHABLE = ["common", "editlog", "select", "artifacts", "overrides", "engin
 SYSTEM_EXIT_OK = {"run_writer", "rollback_cmd"}
 
 
+def _owner_map(tree):
+    """{node: qualified enclosing function name} for every node inside a FunctionDef/
+    AsyncFunctionDef — "Class.method" when the function is a class body item, else the bare
+    function name. Module-level nodes are absent (their "owner" is "<module>")."""
+    import ast
+    parent = {}
+    for n in ast.walk(tree):
+        for c in ast.iter_child_nodes(n):
+            parent[c] = n
+    owner = {}
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            p = parent.get(n)
+            name = f"{p.name}.{n.name}" if isinstance(p, ast.ClassDef) else n.name
+            for c in ast.walk(n):
+                owner.setdefault(c, name)
+    return owner
+
+
+def _spawn_refs(path):
+    """-> [(function name, line)] for every REFERENCE to subprocess.*/os.system/os.popen/
+    multiprocessing.* anywhere in `path`. A bare `import subprocess` is not itself flagged — only
+    an attribute access on the module (`.run`, `.Popen`, `.Pool`, …) counts as "spawning", so a
+    module that merely imports subprocess for a type hint or an exception class in a docstring's
+    neighbourhood isn't a false positive. Parsed, not grepped: the docstrings in these modules
+    discuss the very names being checked."""
+    import ast
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    owner = _owner_map(tree)
+    hits = []
+    for n in ast.walk(tree):
+        if not (isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)):
+            continue
+        base = n.value.id
+        if base in ("subprocess", "multiprocessing") or (base == "os" and n.attr in ("system", "popen")):
+            hits.append((owner.get(n, "<module>"), n.lineno))
+    return hits
+
+
+def test_no_job_reachable_code_spawns_a_process():
+    """No job-reachable module spawns a process outside an enumerated, named exemption list —
+    a future phase that buries a spawn in a guard is named on failure, not merely intended
+    against. `shutil.which` is a PATH lookup, not a spawn, and _spawn_refs never flags it."""
+    bad = []
+    for m in JOB_REACHABLE:
+        path = os.path.join(SRC, "scourgify", f"{m}.py")
+        for fn, line in _spawn_refs(path):
+            if m == "booktext":
+                continue                                              # every function exempted
+            if m == "engines" and fn.startswith("Apple."):
+                continue                                              # engines.Apple's methods only
+            if m == "common" and fn in ("run_writer", "rollback_cmd", "calibre_open"):
+                continue
+            if m == "setup" and fn == "_fff_installed":
+                continue
+            bad.append(f"{m}.py:{line} in {fn}()")
+    assert not bad, ("a process spawn was found outside the enumerated exemption list "
+                     "(common.run_writer/rollback_cmd/calibre_open, setup._fff_installed, "
+                     "booktext.*, engines.Apple.*):\n  " + "\n  ".join(bad))
+
+
+def test_calibre_open_is_only_reachable_from_the_cli_funnels():
+    """FOUND-07's actual claim, stated as a check: the shared pre-write protocol and the
+    in-process transport must NEVER reach calibre_open() — only the two CLI-only funnels may."""
+    import ast
+    path = os.path.join(SRC, "scourgify", "common.py")
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    owner = _owner_map(tree)
+    callers = {owner.get(n, "<module>") for n in ast.walk(tree)
+              if isinstance(n, ast.Name) and n.id == "calibre_open"}
+    assert callers == {"run_writer", "rollback_cmd"}, callers
+
+
+def test_calibre_open_uses_tasklist_on_windows_and_never_pgrep():
+    """os.name == 'nt' must issue the tasklist filter, never pgrep/ps — and the existing 'no
+    detector available -> fail closed' fallback is preserved on the Windows branch too, not
+    replaced (FOUND-07)."""
+    import scourgify.common as common
+    saved_name, saved_run = os.name, subprocess.run
+    calls = []
+    def fake_ok(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+    def fake_missing(cmd, **kw):
+        raise FileNotFoundError("tasklist not found")
+    try:
+        os.name = "nt"
+        subprocess.run = fake_ok
+        assert common.calibre_open() is False, "tasklist found nothing but calibre_open reported open"
+        assert calls and calls[0][0] == "tasklist", calls
+        assert not any(c[0] in ("pgrep", "ps") for c in calls), "a posix detector ran on a Windows host"
+
+        subprocess.run = fake_missing
+        assert common.calibre_open() is True, "no detector resolvable must fail closed (report open)"
+    finally:
+        os.name, subprocess.run = saved_name, saved_run
+
+
 def _system_exit_sites(path):
     """-> [(function name, line)] for every `raise SystemExit(...)`. Parsed, not grepped: the
     docstrings in these modules discuss SystemExit at length."""

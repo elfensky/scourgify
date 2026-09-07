@@ -690,10 +690,12 @@ def _is_calibre_gui(line):
 
 def calibre_open() -> bool:
     """True if the Calibre GUI appears to be running (it holds metadata.db open, so writes must
-    wait). Two checks, in order: are we ourselves inside the GUI, then best-effort pgrep → ps.
-    If NEITHER binary exists we cannot tell, so fail CLOSED (report open) rather than let a write
-    silently race a live library — the old code returned False (open the gate) here, which
-    disabled the guard entirely on any host without pgrep.
+    wait). Checks, in order: are we ourselves inside the GUI; on Windows, `tasklist` filtered by
+    image name; elsewhere, best-effort pgrep → ps. If no detector is usable we cannot tell, so
+    fail CLOSED (report open) rather than let a write silently race a live library — the old code
+    returned False (open the gate) here, which disabled the guard entirely on any host without
+    pgrep. This fallback is preserved on EVERY branch, including the new Windows one, not just
+    the posix one (FOUND-07).
 
     Deliberately NOT a lock probe: measured 2026-08-05, `BEGIN IMMEDIATE` against metadata.db
     succeeds while the GUI is running. Calibre keeps a connection open but holds no write lock at
@@ -708,6 +710,17 @@ def calibre_open() -> bool:
     # guaranteed to be racing a live library. calibre.gui2 is imported only by the GUI (plain
     # `calibre-debug -e` does not pull it in), so it identifies that context exactly.
     if any(m == "calibre.gui2" or m.startswith("calibre.gui2.") for m in sys.modules): return True
+    if os.name == "nt":
+        # tasklist, never pgrep/ps, on Windows — filtered by exact image name so the CLI tools
+        # (calibre-debug.exe, calibredb.exe, …) are distinct binaries and never match on their
+        # own; _is_calibre_gui's exclusion discipline is reused anyway for consistency with the
+        # posix branch below.
+        try:
+            out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq calibre.exe"],
+                                 capture_output=True, text=True, timeout=5).stdout
+        except Exception:
+            return True   # tasklist itself unusable → undetectable → fail closed, same as posix
+        return any(_is_calibre_gui(l) for l in out.splitlines())
     for cmd in (["pgrep", "-fl", "calibre"], ["ps", "-Ao", "command"]):
         if not shutil.which(cmd[0]): continue
         try:
