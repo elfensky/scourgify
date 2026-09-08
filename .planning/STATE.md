@@ -5,11 +5,11 @@ milestone_name: (the terminal goes away)
 current_phase: 2
 current_phase_name: Write verbs on a selection
 status: planning
-stopped_at: Phase 01 complete, ready to plan Phase 2
-last_updated: "2026-09-08T08:42:10.442Z"
+stopped_at: Phase 2 context gathered
+last_updated: "2026-09-08T19:24:38.747Z"
 last_activity: 2026-09-08
 last_activity_desc: Phase 01 complete, transitioned to Phase 2
-state_head: 13a09a84ecae9a867708b4e28aeedf9ce4a2ddb0
+state_head: 0d6bc095f7c002e981e9b75d7a0f620f5def50bb
 progress:
   total_phases: 6
   completed_phases: 1
@@ -116,6 +116,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-07T20:02:06.150Z
-Stopped at: Phase 01 complete, ready to plan Phase 2
-Resume file: None
+Last session: 2026-09-08T19:24:38.688Z
+Stopped at: Phase 2 context gathered
+Resume file: .planning/phases/02-write-verbs-on-a-selection/02-CONTEXT.md
