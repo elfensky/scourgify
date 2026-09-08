@@ -85,6 +85,25 @@ review-in-library-view or undo button (Phase 5). The CLI and wizard stay unchang
   the job ending cleanly. The job wrapper converts `GuardrailError` to a result; only a real
   exception still reaches `gui.job_exception`.
 
+### Plan-phase additions (settled 2026-09-09, from 02-RESEARCH.md open questions)
+- **D-12:** The job bodies live in a **Qt-free `plugin/jobs.py`**. `action.py` keeps the ONE
+  `ThreadedJob` site (`_run`), the menu, and the Qt wiring; `jobs.py` holds each verb's PLAN and
+  EXECUTE logic and the plain-dict result builders, importing no Qt. That is what makes
+  WRITE-01..07's job-level behaviour (ops assembly, the diff-after result shape) reachable from a
+  plain-assert CI test with no Calibre and no GUI, instead of only through `plugin/selftest.py`
+  under a real Calibre. `jobs.py` joins `MODULES` in `tests/test_plugin_source.py`.
+- **D-13:** The **synopsis verb offers a per-book review before the write** — D-02's tick-list over
+  the proposed descriptions, untick to reject — rather than running straight through like classify.
+  This extends CLAUDE.md's 1-by-1 review invariant to synopsis. Accepted with its cost understood:
+  the pass is a ~40 s/book background sweep, so a per-book gate is a real human bottleneck; the
+  batch size is what keeps a review session finite.
+- **D-14:** #72's import-rule amendment resolves by **tightening the code to its docstring**:
+  `tests/test_plugin_source.py`'s `action.py` check drops the `func.startswith("_")` half, so a core
+  import in `action.py` must sit inside a `job_*` function, full stop. Today only `_open()` uses that
+  exemption, and D-12 moves it to `jobs.py` with the job bodies — after the split the tightening
+  should cost nothing. If something in `action.py` genuinely still needs the core, that is a signal
+  it belongs in `jobs.py`, not a reason to keep the exemption.
+
 ### Claude's Discretion
 - **PLAN → EXECUTE hand-off:** the PLAN job returns a plain, Qt-free result (summary, items
   with payload, the ops list with `expected` values, the consequence label). The EXECUTE job
