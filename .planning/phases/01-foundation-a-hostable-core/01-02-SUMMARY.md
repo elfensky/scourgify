@@ -285,7 +285,32 @@ None. No new security-relevant surface was introduced — the only new "surface"
 
 None — no external service configuration required.
 
-## Outstanding Human Action (NOT done by this plan, and deliberately not attempted)
+## Outstanding Human Action — COMPLETED 2026-09-08
+
+**Branch protection on `main` now requires the three new jobs.** Done after the developer's
+explicit confirmation, once the lane had been green across four consecutive runs. Applied with the
+ADDITIVE contexts endpoint rather than the `PATCH` shown below, specifically so the two checks
+already required (`test (3.10)`, `test (3.13)`) could not be clobbered:
+
+```bash
+gh api -X POST repos/elfensky/scourgify/branches/main/protection/required_status_checks/contexts \
+  -f 'contexts[]=test-windows' \
+  -f 'contexts[]=smoke-calibre-windows' \
+  -f 'contexts[]=smoke-calibre-linux'
+```
+
+Required checks on `main` are now:
+`test (3.10)`, `test (3.13)`, `test-windows`, `smoke-calibre-windows`, `smoke-calibre-linux`.
+Admin enforcement, no-force-push, no-deletion and the 0-approval rule were left untouched.
+
+**Known gap, deliberately NOT changed here:** `test (3.14)` is still not a required check, and never
+was — it predates this phase. That is the version Calibre 9.11 bundles and therefore the interpreter
+the plugin actually runs under, so it is the one most worth requiring. Flagged to the developer;
+adding it was outside the three jobs they approved.
+
+### Original instruction (kept for the record)
+
+#### Outstanding Human Action (NOT done by this plan, and deliberately not attempted)
 
 **Branch protection on `main` is unchanged.** The developer's standing instruction: required status checks are added to `main` only after the lane is green AND on a separate confirmation they have not yet given. The lane IS now green (run [34150694155](https://github.com/elfensky/scourgify/actions/runs/34150694155), all six jobs `success`), but adding the required-checks entries is a distinct action requiring explicit go-ahead.
 
