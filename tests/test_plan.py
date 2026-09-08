@@ -227,6 +227,69 @@ def test_write_carries_expected_from_perbook_and_skips_drifted_books():
     assert op["expected"]["1"] == ["Complete", "Keeper"], op["expected"]
 
 
+def test_write_applies_a_single_valued_column_when_unchanged_and_skips_it_on_real_drift():
+    """CR-01 (code review 2026-09-07): `Plan.write()` builds `expected` from `self.perbook`,
+    which `read_library()` populates via `read_custom_column(con, label, multi=True)`
+    UNCONDITIONALLY for every non-tags column (wrangle.py's own read path, not this test's setup)
+    — so `expected` is always list-shaped, even for a column the real Calibre schema reports as
+    single-valued (`is_multiple=0`). The apply-time conflict filter's before-read
+    (`common.column_values`), by contrast, correctly asks the schema and returns a plain scalar
+    for such a column. Before the fix, comparing `"Naruto Shippuden"`-shaped scalars against
+    `["Naruto"]`-shaped lists meant EVERY op for a single-valued wrangle-managed column
+    (`#fandoms`/`#characters`/`#relationships`/`#genres` on a library that predates scourgify, or
+    one imported from another tool) was reported as drifted and silently, permanently dropped —
+    even on the very first run, when nothing had actually changed. This is the exact scenario
+    `setup.py`'s label-only column adoption (section [4]) can hand a real user.
+
+    Book 1's #fandoms is single-valued and unchanged since the plan was computed — the op must
+    still apply. Book 2's #fandoms is ALSO single-valued, but is genuinely edited directly in
+    Calibre between compute() and write() (simulating another process/the GUI) — that op must
+    still be skipped, proving this fix does not simply disable the conflict filter for
+    single-valued columns."""
+    import contextlib, io, json, shutil, sqlite3, subprocess
+    from scourgify import common
+    lib = tempfile.mkdtemp()
+    build(os.path.join(lib, "metadata.db"),
+          [dict(id=1, added="2026-01-01"), dict(id=2, added="2026-01-02")],
+          custom=[("fandoms", {1: "Naruto", 2: "Bleach"})])   # NOT in multi_labels -> is_multiple=0
+    home = tempfile.mkdtemp()
+    old = {k: os.environ.get(k) for k in ("CALIBRE_LIBRARY", "SCOURGIFY_HOME")}
+    os.environ["CALIBRE_LIBRARY"] = lib
+    os.environ["SCOURGIFY_HOME"] = home
+    saved = (subprocess.run, shutil.which, common.calibre_open)
+    captured = []
+
+    def fake_run(cmd, **kw):
+        with open(cmd[-1], encoding="utf-8") as f:
+            captured.append(json.load(f))
+        return type("P", (), {"returncode": 0})()
+    subprocess.run = fake_run
+    shutil.which = lambda name, *a, **k: "/bin/true" if "calibre" in name else saved[1](name, *a, **k)
+    common.calibre_open = lambda: False
+    try:
+        cfg = load_config(path="/nonexistent/config.toml")   # cfg["columns"]["fandoms"] = "#fandoms"
+        p = wrangle.plan(cfg, maps(fan={"Naruto": "Naruto Shippuden", "Bleach": "Bleach TYBW"}))
+        assert p.changes["#fandoms"][1] == ["Naruto Shippuden"]
+        assert p.changes["#fandoms"][2] == ["Bleach TYBW"]
+        # Simulate a Calibre edit to book 2's SINGLE-valued #fandoms between compute() and
+        # write(): a real, out-of-band change this write must not clobber.
+        con = sqlite3.connect(os.path.join(lib, "metadata.db"))
+        con.execute("UPDATE custom_column_1 SET value=? WHERE book=?", ("Bleach: Actually Different", 2))
+        con.commit(); con.close()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            p.write()
+    finally:
+        subprocess.run, shutil.which, common.calibre_open = saved
+        for k, v in old.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+    (ops,) = captured
+    (op,) = [o for o in ops if o["op"] == "set_field" and o["field"] == "#fandoms"]
+    assert set(op["values"]) == {"1"}, \
+        f"book 1 (unchanged single-valued column) should have applied, got {op['values']}"
+    assert op["values"]["1"] == ["Naruto Shippuden"]
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

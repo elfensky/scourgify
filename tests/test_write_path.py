@@ -492,6 +492,33 @@ def test_an_op_whose_value_drifted_is_skipped_not_clobbered():
     assert result.outcome == "ok"
 
 
+def test_a_single_valued_column_with_a_wrangle_shaped_list_expected_still_applies_when_unchanged():
+    """CR-01 (code review 2026-09-07): wrangle unconditionally reads every non-tags column as a
+    list (`read_custom_column(..., multi=True)` in `wrangle.read_library`), so its plan-time
+    `expected` for a column the REAL schema reports as single-valued is list-shaped
+    (`["Naruto"]`) while the funnel's own before-read correctly asks the schema and returns a
+    scalar (`"Naruto"`) for that same column. Before the fix, `editlog.conflict` compared
+    `str("Naruto")` against `str(["Naruto"])` — never equal — so EVERY op for a single-valued
+    column was reported as drifted and dropped, even on the very first run, with no distinguishing
+    symptom from a real conflict (T-CR-01).
+
+    Exercises the in-process transport (`write_ops`) rather than wrangle's own code, to prove the
+    fix lives in the SHARED `_check_conflicts` — any of the five write-producing tools hitting
+    this arity mismatch is covered the same way, not just wrangle's `Plan.write()` (which gets
+    its own end-to-end regression test in tests/test_plan.py)."""
+    api = FakeApi(books=(1, 2), fields=("tags", "#fandoms"), multi=("tags",))
+    api.set_field("#fandoms", {1: "Naruto", 2: "Bleach"})
+    with _pointed_at(_lib()):
+        result = common.write_ops(api, [common.op_set_field(
+            "#fandoms", {1: "Naruto Shippuden", 2: "Bleach TYBW"},
+            expected={1: ["Naruto"], 2: ["Something Else Entirely"]})])
+    assert api.fields["#fandoms"][1] == "Naruto Shippuden", \
+        "an unchanged single-valued column was wrongly skipped as if it had drifted"
+    assert api.fields["#fandoms"][2] == "Bleach", \
+        "a genuinely drifted single-valued column was clobbered instead of skipped"
+    assert result.skipped == [[2, "#fandoms"]]
+
+
 def test_stamp_and_pref_ops_are_never_conflict_checked():
     """D-09: stamp_now/set_pref/create_column carry no `expected` and are excluded from the
     filter's loop entirely — they pass through untouched whatever `before` says."""

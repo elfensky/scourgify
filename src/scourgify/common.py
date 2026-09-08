@@ -890,6 +890,37 @@ def check_wipe(ops: list[dict], populated) -> None:
                                  "Re-run with --force if this is intentional.")
 
 
+def _normalize_for_arity(value, multi: bool):
+    """Coerce a before-read or plan-time `expected` value into the shape `editlog.conflict`
+    expects for the column's REAL arity (CR-01, code review 2026-09-07).
+
+    A producer builds `expected` from whatever state its own plan was computed against
+    (`wrangle.Plan.write` unconditionally reads every non-tags column as a list via
+    `read_custom_column(con, label, multi=True)` — see `wrangle.py:read_library` — regardless of
+    whether the target Calibre column is actually single-valued). The funnel's own before-read
+    (`column_values`/`values_via_api`), by contrast, always asks the schema (`is_multi`) and
+    returns a scalar for a genuinely single-valued column. Comparing `"Harry Potter"` (a real
+    scalar read) against `["Harry Potter"]` (a plan-time list built assuming multi-valued) via
+    `str(x) != str(y)` is ALWAYS true — every op for that column reads as a permanent, silent
+    conflict from the very first run, even when nothing has drifted (T-CR-01).
+
+    Fixed ONCE here, not per-producer: every one of the five write-producing tools (wrangle,
+    classify, staleness, promote, synopsis) is exposed the same way, and normalizing the
+    comparison at the one point both sides meet covers all of them without re-deriving arity
+    anywhere else. `multi` is still the INJECTED schema answer (`is_multi`), never guessed from a
+    value's Python type — this only reshapes VALUES to match an arity already decided elsewhere.
+    Pure — see tests."""
+    if multi:
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set)):
+            return list(value)
+        return [value]
+    if isinstance(value, (list, tuple, set)):
+        return next(iter(value), None)
+    return value
+
+
 def _check_conflicts(ops: list[dict], before: dict, is_multi) -> tuple[list, list]:
     """Drop every `(book, field)` whose current value (`before`, the funnel's own before-read —
     no fresh read happens here) no longer matches the op's plan-time `expected`, per
@@ -900,7 +931,10 @@ def _check_conflicts(ops: list[dict], before: dict, is_multi) -> tuple[list, lis
 
     `is_multi` (field -> is it multi-valued) is INJECTED exactly like `check_wipe`'s own
     `populated` parameter — never guessed from a value's Python type (a single-value column may
-    legitimately hold a list-shaped read).
+    legitimately hold a list-shaped read). Both `current` and `expected` are reshaped to that
+    same real arity via `_normalize_for_arity` before either reaches `editlog.conflict` (CR-01) —
+    a producer that built `expected` assuming the wrong arity is reconciled here, once, for every
+    producer, rather than made to re-derive the schema's own answer itself.
 
     An op with no `expected` key (or that isn't `set_field`) passes through UNTOUCHED — unchanged
     behaviour for a caller that hasn't been updated to populate it. `stamp_now`/`set_pref`/
@@ -923,8 +957,9 @@ def _check_conflicts(ops: list[dict], before: dict, is_multi) -> tuple[list, lis
         exp = o["expected"]
         kept_values, kept_expected = {}, {}
         for b, v in o["values"].items():
-            current = cur_map.get(int(b))
-            if editlog.conflict(current, exp.get(b), multi):
+            current = _normalize_for_arity(cur_map.get(int(b)), multi)
+            expected = _normalize_for_arity(exp.get(b), multi)
+            if editlog.conflict(current, expected, multi):
                 skipped.append([int(b), field])
             else:
                 kept_values[b] = v

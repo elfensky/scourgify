@@ -133,6 +133,10 @@ def setup(cfg: dict, yes: bool = False, fff_probe=None) -> None:
         # [3] columns: the engine's 5 + the datetime markers staleness/classify need
         print("\n[3] Columns")
         have = {"#" + l for (l,) in con.execute("SELECT label FROM custom_columns")} | {"tags"}
+        # is_multiple per existing label, read while `con` is still open — [4] below needs it to
+        # warn on adoption of a mismatched-arity column (CR-01 follow-up, code review 2026-09-07)
+        # and `con` closes with this `with` block.
+        col_multi = {"#" + l: bool(m) for (l, m) in con.execute("SELECT label, is_multiple FROM custom_columns")}
     for label, name, dt, mult in REC:
         if label in have: print(f"  {OK} {label}"); continue
         why = "  (staleness + classify --incremental need this)" if label in ("#updated", "#wrangled") else ""
@@ -147,8 +151,24 @@ def setup(cfg: dict, yes: bool = False, fff_probe=None) -> None:
     for col, fld in fff.items():
         k = FFF2KEY.get(fld)
         if k and col in have: colmap[k] = col
+    # label -> is this concept supposed to be multi-valued (REC's own `mult` flag) — reused below
+    # so the adoption warning names the SAME expectation [3]'s column-creation prompt already did.
+    WANT_MULTI = {lab: mult for lab, _name, _dt, mult in REC}
     for label, key in (("#fandoms", "fandoms"), ("#characters", "characters"), ("#relationships", "relationships"), ("#genres", "genres"), ("#status", "status")):
-        if not colmap.get(key) and label in have: colmap[key] = label
+        if not colmap.get(key) and label in have:
+            colmap[key] = label
+            # CR-01 follow-up (code review 2026-09-07): adopting an EXISTING single-valued column
+            # for a concept scourgify treats as multi-valued is now safe to WRITE (the apply-time
+            # conflict filter normalizes arity itself, common._normalize_for_arity), but it is
+            # still semantically lossy — Calibre itself can only ever hold the one value this
+            # column allows, so a book with more than one fandom/character/relationship/genre
+            # silently keeps only the last one wrangle writes. Warn once, at adoption time, rather
+            # than doing the recreate-the-column schema work here (out of scope for this pass).
+            if WANT_MULTI.get(label) and not col_multi.get(label, True):
+                print(f"  {WARN} {label} is a SINGLE-valued column, but scourgify treats {key} as "
+                      "multi-valued — a book with more than one value here keeps only the last "
+                      "one written. Recreate it as a 'multiple values' column in Calibre if that "
+                      "matters for your library.")
     write_config(colmap, cfg["behavior"])
     print(f"  {OK} wrote config.toml (behavior toggles preserved):")
     for k in ("fandoms", "characters", "relationships", "genres", "status", "tags"):
