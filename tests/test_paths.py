@@ -428,6 +428,121 @@ def test_a_failed_owner_proof_for_one_library_does_not_suppress_another():
         assert os.path.exists(os.path.join(dd, "promote_ledger.csv"))
 
 
+def test_concurrent_first_time_resolution_runs_the_migration_exactly_once():
+    """WR-02 (code review 2026-09-07): the check ("have I tried this key?") and the claim ("mark
+    it tried") on _MIGRATION_TRIED were an unlocked check-then-add — two threads resolving
+    data_dir() for the SAME library, before either has migrated it, could both pass the check and
+    both enter the all-or-nothing move loop, racing os.rename() against each other. The loser saw
+    a spurious GuardrailError from a file the winner had already renamed away — a benign race
+    surfacing as an unexpected crash on what every caller treats as a plain, side-effect-free read.
+
+    Forcing the interleaving deterministically (instead of relying on timing luck — a plain
+    "pause on entry" barrier let the winner run clean to completion before the loser was ever
+    rescheduled, in early attempts at this test) needs two pieces:
+
+    - `_Rendezvous` wraps a callable so the first `n` calls sync BOTH on entry (before running the
+      real call) AND on exit (before returning its result) via two 2-party barriers — this is what
+      keeps two threads' `__contains__`/`add()` calls genuinely interleaved rather than merely
+      "started close together". A caller with no partner (the fixed code's normal case: only one
+      thread ever gets far enough to call `add()`) times out quickly on either barrier and
+      proceeds solo — `threading.BrokenBarrierError` is swallowed by design.
+    - `_RaceRename` wraps `os.rename`, keyed per source path: the first caller for a given file
+      waits briefly for a second caller on the SAME file before either actually renames, so two
+      threads that both reach the move loop collide on the identical file the way the real bug
+      does, instead of merely running concurrently somewhere in the loop."""
+    import threading
+
+    class _Rendezvous:
+        def __init__(self, real, n=2, timeout=0.3):
+            self._real, self._left, self._timeout = real, n, timeout
+            self._guard = threading.Lock()
+            self._entry, self._exit = threading.Barrier(2), threading.Barrier(2)
+
+        def __call__(self, *a, **kw):
+            with self._guard:
+                pause = self._left > 0
+                if pause: self._left -= 1
+            if pause:
+                try: self._entry.wait(timeout=self._timeout)
+                except threading.BrokenBarrierError: pass   # no partner arrived — proceed solo
+            r = self._real(*a, **kw)
+            if pause:
+                try: self._exit.wait(timeout=self._timeout)
+                except threading.BrokenBarrierError: pass
+            return r
+
+    class _RaceSet(set):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self._contains_wrap = _Rendezvous(super().__contains__)
+            self._add_wrap = _Rendezvous(super().add)
+
+        def __contains__(self, key):
+            return self._contains_wrap(key)
+
+        def add(self, key):
+            self._add_wrap(key)
+
+    class _RaceRename:
+        """Wraps os.rename: the first call for a given `src` waits (briefly) for a second call on
+        the SAME `src` before either actually renames — forcing two racing threads to collide on
+        the identical file instead of merely running concurrently somewhere in the loop. A lone
+        caller (the fixed code's normal case) times out quickly and proceeds unassisted."""
+        def __init__(self, real):
+            self._real = real
+            self._lock = threading.Lock()
+            self._barriers: dict = {}
+
+        def __call__(self, src, dst):
+            with self._lock:
+                b = self._barriers.setdefault(src, threading.Barrier(2))
+            try:
+                b.wait(timeout=0.15)
+            except threading.BrokenBarrierError:
+                pass   # no second caller ever reached this file — the fix works; proceed alone
+            return self._real(src, dst)
+
+    with tempfile.TemporaryDirectory() as td, env(SCOURGIFY_HOME=os.path.join(td, "home")):
+        home = os.path.join(td, "home")
+        lib = _fixture_lib(td, "lib", uuid="uuid-race")
+        legacy = _plant_legacy_tree(home, backup_uuid="uuid-race")
+        common.clear_uuid_cache()
+        common.set_library(lib)
+
+        real_tried, real_rename = common._MIGRATION_TRIED, os.rename
+        common._MIGRATION_TRIED = _RaceSet()
+        os.rename = _RaceRename(real_rename)
+        errors, results = [], []
+
+        def worker():
+            try:
+                results.append(common.data_dir())
+            except Exception as e:               # a spurious GuardrailError must never surface
+                errors.append(e)
+
+        try:
+            t1 = threading.Thread(target=worker)
+            t2 = threading.Thread(target=worker)
+            t1.start(); t2.start()
+            t1.join(timeout=10); t2.join(timeout=10)
+            assert not t1.is_alive() and not t2.is_alive(), "a thread hung — the barrier never released"
+        finally:
+            common._MIGRATION_TRIED = real_tried
+            os.rename = real_rename
+            common.set_library(None)
+
+        assert not errors, f"a caller saw a spurious error: {errors}"
+        assert len(results) == 2
+        dest = os.path.join(legacy, "uuid-race")
+        assert results[0] == results[1] == dest
+        assert os.path.exists(os.path.join(legacy, "MIGRATED"))
+        # exactly one migration ran: the legacy archive files landed in the destination exactly
+        # once each, never duplicated (both threads racing the move) and never left half-moved.
+        for name in ("classify_proposal_applied_20260726-000000.csv", "promote_ledger.csv"):
+            assert os.path.exists(os.path.join(dest, name))
+            assert not os.path.exists(os.path.join(legacy, name))
+
+
 def test_config_and_overrides_stay_at_the_user_dir_root():
     with tempfile.TemporaryDirectory() as td, env(SCOURGIFY_HOME=os.path.join(td, "home")):
         home = os.path.join(td, "home")

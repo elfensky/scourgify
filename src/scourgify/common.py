@@ -265,6 +265,15 @@ def data_dir() -> str:
 # — exactly the multi-library case this phase exists for.
 _MIGRATION_TRIED: set[tuple[str, str]] = set()
 
+# WR-02 (code review 2026-09-07): the check ("have I tried this key?") and the claim ("mark it
+# tried") below must be ATOMIC, or two threads resolving data_dir() for the same library for the
+# first time — exactly the ThreadedJob concurrency model this milestone targets — can both pass
+# the check and both enter the all-or-nothing move loop, racing os.rename() against each other.
+# One module-level lock, mirroring _WRITE_LOCKS's "small dict of Locks" shape but for this single
+# tiny critical section rather than per-key: the guard is cheap (a set membership check) even
+# once acquired every call, and per-key locks would need their own race-free creation anyway.
+_MIGRATION_LOCK = threading.Lock()
+
 
 def _same_bytes(a: str, b: str) -> bool:
     try:
@@ -293,13 +302,25 @@ def migrate_legacy_data() -> str | None:
     real tree is hundreds of MB), journalled as it succeeds. Any failure rolls every already-moved
     entry back and raises GuardrailError (never SystemExit — this runs on the read path of every
     Calibre job) naming what failed and what was restored. The marker is written LAST, so a
-    failed or rolled-back attempt never gets marked "done"."""
+    failed or rolled-back attempt never gets marked "done".
+
+    The check-and-claim on `_MIGRATION_TRIED` is lock-protected (WR-02): two threads resolving
+    `data_dir()` for the SAME library for the first time never both pass the check and both enter
+    the move loop below — only the winner proceeds, the loser returns None here. The move loop
+    itself runs unlocked, after the claim, precisely because the claim already guarantees no
+    second thread for this key will ever reach it."""
     home = user_dir()
     uid = _resolve_uuid()
     key = (home, uid)
-    if key in _MIGRATION_TRIED:
-        return None
-    _MIGRATION_TRIED.add(key)
+    if key in _MIGRATION_TRIED:                # fast, lock-free path — cheap on every call once
+        return None                            # this key is claimed (docstring's "self-disabling")
+    with _MIGRATION_LOCK:
+        # Re-check INSIDE the lock (WR-02): a concurrent caller may have claimed this key while
+        # we were waiting to acquire it. Only the winner of this race ever proceeds past here for
+        # a given key; the loser returns None here instead of racing the winner's move loop below.
+        if key in _MIGRATION_TRIED:
+            return None
+        _MIGRATION_TRIED.add(key)
 
     legacy_root = os.path.join(home, "data")
     marker = os.path.join(legacy_root, "MIGRATED")
