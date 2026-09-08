@@ -2,20 +2,20 @@
 gsd_state_version: 1.0
 milestone: v1
 milestone_name: (the terminal goes away)
-current_phase: 01
-current_phase_name: Foundation — a hostable core
-status: verifying
-stopped_at: Completed 01-06-PLAN.md
-last_updated: "2026-09-07T20:02:06.169Z"
-last_activity: 2026-09-07
-last_activity_desc: Phase 01 execution started
-state_head: 73e1cb610a0467efef78d10f3768eeaa17fdfa7d
+current_phase: 2
+current_phase_name: Write verbs on a selection
+status: planning
+stopped_at: Phase 01 complete, ready to plan Phase 2
+last_updated: "2026-09-08T08:42:10.442Z"
+last_activity: 2026-09-08
+last_activity_desc: Phase 01 complete, transitioned to Phase 2
+state_head: 13a09a84ecae9a867708b4e28aeedf9ce4a2ddb0
 progress:
   total_phases: 6
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 6
   completed_plans: 6
-  percent: 0
+  percent: 17
 ---
 
 # Project State
@@ -29,10 +29,10 @@ See: .planning/PROJECT.md (updated 2026-08-28)
 
 ## Current Position
 
-Phase: 01 (Foundation — a hostable core) — EXECUTING
-Plan: 6 of 6
-Status: Phase complete — ready for verification
-Last activity: 2026-09-07 — Phase 01 execution started
+Phase: 2 — Write verbs on a selection
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-09-08 — Phase 01 complete, transitioned to Phase 2
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -40,7 +40,7 @@ Progress: [░░░░░░░░░░] 0%
 
 **Velocity:**
 
-- Total plans completed: 0
+- Total plans completed: 6
 - Average duration: -
 - Total execution time: 0.0 hours
 
@@ -48,7 +48,7 @@ Progress: [░░░░░░░░░░] 0%
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 01 | 6 | - | - |
 
 **Recent Trend:**
 
@@ -117,5 +117,5 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-09-07T20:02:06.150Z
-Stopped at: Completed 01-06-PLAN.md
+Stopped at: Phase 01 complete, ready to plan Phase 2
 Resume file: None

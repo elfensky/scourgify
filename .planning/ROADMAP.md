@@ -40,7 +40,7 @@ existing source-reading tests (`tests/test_plugin_source.py`, `tests/test_plugin
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Foundation — a hostable core** - Defaults readable from the zip, per-library state, Windows `user_dir()`, write-run lock + conflict checks, pure option functions, Windows CI lane (#71)
+- [x] **Phase 1: Foundation — a hostable core** - Defaults readable from the zip, per-library state, Windows `user_dir()`, write-run lock + conflict checks, pure option functions, Windows CI lane (#71) (completed 2026-09-08)
 - [ ] **Phase 2: Write verbs on a selection** - Every wizard stage as a menu verb: PLAN job → Qt picker → EXECUTE job through `write_ops`, price on the control, per-op edit log, diff-after (spec phase 6, #59, #72, #73)
 - [ ] **Phase 3: In-plugin setup and onboarding** - Setup mode, columns created from the plugin with one restart, key-first onboarding off-mac, one `config.toml` for both front doors (B5/B6.5)
 - [ ] **Phase 4: The dashboard** - Non-modal panel: outstanding-work header from the one shared snapshot, library-switch rebind, job progress + abort, History (spec phase 7, #60, #74, #50)
@@ -169,7 +169,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6. Phase 3's colu
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation — a hostable core | 6/6 | In Progress|  |
+| 1. Foundation — a hostable core | 6/6 | Complete    | 2026-09-08 |
 | 2. Write verbs on a selection | 0/TBD | Not started | - |
 | 3. In-plugin setup and onboarding | 0/TBD | Not started | - |
 | 4. The dashboard | 0/TBD | Not started | - |

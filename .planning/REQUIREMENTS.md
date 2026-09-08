@@ -100,7 +100,7 @@ authority for plugin behaviour; B-references below point at it.
 
 ### Cross-platform
 
-- [ ] **XPLAT-01**: The plugin loads and every core module imports under Windows Calibre's
+- [x] **XPLAT-01**: The plugin loads and every core module imports under Windows Calibre's
       bundled Python 3.14 (no `pgrep`, no `chmod` assumptions, no POSIX-only paths)
       — **split across two phases.** Phase 1 delivers the *imports* half (`smoke-calibre-windows`
       + `test-windows`). The *plugin loads* half is deferred to Phase 6 / XPLAT-05: no plugin-side
@@ -193,7 +193,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | REVIEW-03 | Phase 5 | Pending |
 | REVIEW-04 | Phase 5 | Pending |
 | REVIEW-05 | Phase 5 | Pending |
-| XPLAT-01 | Phase 1 (imports half) + Phase 6 (plugin-loads half, via XPLAT-05) | Pending |
+| XPLAT-01 | Phase 1 (imports half) + Phase 6 (plugin-loads half, via XPLAT-05) | Complete |
 | XPLAT-02 | Phase 1 | Complete |
 | XPLAT-03 | Phase 1 | Complete |
 | XPLAT-04 | Phase 6 | Pending |
