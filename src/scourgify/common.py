@@ -1214,41 +1214,53 @@ def run_writer(ops: list[dict], force: bool = False, tool: str = "scourgify", sc
     if calibre_open(): raise SystemExit("Calibre is running — close it first (it locks metadata.db), then re-run.")
     lib_path = library()
     state = None
+    con = ro_connect()
     try:
-        with contextlib.closing(ro_connect()) as con:
-            lib_uuid = library_uuid(con)
-            cb = shutil.which("calibre-debug") or "/Applications/calibre.app/Contents/MacOS/calibre-debug"
-            if not (shutil.which("calibre-debug") or os.path.exists(cb)):
-                raise SystemExit("calibre-debug not found (install Calibre's CLI tools).")
-            with _write_run(ops, tool, scope, force, print,
-                            populated=lambda f: _populated_books(con, f),
-                            read=lambda f, bs: column_values(con, f, bs),
-                            is_multi=lambda f: column_is_multiple(con, f),
-                            lib_uuid=lib_uuid, lib_path=lib_path) as state:
-                if state is None:
-                    return WriteResult(run_id=None, backup=None, ops=0, books=0, skipped=[], outcome="noop")
-                if state["outcome"] == "skipped":
-                    rec = state["rec"]
-                    return WriteResult(run_id=rec["run"], backup=None, ops=rec["ops"], books=rec["books"],
-                                       skipped=state["skipped"], outcome="skipped")
-                f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
-                json.dump(state["ops"], f); f.close()
-                print("  → writing via calibre-debug …")
-                try:
-                    # generous ceiling: a real batch write finishes in seconds/minutes — this
-                    # only catches a wedged calibre-debug so a scripted/CI run can't hang forever.
-                    rc = subprocess.run([cb, "-e", os.path.join(HERE, "_writer.py"), "--", f.name],
-                                        env={**os.environ, "CALIBRE_LIBRARY": lib_path}, timeout=3600).returncode
-                finally:
-                    os.unlink(f.name)
-                if rc != 0:
-                    raise RuntimeError(str(rc))
+        lib_uuid = library_uuid(con)
+        cb = shutil.which("calibre-debug") or "/Applications/calibre.app/Contents/MacOS/calibre-debug"
+        if not (shutil.which("calibre-debug") or os.path.exists(cb)):
+            raise SystemExit("calibre-debug not found (install Calibre's CLI tools).")
+        with _write_run(ops, tool, scope, force, print,
+                        populated=lambda f: _populated_books(con, f),
+                        read=lambda f, bs: column_values(con, f, bs),
+                        is_multi=lambda f: column_is_multiple(con, f),
+                        lib_uuid=lib_uuid, lib_path=lib_path) as state:
+            # Every closure above (populated=/read=/is_multi=) runs synchronously BEFORE
+            # _write_run's single yield (check_wipe, editlog.before_values, the conflict filter
+            # all run pre-yield) — nothing past this point ever touches `con` again. Close it
+            # NOW, before spawning calibre-debug, rather than at the end of an outer `with` that
+            # would otherwise hold this read handle open for the ENTIRE up-to-1-hour subprocess
+            # call that is actively rewriting this same metadata.db (WR-01, code review
+            # 2026-09-07) — exactly the Windows file-locking hazard plan 01-02's
+            # contextlib.closing(ro_connect()) sweep exists to avoid everywhere else.
+            con.close()
+            if state is None:
+                return WriteResult(run_id=None, backup=None, ops=0, books=0, skipped=[], outcome="noop")
+            if state["outcome"] == "skipped":
+                rec = state["rec"]
+                return WriteResult(run_id=rec["run"], backup=None, ops=rec["ops"], books=rec["books"],
+                                   skipped=state["skipped"], outcome="skipped")
+            f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+            json.dump(state["ops"], f); f.close()
+            print("  → writing via calibre-debug …")
+            try:
+                # generous ceiling: a real batch write finishes in seconds/minutes — this
+                # only catches a wedged calibre-debug so a scripted/CI run can't hang forever.
+                rc = subprocess.run([cb, "-e", os.path.join(HERE, "_writer.py"), "--", f.name],
+                                    env={**os.environ, "CALIBRE_LIBRARY": lib_path}, timeout=3600).returncode
+            finally:
+                os.unlink(f.name)
+            if rc != 0:
+                raise RuntimeError(str(rc))
     except GuardrailError as e:
         raise SystemExit(str(e))
     except subprocess.TimeoutExpired:
         raise SystemExit(f"writer timed out after 1h (calibre-debug wedged?) — library backup at {state['backup']}")
     except RuntimeError as e:
         raise SystemExit(f"writer failed (exit {e}) — library backup at {state['backup']}")
+    finally:
+        con.close()   # idempotent (sqlite3 tolerates a double close) — the safety net for any
+                       # exception path raised before the proactive close above ever runs.
     rec = state["rec"]
     return WriteResult(run_id=rec["run"], backup=state["backup"], ops=rec["ops"], books=rec["books"],
                        skipped=state["skipped"], outcome="ok")

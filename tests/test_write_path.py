@@ -632,6 +632,63 @@ def test_a_write_run_still_prunes_past_the_backup_keep_budget():
     assert len(snaps) <= 2, f"expected pruning to BACKUP_KEEP=2, found {len(snaps)}"
 
 
+# ---------------- run_writer's read connection lifetime (WR-01, code review 2026-09-07) ----------------
+def test_run_writer_closes_its_read_connection_before_spawning_calibre_debug():
+    """run_writer used to hold its read-only sqlite connection open for the ENTIRE calibre-debug
+    subprocess call — up to an hour, on the same metadata.db file that subprocess is actively
+    rewriting. Every closure run_writer threads into _write_run (populated=/read=/is_multi=) is
+    consumed synchronously BEFORE _write_run's single yield, so nothing needs the connection open
+    past that point — exactly the Windows file-locking hazard plan 01-02's
+    contextlib.closing(ro_connect()) sweep exists to avoid everywhere else.
+
+    A tracking sqlite3.Connection subclass records each connection's own closed state (multiple
+    SHORT-LIVED ro_connect() calls happen legitimately elsewhere in this run — e.g. _resolve_uuid()
+    — so the assertion is "every connection opened so far is closed", not "exactly one was
+    opened"). The stubbed subprocess.run asserts this holds at the moment calibre-debug would be
+    spawned — proving the ORDER, not just that close() is eventually called."""
+    import shutil, subprocess, sqlite3 as _sqlite3
+    lib = _lib()
+    con = sqlite3.connect(os.path.join(lib, "metadata.db"))
+    con.execute("INSERT INTO tags VALUES (1, 'Old')")
+    con.execute("INSERT INTO books_tags_link VALUES (1, 1)")
+    con.commit(); con.close()
+    opened = []
+
+    class _TrackingConnection(_sqlite3.Connection):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self._wr01_closed = False
+        def close(self):
+            self._wr01_closed = True
+            super().close()
+
+    def tracking_ro_connect():
+        c = _sqlite3.connect(f"file:{common.db_path()}?mode=ro", uri=True, factory=_TrackingConnection)
+        opened.append(c)
+        return c
+
+    saved = (subprocess.run, shutil.which, common.calibre_open, common.ro_connect)
+
+    def fake_run(cmd, **kw):
+        assert opened, "run_writer never opened a read connection through ro_connect()"
+        assert all(c._wr01_closed for c in opened), \
+            "run_writer spawned calibre-debug while its own read connection was still open (WR-01)"
+        with open(cmd[-1], encoding="utf-8") as f:
+            json.load(f)   # the ops file must at least be valid JSON
+        return type("P", (), {"returncode": 0})()
+
+    subprocess.run = fake_run
+    shutil.which = lambda name, *a, **k: "/bin/true" if "calibre" in name else saved[1](name, *a, **k)
+    common.calibre_open = lambda: False
+    common.ro_connect = tracking_ro_connect
+    try:
+        with _pointed_at(lib):
+            common.run_writer([common.op_set_field("tags", {1: ["New"]}, expected={1: ["Old"]})], tool="test")
+    finally:
+        subprocess.run, shutil.which, common.calibre_open, common.ro_connect = saved
+    assert opened and all(c._wr01_closed for c in opened), "a read connection was left open after the run"
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
