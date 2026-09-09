@@ -69,6 +69,11 @@ class ScourgifyAction(InterfaceAction):
         # stays the authoritative refusal, reached in the EXECUTE job and rendered via the result
         # dialog (D-11); this is advisory-only, so the menu greys instantly without a core read.
         self._write_running = ''
+        # Cached exactly like `_write_running`: the FanFicFare Comments reason from the last
+        # completed synopsis PLAN job (T-02-21). Set on a degraded-mode-eligible refusal, cleared
+        # on any later PLAN that DIDN'T hit that refusal — so fixing the FanFicFare setting
+        # un-greys 'Settle descriptions' the next time the menu opens, no Calibre restart needed.
+        self._comments_reason = ''
 
     def initialization_complete(self):
         """Where gui.current_db is finally real — and where the spike froze Calibre by reading the
@@ -106,6 +111,10 @@ class ScourgifyAction(InterfaceAction):
                    'reviewable per book, with the same data-loss guards `apply` has.')
         self._verb(m, 'Re-derive status', WRITES, status_reason, lambda: self.staleness(scope),
                    "Re-derive #status from #updated age for the selection's activity-family books.")
+        synopsis_reason = status_reason or self._comments_reason or None
+        self._verb(m, 'Settle descriptions', COSTS, synopsis_reason, lambda: self.synopsis(scope),
+                   'Judge each existing blurb — keep the good ones, generate a spoiler-safe back '
+                   'cover for the rest — reviewed per book before anything is written.')
         m.addSeparator()
         self._verb(m, 'What does scourgify know?', FREE, None,
                    lambda: self.inspect(scope),
@@ -175,6 +184,88 @@ class ScourgifyAction(InterfaceAction):
         self._run('scourgify: wrangle plan for %s' % _these(len(ids)),
                   jobs.job_plan_wrangle, (lib, uuid, ids, self.current_uuid),
                   done=self._plan_done('wrangle'))
+
+    # ---- synopsis: PLAN -> engine picker -> EXECUTE (harvest) -> review -> EXECUTE (write) ----
+    def synopsis(self, scope, force=False):
+        """'Settle descriptions' — PLAN: `jobs.job_plan_synopsis` resolves the selection and
+        prices every usable engine over it (sends nothing — see that job's own docstring).
+        `force=True` is the degraded self-healing mode's own re-dispatch (see
+        `_synopsis_plan_done`) — never the menu's own default click, which always passes False."""
+        lib, uuid, ids = scope
+        self._run('scourgify: synopsis plan for %s' % _these(len(ids)),
+                  jobs.job_plan_synopsis, (lib, uuid, ids, {'force': force, 'batch': None}, self.current_uuid),
+                  done=self._synopsis_plan_done(scope))
+
+    def _synopsis_plan_done(self, scope):
+        """The FanFicFare guard renders as an explicit, visible choice (T-02-21): a refusal
+        carrying `degraded_available` shows the guard's own sentence plus ONE control offering
+        the degraded mode (`picker.show_refusal`), and caches the reason on the action
+        (`self._comments_reason`) so the menu greys the slot without a second job round-trip.
+        Any OTHER PLAN outcome clears that cache — fixing the FanFicFare setting un-greys the
+        verb the next time the menu opens, no Calibre restart needed."""
+        def done(job):
+            if job.failed:
+                return self.gui.job_exception(job, dialog_title='scourgify failed')
+            r = job.result or {}
+            if r.get('refused'):
+                if r.get('degraded_available'):
+                    self._comments_reason = 'FanFicFare Comments is not set to New Only'
+                    from calibre_plugins.scourgify.picker import show_refusal
+                    return show_refusal(self.gui, r, lambda: self.synopsis(scope, force=True))
+                return info_dialog(self.gui, 'scourgify', r.get('msg', ''), show=True)
+            self._comments_reason = ''
+            if r.get('empty'):
+                return info_dialog(self.gui, 'scourgify', 'Nothing to settle for these books.', show=True)
+            from calibre_plugins.scourgify.picker import show_engine_picker
+            show_engine_picker(self.gui, r,
+                               lambda engine_id: self._start_synopsis_execute(scope, r['carry'], engine_id))
+        return done
+
+    def _start_synopsis_execute(self, scope, carry, engine_id):
+        """Dispatched from the engine button (D-07) — the FIRST of two `job_execute_synopsis`
+        dispatches (`ticks=None`): the engine pass runs for real, but the write= transport is a
+        no-op (`jobs._NullWriter`) — nothing is written until the reviewer has seen every
+        generated description (D-13). No `model=` override in this phase's UI, matching
+        classify's own engine picker."""
+        db = self.gui.current_db
+        ids = list(self.gui.library_view.get_selected_ids())
+        lib, uuid = db.library_path, getattr(db.new_api, 'library_id', None)
+        self._write_running = 'synopsis'
+        self._run('scourgify: settling descriptions for %s' % _these(len(ids)),
+                  jobs.job_execute_synopsis,
+                  (lib, uuid, ids, carry, engine_id, '', db.new_api, None, self.current_uuid),
+                  done=self._synopsis_review_done(carry, engine_id))
+
+    def _synopsis_review_done(self, carry, engine_id):
+        """The harvest dispatch's completion: its `items` (each generated description paired
+        against the blurb it would replace) feed the SAME `Picker`/Review-1-by-1 table every
+        other verb uses (D-01) — no second review widget for this verb. Run (or a finished
+        1-by-1 review) fires the SECOND, real dispatch (`_finish_synopsis`)."""
+        def done(job):
+            if job.failed:
+                self._write_running = ''
+                return self.gui.job_exception(job, dialog_title='scourgify failed')
+            r = job.result or {}
+            if r.get('refused'):
+                self._write_running = ''
+                return info_dialog(self.gui, 'scourgify', r.get('msg', ''), show=True)
+            from calibre_plugins.scourgify.picker import show_picker
+            dlg = show_picker(self.gui, r,
+                              lambda run_carry: self._finish_synopsis(run_carry, engine_id, dlg))
+        return done
+
+    def _finish_synopsis(self, carry, engine_id, dlg):
+        """The SECOND `job_execute_synopsis` dispatch — `ticks` replays exactly what the
+        reviewer left (`_synopsis_ticks`, reusing `picker.checklist_decide` unchanged, D-04):
+        `[]` (Run clicked with no review) accepts every generated description, matching D-02's
+        one-click-Run contract. Clears `_write_running` via the shared `_execute_done`."""
+        db = self.gui.current_db
+        ids = list(self.gui.library_view.get_selected_ids())
+        lib, uuid = db.library_path, getattr(db.new_api, 'library_id', None)
+        ticks = _synopsis_ticks(dlg)
+        self._run('scourgify: writing settled descriptions', jobs.job_execute_synopsis,
+                  (lib, uuid, ids, carry, engine_id, '', db.new_api, ticks, self.current_uuid),
+                  done=self._execute_done)
 
     def _plan_done(self, verb):
         """A Dispatcher-safe callback factory: a real job failure still reaches
@@ -360,6 +451,25 @@ def _wrangle_ticks(dlg):
             ticks.append((acc, [] if not acc else rej, 'skip' if not acc else 'apply'))
         start = end
     return ticks
+
+
+def _synopsis_ticks(dlg):
+    """Build the single-call `ticks` list `job_execute_synopsis`'s second dispatch replays.
+    Reuses `picker.checklist_decide` (D-04) rather than re-deriving the tick-reading logic a
+    second time — `synopsis.step` (unlike `wrangle.Plan.step`'s own `_step_walk`) calls its
+    `decide=` exactly ONCE for the whole batch of generated descriptions, the same single-call
+    shape `checklist_decide` already covers (staleness, promote, classify all share it); only the
+    OUTPUT here is plain data (a list), not a callable, because `ticks` travels across a SECOND
+    job dispatch (D-13's own two-dispatch shape), not a same-call closure.
+
+    Not reviewed (the plain Run button) -> `[]` — `_replay_decide`'s own accept-everything
+    fallback, no Qt call needed to answer that (mirrors `_wrangle_ticks`'s own empty case)."""
+    if dlg is None or not getattr(dlg, 'reviewed', False) or dlg._table is None:
+        return []
+    from calibre_plugins.scourgify.picker import checklist_decide
+    decide = checklist_decide(dlg)
+    acc, rej, action = decide('', dlg._items)
+    return [(list(acc), list(rej), action)]
 
 
 def _these(n):

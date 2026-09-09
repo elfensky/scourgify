@@ -325,3 +325,56 @@ def show_engine_picker(gui, plan_result, on_engine):
     dlg.setModal(False)
     dlg.show()
     return dlg
+
+
+# ---------------------------------------------------------------------- the refused-result
+# rendering (D-11) and the degraded-mode control (synopsis, plan 02-06)
+class RefusalDialog(QDialog):
+    """`result` is a `_ceremony`-caught refusal (`{'verb', 'refused': True, 'msg', ...}`) — the
+    guard's message VERBATIM, plain text, no error styling: a guard refusal is a normal outcome,
+    not a crash (same rendering rule `result_dialog.ResultDialog` already applies to an
+    EXECUTE-time refusal).
+
+    A refusal carrying `degraded_available` (synopsis's FanFicFare guard, T-02-21) gets ONE
+    additional control BENEATH the guard's text, offering the degraded self-healing mode —
+    labelled with what it COSTS rather than a generic yes/no: a clobbered book simply re-enters
+    the queue and is re-summarized, so the price is wasted free compute, not lost data. A
+    refusal without `degraded_available` renders exactly as before this control existed: one
+    text block, no controls."""
+
+    def __init__(self, gui, result, on_degraded=None):
+        QDialog.__init__(self, gui)
+        self.setWindowTitle('scourgify — %s' % result.get('verb', ''))
+        outer = QVBoxLayout(self)
+        outer.addWidget(self._plain_label(result.get('msg', '')))
+
+        if result.get('degraded_available') and on_degraded is not None:
+            detail = result.get('detail', '')
+            if detail:
+                outer.addWidget(self._plain_label(detail))
+            degraded = QPushButton(
+                'Run anyway (degraded mode) — a clobbered book just re-enters the queue')
+            degraded.clicked.connect(lambda: self._run_degraded(on_degraded))
+            outer.addWidget(degraded)
+
+        close = QPushButton('Close')
+        close.clicked.connect(self.reject)
+        outer.addWidget(close)
+
+    def _plain_label(self, text):
+        lab = QLabel(text)
+        lab.setTextFormat(Qt.TextFormat.PlainText)
+        lab.setWordWrap(True)
+        return lab
+
+    def _run_degraded(self, on_degraded):
+        self.accept()
+        on_degraded()
+
+
+def show_refusal(gui, result, on_degraded=None):
+    """Non-modal, parented to `gui` — the same lifecycle as `show_picker`/`show_engine_picker`."""
+    dlg = RefusalDialog(gui, result, on_degraded)
+    dlg.setModal(False)
+    dlg.show()
+    return dlg
