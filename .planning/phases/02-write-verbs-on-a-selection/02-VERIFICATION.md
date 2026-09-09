@@ -1,7 +1,7 @@
 ---
 phase: 02-write-verbs-on-a-selection
 verified: 2026-09-09T12:28:39Z
-status: human_needed
+status: gaps_found
 score: 5/5 roadmap success criteria verified in code; 41/41 plan must_haves present, wired and (where behavior-dependent) behaviorally tested
 behavior_unverified: 0
 overrides_applied: 0
@@ -24,7 +24,23 @@ human_verification:
   - test: "Task 3 (02-08): SCOURGIFY_SMOKE=1 calibre --with-library <throwaway> on macOS — read the transcript for a PLAN summary + consequence label + result per verb step, confirm no exceptions, and confirm the longest whole-run GUI-thread heartbeat gap is under 100ms."
     expected: "plugin/selftest.py drives one PLAN -> picker-data -> EXECUTE -> result-data round trip per verb (staleness/wrangle/classify/synopsis/promote/backfill/retry) under a real Calibre process, with no exception and no GUI stall over 100ms."
     why_human: "No Calibre binary is available in this environment to run calibre-debug. The CR-01 fix (config._prefs() instead of the nonexistent config.prefs) is now confirmed present in source, so the harness should reach this point without crashing on step_settings, but the acceptance walkthrough itself — the actual GUI-thread heartbeat measurement and the seven write-verb chains firing under real Calibre — could not be run."
-gaps: []
+gaps:
+  - id: UAT-01
+    severity: medium
+    requirement: WRITE-07
+    title: "Toolbar action shipped with no icon — the verb reads as bare text in the main bar"
+    found_by: "UAT checkpoint 1, real Calibre 9.14 on macOS"
+    detail: "action_spec's icon slot was None and the zip carried no images/, so the plugin rendered as the word 'scourgify' beside FanFicFare's and the AI actions' icons. It does not fit the main toolbar and is hard to find."
+    fix: "Ship plugin/images/icon.png and point action_spec at it. Applied during UAT; needs a gap plan only to carry its test and to keep the zip assertion honest."
+    status: fix_applied_needs_pinning
+  - id: UAT-02
+    severity: medium
+    requirement: WRITE-01, WRITE-07
+    title: "Change review renders a before/after matrix, not a diff — the reader has to diff two long strings by eye"
+    found_by: "UAT checkpoint 1, real Calibre 9.14 on macOS"
+    detail: "Both picker.py's preview table (cols: '', title, field, before, after) and result_dialog.py's rows table (cols: book, title, field, before, after, state) put two comma-joined multi-value strings side by side. For a tags -> #genres relocation across several values the reader must mentally subtract one string from the other to see what changed. WRITE-07 is satisfied literally (the information is present) but not usefully."
+    fix: "One shared change-list renderer for both surfaces: red - for a removal, green + for an addition, and a third colour for a MOVE rendered as ONE row (value, from-field -> to-field) since a relocation is wrangle's dominant operation and rendering it as a separate delete and add misreports it as data loss. The diff computation must live Qt-free (multi-value compares as a set, single-value as a string, matching editlog.conflict) so the widgets stay dumb and the CLI can reuse it."
+    status: open
 ---
 
 # Phase 2: Write verbs on a selection — Verification Report

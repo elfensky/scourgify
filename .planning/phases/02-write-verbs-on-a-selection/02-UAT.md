@@ -21,7 +21,9 @@ awaiting: user response
 
 ### 1. Tracer — "Re-derive status" end-to-end under real Calibre
 expected: Menu -> PLAN preview -> picker -> EXECUTE -> result dialog -> library-view refresh, whole chain. This is plan 02-01's blocking-human tracer gate, which was skipped during execution; every later plan builds on the rails it was meant to prove.
-result: [pending]
+result: [issues] Verb chain not yet run to completion — UAT paused on two UI findings
+  filed as gaps UAT-01 (no toolbar icon; fix applied) and UAT-02 (before/after matrix
+  should be a git-like change list with moves on one row). Re-run after the gap plan lands.
 
 ### 2. Classify's scope dialog, engine picker, and the Review 1-by-1 control
 expected: Scope dialog offers selection / new-changed / never-classified with a batch size / whole library. The engine picker lists each usable engine with its price over the exact resolved scope and its failure modes, with the measurement date shown. The run starts on click — no confirmation dialog. The Review 1-by-1 control walks items and an unticked item is excluded. (Plans 02-03, 02-04.)
@@ -51,8 +53,8 @@ result: [pending]
 
 total: 7
 passed: 0
-issues: 0
-pending: 7
+issues: 1
+pending: 6
 skipped: 0
 blocked: 0
 

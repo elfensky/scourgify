@@ -52,7 +52,7 @@ _EXECUTE_JOBS = {'staleness': jobs.job_execute_staleness}
 
 class ScourgifyAction(InterfaceAction):
     name = 'scourgify'
-    action_spec = ('scourgify', None, 'Normalize and tag this library', None)
+    action_spec = ('scourgify', 'images/icon.png', 'Normalize and tag this library', None)
     action_type = 'current'
     popup_type = QToolButton.ToolButtonPopupMode.InstantPopup
 
