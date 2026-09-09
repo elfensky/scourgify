@@ -78,6 +78,12 @@ class ScourgifyAction(InterfaceAction):
         # PLAN job — cleared automatically the next time that PLAN reports real work, so
         # promoting a new candidate un-greys 'Backfill promoted tags' with no Calibre restart.
         self._backfill_reason = ''
+        # The 'Retry on another engine' slot's own cache (D-10, plan 02-08): refreshed by
+        # dispatching `jobs.job_retry_targets` on menu open and after every completed job
+        # (`_refresh_retry_targets`) — `build_menu` cannot call the core, so the menu's greying
+        # and the chooser it opens both read this cache, never a live read.
+        self._retry_groups = []
+        self._retry_reason = 'nothing to retry'
 
     def initialization_complete(self):
         """Where gui.current_db is finally real — and where the spike froze Calibre by reading the
@@ -139,7 +145,12 @@ class ScourgifyAction(InterfaceAction):
                    lambda: self.classify_backlog(scope),
                    'Skip the scope dialog: never-classified books, restricted to the selection '
                    'when one exists — a chunk at a time (the scope that advances).')
-        self._verb(m, 'Retry on another engine', COSTS, SOON)
+        retry_reason = write_reason or self._retry_reason or None
+        self._verb(m, 'Retry on another engine', COSTS, retry_reason,
+                   None if retry_reason else lambda: self._open_retry_chooser(),
+                   "Retry the refusal-class classify failures for %s on a different engine — "
+                   "the same recovery a result dialog's own retry buttons offer."
+                   % ('the selection' if n else 'the library'))
         m.addSeparator()
         self._verb(m, 'Edit tags…', WRITES, SOON)
         if not n:
@@ -150,6 +161,7 @@ class ScourgifyAction(InterfaceAction):
             self._verb(m, 'Smoke: db from a job worker', WRITES, None,
                        lambda: self.db_smoke(scope), 'Throwaway libraries only.')
         prints('scourgify: menu for %d ids built in %.1f ms' % (n, (time.monotonic() - t0) * 1000))
+        self._refresh_retry_targets(scope)
 
     def _verb(self, menu, label, tag, disabled_reason, slot=None, hint=''):
         """One fixed slot. A verb that does not apply greys out WITH ITS REASON rather than
@@ -511,17 +523,63 @@ class ScourgifyAction(InterfaceAction):
 
     def _execute_done(self, job):
         """Dispatcher-wrapped: clears the write-run mirror, shows the diff-after result dialog
-        (a refused result renders there too — D-11), and refreshes exactly the touched rows so the
-        library view reflects the write without a restart."""
+        (a refused result renders there too — D-11), refreshes exactly the touched rows so the
+        library view reflects the write without a restart, and refreshes the retry-targets cache
+        (D-10) — a fresh failure may have just appeared, or a retried one may have just cleared."""
         self._write_running = ''
         if job.failed:
             return self.gui.job_exception(job, dialog_title='scourgify failed')
         r = job.result or {}
         from calibre_plugins.scourgify.result_dialog import show_result
-        show_result(self.gui, r)
+        on_retry = self._retry_classify if r.get('verb') == 'classify' else None
+        show_result(self.gui, r, on_retry=on_retry)
         touched = r.get('touched') or []
         if touched:
             self.gui.library_view.model().refresh_ids(list(touched))
+        db = self.gui.current_db
+        ids = list(self.gui.library_view.get_selected_ids())
+        self._refresh_retry_targets((db.library_path, getattr(db.new_api, 'library_id', None), ids))
+
+    # ---- retry (D-10, plan 02-08): the ONE `jobs.job_retry_classify` entry point, reached from
+    # both the result dialog's own retry buttons AND this menu's 'Retry on another engine' slot ----
+    def _refresh_retry_targets(self, scope):
+        """Fire-and-forget: refreshes `self._retry_groups`/`self._retry_reason` for `scope`'s
+        selection (or the library, `ids=[]`) so the menu's greying — and the chooser it opens —
+        stay live without a synchronous core read on the GUI thread. Dispatched on menu open and
+        after every completed write."""
+        lib, uuid, ids = scope
+        self._run('scourgify: retry targets for %s' % _these(len(ids)), jobs.job_retry_targets,
+                  (lib, uuid, ids, self.current_uuid), done=self._retry_targets_done)
+
+    def _retry_targets_done(self, job):
+        """A failed/refused read leaves the slot greyed (fail closed, never a stale 'live' state);
+        only REFUSAL-class groups that actually carry a target are worth surfacing — auth/
+        permission groups (no target ever) and an empty groups list both read as nothing to do."""
+        if job.failed or (job.result or {}).get('refused'):
+            self._retry_groups, self._retry_reason = [], 'nothing to retry'
+            return
+        groups = (job.result or {}).get('groups') or []
+        live = [g for g in groups if g.get('cls') == 'refusal' and g.get('targets')]
+        self._retry_groups = live
+        self._retry_reason = '' if live else 'nothing to retry'
+
+    def _open_retry_chooser(self):
+        """The menu slot's own dispatch — a small chooser listing the SAME targets a result
+        dialog's own retry buttons would render (`self._retry_groups`, refreshed by
+        `_refresh_retry_targets`), reused verbatim rather than re-derived."""
+        from calibre_plugins.scourgify.picker import show_retry_chooser
+        show_retry_chooser(self.gui, self._retry_groups, self._retry_classify)
+
+    def _retry_classify(self, engine_id, book_ids):
+        """The ONE retry dispatch — called from a result dialog's retry button AND the menu's
+        chooser, through the ONE `self._run` site, exactly like every other write verb."""
+        db = self.gui.current_db
+        lib, uuid = db.library_path, getattr(db.new_api, 'library_id', None)
+        self._write_running = 'classify'
+        self._run('scourgify: retrying %s with %s' % (_these(len(book_ids)), engine_id),
+                  jobs.job_retry_classify,
+                  (lib, uuid, book_ids, engine_id, '', db.new_api, self.current_uuid),
+                  done=self._execute_done)
 
     def _run(self, description, func, args, done=None):
         """`done` lets a caller own its own completion (the settings dialog shows a probe result

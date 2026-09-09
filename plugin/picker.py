@@ -378,3 +378,51 @@ def show_refusal(gui, result, on_degraded=None):
     dlg.setModal(False)
     dlg.show()
     return dlg
+
+
+# ---------------------------------------------------------------------- the retry chooser (D-10,
+# menu half, plan 02-08) — the SAME groups/targets a result dialog's own failure-class sections
+# would render (`jobs.failure_groups`), reached from the 'Retry on another engine' menu slot
+# instead of after a completed run. Makes NO core call and imports nothing from `scourgify` —
+# `groups` is plain data `jobs.job_retry_targets` already computed.
+class RetryChooser(QDialog):
+    """One button per `(group, target)` pair. Clicking dispatches `on_retry(engine_id, book_ids)`
+    and closes — the exact contract a result dialog's own retry buttons use, so both surfaces
+    call the same `jobs.job_retry_classify` entry point through the same `action._run` site."""
+
+    def __init__(self, gui, groups, on_retry):
+        QDialog.__init__(self, gui)
+        self.on_retry = on_retry
+        self.setWindowTitle('scourgify — retry on another engine')
+        outer = QVBoxLayout(self)
+        for group in groups:
+            books = group.get('books', [])
+            outer.addWidget(self._plain_label(
+                '%s (%d book%s)' % (group.get('cls', ''), len(books), '' if len(books) == 1 else 's')))
+            for target in group.get('targets', ()):
+                btn = QPushButton(target.get('label', target.get('engine', '')))
+                btn.clicked.connect(
+                    lambda checked=False, e=target.get('engine'), b=list(books): self._choose(e, b))
+                outer.addWidget(btn)
+
+        close = QPushButton('Cancel')
+        close.clicked.connect(self.reject)
+        outer.addWidget(close)
+
+    def _plain_label(self, text):
+        lab = QLabel(text)
+        lab.setTextFormat(Qt.TextFormat.PlainText)
+        lab.setWordWrap(True)
+        return lab
+
+    def _choose(self, engine_id, book_ids):
+        self.accept()
+        self.on_retry(engine_id, book_ids)
+
+
+def show_retry_chooser(gui, groups, on_retry):
+    """Non-modal, parented to `gui` — the same lifecycle as every other picker dialog."""
+    dlg = RetryChooser(gui, groups, on_retry)
+    dlg.setModal(False)
+    dlg.show()
+    return dlg
