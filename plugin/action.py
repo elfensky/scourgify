@@ -42,159 +42,9 @@ SOON = 'not built yet'                    # the honest reason a phase-6/7 slot i
 _EXECUTE_JOBS = {'staleness': jobs.job_execute_staleness}
 
 
-# ---------------------------------------------------------------- job functions (worker thread)
-# Everything below this line runs OFF the GUI thread. It may import scourgify; it may not touch a
-# Qt object. Results are plain data handed back to a Dispatcher-wrapped callback.
-#
-# `_open` itself lives in jobs.py (D-12; moved there verbatim) — every job function here binds
-# through `jobs._open` instead of a local copy.
-
-def job_inspect(lib_path, lib_uuid, ids, now_uuid=None, abort=None, log=None, notifications=None):
-    """"What does scourgify know?" — stamp state, proposal/archive rows, failures, rejects.
-
-    Read-only, off common.ro_connect() (the spike proved a second read-only sqlite handle is fine
-    while the GUI holds the library). With no selection this answers at library scope, which is
-    the dashboard's header until phase 7 builds it — every number names its source function per
-    NLSpec B6.1."""
-    from scourgify import artifacts, common, select, setup as setup_mod
-
-    con, err = jobs._open(lib_path, lib_uuid, now_uuid)
-    if err:
-        return {'title': 'scourgify', 'msg': err, 'det': ''}
-    try:
-        seen = artifacts.classified_ids()                        # applied archives + proposal + failures
-        proposal = {r['book_id']: r for r in artifacts.read_proposal()}
-        failures = {int(r['book_id']): r.get('reason', '') for r in artifacts.read_rows(artifacts.fail())
-                    if str(r.get('book_id', '')).isdigit()}
-        if not ids:
-            return _library_scope(con, seen, proposal, failures, artifacts, common, select, setup_mod)
-
-        stamps = common.read_custom_column(con, select.STAMP) or {}
-        titles = dict(con.execute('SELECT id, title FROM books'))
-        sendable = select.sendable(con)
-        with_text = select.sendable(con, text_fallback=True)
-        rejects = _rejects_by_book(common)
-        archives = _archives_by_book(artifacts)
-
-        lines, never, pending, blocked = [], 0, 0, 0
-        for n, b in enumerate(ids):
-            if abort is not None and abort.is_set():
-                break
-            if notifications is not None:
-                notifications.put((n / max(len(ids), 1), 'reading %d of %d' % (n + 1, len(ids))))
-            lines.append('%s (%s)' % (titles.get(b, '(not in this library)'), b))
-            stamp = stamps.get(b)
-            lines.append('    classified: %s' % (str(stamp)[:19] if stamp else 'never'))
-            if not stamp:
-                never += 1
-            if b in proposal:
-                pending += 1
-                r = proposal[b]
-                lines.append('    pending proposal: %s' % (artifacts.join_tags(r['added_tags']) or '(no tags)'))
-                if r['proposed_new']:
-                    lines.append('    proposed new terms: %s' % artifacts.join_tags(r['proposed_new']))
-            for arch in archives.get(b, []):
-                lines.append('    applied from: %s' % arch)
-            if b in failures:
-                blocked += 1
-                lines.append('    last attempt FAILED: %s' % failures[b])
-            for rj in rejects.get(b, []):
-                lines.append('    you rejected: %s %s -> %s' % (rj.get('column', ''), rj.get('before', ''), rj.get('after', '')))
-            if b not in sendable:
-                lines.append('    description too thin to send%s'
-                             % ('' if b in with_text else ' — and no file to sample either'))
-            lines.append('')
-
-        backlog = [b for b in ids if b not in seen and b in with_text]
-        msg = ('<b>%d book%s selected.</b><br>%d never classified · %d with a pending proposal · '
-               '%d blocked on the last attempt<br>%d could be classified now.'
-               % (len(ids), '' if len(ids) == 1 else 's', never, pending, blocked, len(backlog)))
-        return {'title': 'What scourgify knows', 'msg': msg, 'det': '\n'.join(lines)}
-    finally:
-        con.close()
-
-
-def _library_scope(con, seen, proposal, failures, artifacts, common, select, setup_mod):
-    """The whole-library answer — the dashboard header's numbers, each from its named source."""
-    books = common.book_count(con)
-    backlog = select.pick(con, 'unclassified')      # bare: seen + text-fallback live in select,
-                                                    # so this number matches the wizard header
-    changed = select.changed(con)
-    have = {'#' + l for (l,) in con.execute('SELECT label FROM custom_columns')} | {'tags'}
-    cols = [label for label, _, _, _ in setup_mod.REC if label in have]
-    msg = ('<b>%s books</b> in this library.<br>'
-           '%s never classified (select.pick "unclassified") · %s new or changed (select.changed)<br>'
-           '%s attempted so far (artifacts.classified_ids) · %s pending review · %s failed<br>'
-           '%d of %d columns present.'
-           % ('{:,}'.format(books), '{:,}'.format(len(backlog)), '{:,}'.format(len(changed)),
-              '{:,}'.format(len(seen)), '{:,}'.format(len(proposal)), '{:,}'.format(len(failures)),
-              len(cols), len(setup_mod.REC)))
-    det = ('columns present: %s\nmissing: %s\n\nnewest never-classified book ids:\n%s'
-           % (', '.join(cols) or '(none)',
-              ', '.join(l for l, _, _, _ in setup_mod.REC if l not in have) or '(none)',
-              ', '.join(str(b) for b in backlog[:50]) or '(none)'))
-    return {'title': 'What scourgify knows', 'msg': msg, 'det': det}
-
-
-def _rejects_by_book(common):
-    """{book: [reject row]} from data/rejects.csv — "what you rejected", per the interaction spec."""
-    import csv
-    out = {}
-    path = common.rejects_path()
-    if not os.path.exists(path):
-        return out
-    with open(path) as f:
-        for r in csv.DictReader(f):
-            if str(r.get('book', '')).isdigit():
-                out.setdefault(int(r['book']), []).append(r)
-    return out
-
-
-def _archives_by_book(artifacts):
-    """{book: [archive filename]} — which applied proposal each book's tags came from."""
-    out = {}
-    for path in artifacts.applied_proposals():
-        name = os.path.basename(path)
-        for row in artifacts.read_proposal(path):
-            out.setdefault(row['book_id'], []).append(name)
-    return out
-
-
-def job_db_smoke(lib_path, lib_uuid, api, now_uuid=None, abort=None, log=None, notifications=None):
-    """NLSpec B3.3 — prove the db-from-worker boundary instead of assuming it.
-
-    Reads through `new_api` AND performs a scratch write (a tag added and removed again) from
-    inside a ThreadedJob worker. Two locks, because this is the one thing in phase 4 that writes:
-    $SCOURGIFY_SMOKE must be set, and the library must be small enough to be a throwaway. Both
-    fail closed."""
-    from scourgify import common
-    if not os.environ.get('SCOURGIFY_SMOKE'):
-        return {'title': 'scourgify smoke', 'msg': 'Set SCOURGIFY_SMOKE=1 and restart Calibre.', 'det': ''}
-    con, err = jobs._open(lib_path, lib_uuid, now_uuid)
-    if err:
-        return {'title': 'scourgify smoke', 'msg': err, 'det': ''}
-    try:
-        n = common.book_count(con)
-    finally:
-        con.close()
-    if n > 50:
-        return {'title': 'scourgify smoke', 'msg': 'Refusing: %d books is not a throwaway library.' % n, 'det': ''}
-
-    out = ['library_id: %s' % api.library_id, 'book count via new_api: %d' % len(api.all_book_ids())]
-    book = sorted(api.all_book_ids())[0]
-    before = set(api.field_for('tags', book) or ())
-    out.append('book %d tags before: %s' % (book, sorted(before)))
-    api.set_field('tags', {book: sorted(before | {'scourgify-smoke'})})
-    out.append('after write:  %s' % sorted(api.field_for('tags', book) or ()))
-    api.set_field('tags', {book: sorted(before)})
-    out.append('after revert: %s' % sorted(api.field_for('tags', book) or ()))
-    ok = set(api.field_for('tags', book) or ()) == before
-    return {'title': 'scourgify smoke',
-            'msg': 'new_api read + scratch write from a ThreadedJob worker: <b>%s</b>' % ('ok' if ok else 'MISMATCH'),
-            'det': '\n'.join(out)}
-
-
 # ---------------------------------------------------------------------- Qt layer (GUI thread)
+# Every job body lives in the Qt-free plugin/jobs.py (D-12) — this file holds ZERO core imports,
+# anywhere, not even inside a job_* function, because it dispatches jobs but never defines one.
 
 class ScourgifyAction(InterfaceAction):
     name = 'scourgify'
@@ -294,11 +144,11 @@ class ScourgifyAction(InterfaceAction):
     def inspect(self, scope):
         lib, uuid, ids = scope
         self._run('scourgify: what do I know about %s' % _these(len(ids)),
-                  job_inspect, (lib, uuid, ids, self.current_uuid))
+                  jobs.job_inspect, (lib, uuid, ids, self.current_uuid))
 
     def db_smoke(self, scope):
         lib, uuid, _ids = scope
-        self._run('scourgify: db-from-worker smoke', job_db_smoke,
+        self._run('scourgify: db-from-worker smoke', jobs.job_db_smoke,
                   (lib, uuid, self.gui.current_db.new_api, self.current_uuid))
 
     def staleness(self, scope):
