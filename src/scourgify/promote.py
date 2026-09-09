@@ -15,7 +15,7 @@ import difflib
 from scourgify.artifacts import (prop, rank, ledger, review, applied_proposals,
                                  append_ledger, read_rows, split_tags, write_review, archive)
 from scourgify.classify import existing_terms
-from scourgify.engines import ENGINES, ask_retry, max_workers as engine_workers
+from scourgify.engines import ENGINES, ask_retry, failure_class, max_workers as engine_workers
 from scourgify.common import (GuardrailError, data_dir, library, norm, ro_connect, run_writer,
                               current_tags, titles as book_titles, op_set_field, interactive, confirm)
 from scourgify.overrides import ov_path, append_lines, append_rows   # overrides/ formats live there
@@ -116,19 +116,35 @@ def _finalize(base, dec, existing):
 
 
 def decide(cand: dict, ask, verify_ask=None, existing: list | None = None) -> dict:
+    """ask/verify_ask: prompt -> (text, err), ask_retry's own shape (#73) — or a bare string, the
+    pre-#73 test-fixture shape still used throughout tests/test_promote.py. Normalized HERE, at
+    the top of decide, the ONE place this happens (mirrors ui.checklist's own item-shape
+    normalization) — never re-derived per call site."""
+    def _text_err(resp):
+        return resp if isinstance(resp, tuple) else (resp, "")
+
     if existing is None: existing = existing_terms()
     near = shortlist(cand["tag"], existing)
     base = {"tag": cand["tag"], "count": cand.get("count", 0)}
-    adv = parse_decision(ask(advocate_prompt(cand, near)))
+    adv_text, adv_err = _text_err(ask(advocate_prompt(cand, near)))
+    adv = parse_decision(adv_text)
     if adv is None:
         # NOT a reject: ask_retry returns ("", err) on a transport failure, so a network hiccup would
         # otherwise become a durable verdict in the ledger and the tag would never be adjudicated again.
         # "error" isn't in VERDICTS, so apply_decisions skips it and the candidate re-runs next time.
+        # The reason is PREFIXED with the failure's normalized class (engines.failure_class reads it
+        # back) whenever the error half carries one — the same convention ask_retry's own reason
+        # already follows (#73), so a promote refusal can earn the same "retry on another engine"
+        # recovery a classify refusal does.
+        reason = "no usable response (transport failure or unparseable)"
+        if adv_err:
+            reason = f"{failure_class(adv_err)}: {reason}"
         return {**base, "verdict": "error", "target": "", "contested": False,
-                "reason": "no usable response (transport failure or unparseable)", "confidence": "low"}
+                "reason": reason, "confidence": "low"}
     if adv["verdict"] != "promote":
         return _finalize(base, {**adv, "contested": False}, existing)   # alias/reject (alias target validated)
-    sk = parse_decision((verify_ask or ask)(skeptic_prompt(cand, adv, near)))
+    sk_text, sk_err = _text_err((verify_ask or ask)(skeptic_prompt(cand, adv, near)))
+    sk = parse_decision(sk_text)
     if sk and sk["verdict"] in ("alias", "reject"):
         return _finalize(base, {**sk, "contested": True}, existing)     # skeptic refuted the promote
     if sk is None:
@@ -428,9 +444,22 @@ def backfill(yes: bool = False, step: bool = False, decide=None, *, write=None) 
 
 def run(a: argparse.Namespace, ranked_path: str | None = None, proposal_path: str | None = None,
         review_path: str | None = None, existing: list | None = None,
-        ask=None, verify_ask=None) -> None:
-    """ask/verify_ask: prompt -> response text. Default to the configured engines; tests pass
-    callables directly (the same seam decide() already has) instead of faking the registry."""
+        ask=None, verify_ask=None, *, on_cand=None, stop=None) -> None:
+    """ask/verify_ask: prompt -> (text, err) — ask_retry's own shape (#73), the same envelope
+    classify.Plan.run and synopsis.Plan.run's default ask already build. Tests pass callables
+    directly (the same seam decide() already has) instead of faking the registry; decide()
+    normalizes a bare-string-returning callable too, so the pre-#73 test fixtures still work.
+
+    `on_cand(done, total, promoted, aliased, rejected)` — the plugin's progress seam (mirrors
+    classify.Plan.run's on_book=): fires once per candidate as its future resolves.
+
+    `stop()` — checked at the head of each loop iteration, mirroring classify.Plan.run's own
+    abort seam: a truthy answer stops submitting new work and shuts the executor down with
+    `wait=False, cancel_futures=True`. The candidates already decided are still written to the
+    review file below — an aborted adjudication keeps whatever it settled, exactly like a
+    cancelled classify run keeps its partial proposal.
+
+    Both default to None, so the CLI path is byte-identical to before this seam existed."""
     review_path = review_path or review()
     if os.path.exists(review_path) and not getattr(a, "yes", False):
         raise GuardrailError(f"a pending review exists at {review_path} — apply it (scourgify promote --apply), "
@@ -442,15 +471,29 @@ def run(a: argparse.Namespace, ranked_path: str | None = None, proposal_path: st
         print("no undecided candidates — nothing to do."); return
     if ask is None:
         eng = ENGINES[a.engine](a.model, a.timeout)
-        ask = lambda p: ask_retry(eng, p)[0]
+        ask = lambda p: ask_retry(eng, p)
     if verify_ask is None and a.verify_with:
         veng = ENGINES[a.verify_with]("", a.timeout)
-        verify_ask = lambda p: ask_retry(veng, p)[0]
+        verify_ask = lambda p: ask_retry(veng, p)
     print(f"engine={a.engine}{'  verify-with=' + a.verify_with if a.verify_with else ''}  candidates: {len(cands)}")
-    rows = []
-    with ThreadPoolExecutor(max_workers=engine_workers(a.engine, a.workers)) as ex:
+    rows, cancelled = [], False
+    promoted = aliased = rejected = 0
+    ex = ThreadPoolExecutor(max_workers=engine_workers(a.engine, a.workers))
+    try:
         futs = [ex.submit(decide, c, ask, verify_ask, existing) for c in cands]
-        for fut in as_completed(futs): rows.append(fut.result())
+        for fut in as_completed(futs):
+            if stop is not None and stop():           # checked at the head of each iteration
+                cancelled = True
+                break
+            r = fut.result()
+            rows.append(r)
+            if r["verdict"] == "promote": promoted += 1
+            elif r["verdict"] == "alias": aliased += 1
+            elif r["verdict"] == "reject": rejected += 1
+            if on_cand is not None:
+                on_cand(len(rows), len(cands), promoted, aliased, rejected)
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True) if cancelled else ex.shutdown()
     rows.sort(key=lambda r: (r["verdict"] != "promote", -r["count"]))   # promotes first, by count
     os.makedirs(data_dir(), exist_ok=True)
     write_review(rows, review_path)
