@@ -753,6 +753,171 @@ def test_a_missing_synopsized_column_refuses_execute_too():
     assert "#synopsized" in result["msg"]
 
 
+# ---------------- promote / backfill (plan 02-07) ----------------
+def _promote_lib_ctx(books=None):
+    """CALIBRE_LIBRARY/SCOURGIFY_HOME point at a throwaway library/home for the duration —
+    resets `common.set_library(None)` FIRST, for the same reason `_synopsis_lib_ctx` does:
+    `job_plan_promote`/`job_execute_promote`/`job_plan_backfill`/`job_execute_backfill` all call
+    `common.set_library()` (via `_open`), a process-global override that WINS over the env var and
+    does not reset itself between tests."""
+    import contextlib
+    books = books if books is not None else [{"id": 1, "tags": []}]
+
+    @contextlib.contextmanager
+    def _cm():
+        common.set_library(None)
+        d = tempfile.mkdtemp()
+        lib = os.path.join(d, "lib")
+        os.makedirs(lib, exist_ok=True)
+        home = os.path.join(d, "home")
+        con = fixture_db.build(os.path.join(lib, "metadata.db"), books, uuid="uuid-promote-jobs")
+        con.commit()
+        con.close()
+        old = {k: os.environ.get(k) for k in ("CALIBRE_LIBRARY", "SCOURGIFY_HOME")}
+        os.environ["CALIBRE_LIBRARY"], os.environ["SCOURGIFY_HOME"] = lib, home
+        try:
+            yield lib
+        finally:
+            for k, v in old.items():
+                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+            common.set_library(None)
+    return _cm()
+
+
+def _promote_ask(text='{"verdict":"promote","reason":"novel","confidence":"high"}'):
+    """A fake `_engine_ask` return: `prompt -> (text, err)`, ask_retry's own shape (#73) — the
+    exact envelope promote.decide's normalization must handle."""
+    return lambda prompt: (text, "")
+
+
+def test_job_plan_promote_disables_non_judge_engines_with_the_traits_own_reason():
+    from scourgify import artifacts, engines
+    with _no_real_prefs(), _promote_lib_ctx() as lib:
+        os.makedirs(common.data_dir(), exist_ok=True)
+        artifacts.write_ranked([["Candidate A", 2, "", 0.0, "new"]])
+        r = jobs.job_plan_promote(lib, None, [], {})
+    assert r["refused"] is False and r["empty"] is False
+    assert r["consequence"] == "Adjudicate 1 candidate"
+    assert "apple" not in r["usable"], "apple is not judge-capable — never offered for promote"
+    apple_row = next(row for row in r["engines"] if row[1] == "apple")
+    assert apple_row[3].startswith(engines.trait("apple", "unusable"))
+
+
+def test_job_plan_promote_returns_the_d04_empty_result_with_no_ranked_artifact_written():
+    with _no_real_prefs(), _promote_lib_ctx() as lib:
+        os.makedirs(common.data_dir(), exist_ok=True)
+        r = jobs.job_plan_promote(lib, None, [], {})
+    assert r["refused"] is True, "no ranked-candidates artifact at all is a refusal, not empty"
+
+
+def test_job_execute_promote_first_dispatch_harvests_verdicts_and_writes_no_ledger_row():
+    from scourgify import artifacts
+    with _no_real_prefs(), _promote_lib_ctx() as lib:
+        os.makedirs(common.data_dir(), exist_ok=True)
+        artifacts.write_ranked([["Candidate A", 2, "", 0.0, "new"]])
+        saved = jobs._engine_ask
+        jobs._engine_ask = lambda engine_id, model, timeout: _promote_ask()
+        try:
+            plan = jobs.job_plan_promote(lib, None, [], {})
+            result = jobs.job_execute_promote(lib, None, [], plan["carry"], "claude", "", None, None)
+        finally:
+            jobs._engine_ask = saved
+        assert result["refused"] is False
+        assert result["items"], "the adjudicated verdicts must come back as review items"
+        for _label, payload in result["items"]:
+            assert payload["after"] == "promote"
+        assert artifacts.read_rows(artifacts.ledger()) == [], \
+            "nothing may be folded into the ledger before the reviewer has seen the verdicts"
+        assert os.path.exists(artifacts.review()), "the review file itself is a real, on-disk artifact"
+
+
+def test_job_execute_promote_second_dispatch_ticked_writes_exactly_ticked_ledger_rows():
+    from scourgify import artifacts, promote
+    with _no_real_prefs(), _promote_lib_ctx() as lib:
+        os.makedirs(common.data_dir(), exist_ok=True)
+        artifacts.write_ranked([["Cand A", 3, "", 0.0, "new"], ["Cand B", 2, "", 0.0, "new"],
+                                ["Cand C", 1, "", 0.0, "new"]])
+        saved = jobs._engine_ask
+        jobs._engine_ask = lambda engine_id, model, timeout: _promote_ask()
+        try:
+            plan = jobs.job_plan_promote(lib, None, [], {})
+            harvest = jobs.job_execute_promote(lib, None, [], plan["carry"], "claude", "", None, None)
+            n = len(harvest["items"])
+            assert n == 3
+            ticks = [(list(range(2)), list(range(2, n)), "apply")]   # tick the first two, leave the third
+            result = jobs.job_execute_promote(lib, None, [], plan["carry"], "claude", "", None, ticks)
+        finally:
+            jobs._engine_ask = saved
+        assert result["refused"] is False
+        ledger_rows = artifacts.read_rows(artifacts.ledger())
+        assert len(ledger_rows) == 2
+        remaining = {c["tag"] for c in promote.candidates()}
+        assert len(remaining) == 1, "the unticked candidate must still be offered next run"
+
+
+def test_job_plan_backfill_returns_the_d04_empty_result_when_nothing_to_backfill():
+    with _no_real_prefs(), _promote_lib_ctx() as lib:
+        os.makedirs(common.data_dir(), exist_ok=True)
+        r = jobs.job_plan_backfill(lib, None, [])
+    assert r["empty"] is True and r["items"] == []
+
+
+def test_job_plan_backfill_previews_the_per_book_additions():
+    from scourgify import artifacts
+    with _no_real_prefs(), _promote_lib_ctx(books=[{"id": 1, "tags": ["Existing"]}]) as lib:
+        os.makedirs(common.data_dir(), exist_ok=True)
+        with open(artifacts.ledger(), "w", newline="", encoding="utf-8") as f:
+            f.write("tag,verdict,target\nFluff,promote,\n")
+        artifacts.write_proposal([{"book_id": 1, "title": "b1", "added_tags": [],
+                                   "proposed_new": ["Fluff"]}])
+        r = jobs.job_plan_backfill(lib, None, [])
+    assert r["refused"] is False and r["empty"] is False
+    assert r["consequence"] == "Backfill 1 book"
+    assert r["carry"]["books"] == [1]
+    _label, payload = r["items"][0]
+    assert payload["book"] == 1
+    assert payload["before"] == ["Existing"] and payload["after"] == ["Existing", "Fluff"]
+
+
+def test_job_execute_backfill_writes_through_the_transport_and_reports_a_conflicting_book_as_skipped():
+    from scourgify import artifacts
+    with _no_real_prefs(), _promote_lib_ctx(books=[{"id": 1, "tags": ["Existing"]},
+                                                    {"id": 2, "tags": ["Existing"]}]) as lib:
+        os.makedirs(common.data_dir(), exist_ok=True)
+        with open(artifacts.ledger(), "w", newline="", encoding="utf-8") as f:
+            f.write("tag,verdict,target\nFluff,promote,\n")
+        artifacts.write_proposal([{"book_id": 1, "title": "b1", "added_tags": [], "proposed_new": ["Fluff"]},
+                                  {"book_id": 2, "title": "b2", "added_tags": [], "proposed_new": ["Fluff"]}])
+        plan = jobs.job_plan_backfill(lib, None, [])
+        api = FakeApi(books=(1, 2), fields=("tags",), multi=("tags",))
+        # book 2 changed since the plan was computed — a live edit the read-only sqlite snapshot never saw
+        api.set_field("tags", {1: ("Existing",), 2: ("Existing", "Surprise")})
+        result = jobs.job_execute_backfill(lib, None, [], plan["carry"], None, api)
+    assert result["refused"] is False
+    rows_by_book = {r["book"]: r for r in result["rows"]}
+    assert rows_by_book[1]["state"] == "written"
+    assert rows_by_book[2]["state"] == "skipped: changed since the plan"
+    assert result["written"] == 1
+    assert set(api.fields["tags"][1]) == {"Existing", "Fluff"}
+    assert set(api.fields["tags"][2]) == {"Existing", "Surprise"}   # untouched — the conflict wins
+
+
+def test_job_execute_backfill_a_falsy_decide_writes_nothing():
+    from scourgify import artifacts
+    with _no_real_prefs(), _promote_lib_ctx(books=[{"id": 1, "tags": ["Existing"]}]) as lib:
+        os.makedirs(common.data_dir(), exist_ok=True)
+        with open(artifacts.ledger(), "w", newline="", encoding="utf-8") as f:
+            f.write("tag,verdict,target\nFluff,promote,\n")
+        artifacts.write_proposal([{"book_id": 1, "title": "b1", "added_tags": [], "proposed_new": ["Fluff"]}])
+        plan = jobs.job_plan_backfill(lib, None, [])
+        api = FakeApi(books=(1,), fields=("tags",), multi=("tags",))
+        api.set_field("tags", {1: ("Existing",)})
+        result = jobs.job_execute_backfill(lib, None, [], plan["carry"], lambda chg, adds: None, api)
+    assert result["refused"] is False
+    assert result["written"] == 0 and result["rows"] == []
+    assert api.fields["tags"][1] == ("Existing",)     # untouched — the falsy decide aborted the write
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

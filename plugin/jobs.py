@@ -897,6 +897,244 @@ def job_plan_synopsis(lib_path, lib_uuid, ids, opts, now_uuid=None, abort=None, 
                      abort=abort, log=log, notifications=notifications)
 
 
+def _promote_cost(n_cands: int, engine: str) -> float:
+    """Rough list-price $ estimate for the engine picker — the pessimistic (never-under-quote)
+    case: every candidate is priced as an advocate call AND a skeptic call, since whether the
+    advocate promotes (the only case that reaches the skeptic) is not knowable before the call
+    runs. Same 'never under-quote' discipline `_synopsis_cost` and `classify.est_cost`'s
+    `out_tokens` fix both follow."""
+    from scourgify import engines
+    i, o = engines.PRICING.get(engine, (0.0, 0.0))
+    out_tok = engines.trait(engine, 'out_tokens')
+    tokens_in = 700 / 4          # rough prompt size: candidate context + nearest-tags + schema
+    return n_cands * (2 * tokens_in * i + 2 * out_tok * o) / 1e6
+
+
+def job_plan_promote(lib_path, lib_uuid, ids, opts, now_uuid=None, abort=None, log=None,
+                     notifications=None):
+    """PLAN: `promote.candidates()` — the undecided `proposed_new` candidates awaiting
+    adjudication. `ids` is unused (promote works at library scope, over classify's OUTPUT, never a
+    book selection) — accepted only so this job matches the ceremony's uniform (lib, uuid, ids,
+    ...) argument shape every other verb's PLAN job takes.
+
+    Engine rows are JUDGE-AWARE, unlike classify's/synopsis's own engine pickers: a non-judge
+    engine (`TRAITS['judge']` False — apple, too weak for adversarial refereeing) is ALWAYS
+    rendered disabled, carrying `engines.trait(e, 'unusable')` as its own reason, even when it
+    otherwise has a key or on-device runtime available. Never a name comparison
+    (`engine_id == 'apple'` anywhere) — the capability comes from the trait row.
+
+    No candidates left to adjudicate (nothing decided yet, or every one already ledgered) is the
+    D-04 empty result; no ranked-candidates artifact at all (`promote.candidates()`'s own
+    GuardrailError) is a refused result via `_ceremony`."""
+    def body(con, ids, ctx):
+        import os
+        from scourgify import engines
+        from scourgify.artifacts import rank as rank_path
+        from scourgify.promote import candidates as promote_candidates
+        cands = promote_candidates()
+        if not cands:
+            return plan_result('promote', [], [], '', {})
+
+        keys = engines.resolve_keys(stored_keys())
+        raw = engines.engine_rows(env=keys)
+        rows, judge_usable = [], []
+        for name, ok, hint in raw:
+            if ok and engines.trait(name, 'judge'):
+                judge_usable.append(name)
+                rows.append((name, ok, hint))
+            else:
+                rows.append((name, False, engines.trait(name, 'unusable')))
+        opts_engines = engines.engine_options(rows, len(cands), _promote_cost)
+        default_engine = engines.default_engine_id(opts_engines, judge=True, usable=judge_usable)
+        # engine_options carries no usability flag and no TRAITS 'limits' text (its 4-tuple is
+        # (key, id, id, label) only) and picker.py may import NOTHING from scourgify (D-01) —
+        # same enrichment job_plan_classify/job_plan_synopsis already hand their own pickers.
+        limits = {e: engines.trait(e, 'limits') for e, _ok, _hint in rows}
+
+        summary = ['%d undecided candidate(s) awaiting adjudication' % len(cands),
+                  'from %s' % os.path.basename(rank_path())]
+        consequence = 'Adjudicate %d candidate%s' % (len(cands), '' if len(cands) == 1 else 's')
+        carry = {'limit': (opts or {}).get('limit'), 'batch': (opts or {}).get('batch')}
+        result = plan_result('promote', summary, [], consequence, carry)
+        # items is deliberately [] here — an adjudication verdict does not exist until the
+        # advocate/skeptic pass has actually run (same reason job_plan_synopsis leaves items
+        # empty), so `plan_result`'s own `not items` empty test would be wrong: there IS real work
+        # (cands is non-empty), it just has no items to show yet.
+        result['empty'] = False
+        result['engines'] = opts_engines
+        result['default_engine'] = default_engine
+        result['usable'] = judge_usable
+        result['engine_limits'] = limits
+        return result
+
+    return _ceremony('promote', body, lib_path, lib_uuid, ids, now_uuid,
+                     abort=abort, log=log, notifications=notifications)
+
+
+def job_execute_promote(lib_path, lib_uuid, ids, carry, engine_id, model, api, ticks,
+                        now_uuid=None, abort=None, log=None, notifications=None):
+    """EXECUTE, two dispatches sharing ONE job function — the same D-13 shape `job_execute_synopsis`
+    uses, for the same reason: an adjudication verdict does not exist until the advocate/skeptic
+    engine pass has actually run, so the PLAN job above cannot harvest review items for it.
+
+    First dispatch (`ticks=None`): run `promote.run()` for real (the advocate + skeptic pass, on
+    the engine the picker's button named), then harvest the verdicts as `(label, payload)` review
+    items via `promote.apply_decisions_step(decide=_record_decide()[0])` (D-02). NOTHING is folded
+    into the overrides directory or the ledger on this dispatch (T-02-27): the recorder's decide
+    always answers 'skip', so `apply_decisions_step` returns before ever calling
+    `apply_decisions`. `promote.run` itself writes ONLY the review CSV (a plain file, not a
+    Calibre write), so this dispatch constructs no write transport.
+
+    Second dispatch (`ticks` a list): replay the reviewer's ticks through the SAME
+    `apply_decisions_step` — this folds only the TICKED verdicts into the overrides directory and
+    the ledger; an unticked verdict gets NO ledger row (asserted by this plan's own tests, not
+    assumed), so it stays undecided and `promote.candidates()` offers it again next run. Also
+    writes no book field, so no write transport here either — `promote` writes no book field at
+    all, which is what makes this whole verb pair (unlike backfill) writeless from Calibre's own
+    point of view."""
+    def body(con, ids, ctx):
+        from scourgify import promote
+        cands = promote.candidates()
+        if not cands:
+            return plan_result('promote', [], [], '', {})   # nothing left to adjudicate
+
+        if ticks is None:
+            # first dispatch: run the real adjudication, harvest the review items, apply NOTHING
+            a = promote.build_parser().parse_args(['--yes'])
+            if carry.get('limit'):
+                a.limit = carry['limit']
+            if carry.get('batch'):
+                a.batch = carry['batch']
+            a.engine = engine_id
+            a.model = model or ''
+            ask = _engine_ask(engine_id, model, a.timeout)
+
+            def on_cand(done, total, promoted, aliased, rejected):
+                if notifications is not None:
+                    notifications.put((done / max(total, 1),
+                                       'promote %d · alias %d · reject %d' % (promoted, aliased, rejected)))
+
+            stop = (lambda: abort is not None and abort.is_set())
+            promote.run(a, ask=ask, on_cand=on_cand, stop=stop)
+
+            decide, calls = _record_decide()
+            promote.apply_decisions_step(decide=decide)
+            items = calls[0]['items'] if calls else []
+            n = len(items)
+            consequence = ('Review %d verdict%s' % (n, '' if n == 1 else 's') if items
+                          else 'Nothing to review (no applicable verdicts)')
+            result = plan_result('promote', [], items, consequence, carry)
+            result['empty'] = False
+            return result
+
+        # second dispatch: replay the reviewer's ticks — folds only the ticked verdicts
+        from scourgify.artifacts import read_rows as _read_rows
+        from scourgify.promote import VERDICTS, review as review_path
+        review_p = review_path()
+        raw_rows = _read_rows(review_p)
+        actionable = [r for r in raw_rows if (r.get('verdict') or '').strip().lower() in VERDICTS]
+        ticks_list = list(ticks)
+        if ticks_list:
+            acc, rej, action = ticks_list[0]
+        else:
+            acc, rej, action = list(range(len(actionable))), [], 'apply'
+        accepted_tags = ({actionable[i].get('tag', '') for i in acc}
+                        if action not in ('skip', 'quit') else set())
+
+        promote.apply_decisions_step(decide=_replay_decide(ticks))
+        rows = [{'book': None, 'title': r.get('tag', ''), 'field': 'verdict', 'before': '',
+                'after': r.get('verdict', ''),
+                'state': 'written' if r.get('tag', '') in accepted_tags else 'skipped: not ticked'}
+                for r in actionable]
+        from scourgify.common import WriteResult
+        wr = WriteResult(run_id=None, backup=None, ops=0, books=0, skipped=[],
+                         outcome='ok' if accepted_tags else 'noop')
+        return execute_result('promote', rows, wr)
+
+    return _ceremony('promote', body, lib_path, lib_uuid, ids, now_uuid,
+                     abort=abort, log=log, notifications=notifications)
+
+
+# ---------------------------------------------------------------------- backfill (the deterministic,
+# no-LLM close of the loop: apply promoted/aliased tags onto the books that first proposed them)
+def job_plan_backfill(lib_path, lib_uuid, ids, now_uuid=None, abort=None, log=None,
+                      notifications=None):
+    """PLAN: `promote.backfill_plan()` — which books would gain a promoted/aliased tag, and what
+    would each gain? `ids` is unused (backfill works at library scope, over every book any
+    proposal ever named) — accepted only for the ceremony's uniform argument shape."""
+    def body(con, ids, ctx):
+        from scourgify import promote
+        from scourgify.common import titles as book_titles
+        chg, adds, before = promote.backfill_plan()
+        if not chg:
+            return plan_result('backfill', [], [], '', {})
+
+        titles = book_titles(con, list(adds))
+        items = [('#%d  %s  + %s' % (b, str(titles.get(b, ''))[:44], ', '.join(sorted(adds[b]))),
+                 {'book': b, 'title': titles.get(b, ''), 'field': 'tags',
+                  'before': sorted(set(chg.get(b, [])) - set(adds[b])), 'after': sorted(chg.get(b, []))})
+                for b in sorted(adds)]
+        total = sum(len(v) for v in adds.values())
+        summary = ['%d book(s) gain %d promoted/aliased tag assignment(s)' % (len(chg), total)]
+        consequence = 'Backfill %d book%s' % (len(chg), '' if len(chg) == 1 else 's')
+        carry = {'books': sorted(chg)}
+        return plan_result('backfill', summary, items, consequence, carry)
+
+    return _ceremony('backfill', body, lib_path, lib_uuid, ids, now_uuid,
+                     abort=abort, log=log, notifications=notifications)
+
+
+def job_execute_backfill(lib_path, lib_uuid, ids, carry, decide, api, now_uuid=None, abort=None,
+                         log=None, notifications=None):
+    """EXECUTE: `promote.backfill(decide=decide, write=_Writer(api))`. `decide` is the caller's
+    backfill-shaped adapter — `decide(chg, adds) -> chg_to_write`, a FALSY return aborts (D-...):
+    `picker.backfill_decide(dialog)`, built on the GUI thread from the reviewer's ticks, handed
+    straight through here. This is a DIFFERENT shape from `checklist_decide`'s
+    `(title, items, subtitle) -> (accepted_idx, rejected_idx, action)` (T-02-15) — conflating the
+    two would let an aborted review read as an empty-but-successful write, so `jobs.py` never
+    fabricates this one itself the way `_record_decide`/`_replay_decide` do for the checklist
+    shape; `decide=None` (the one-click Run path, nothing reviewed) is treated as accept-everything.
+
+    `promote.backfill_plan()` is recomputed fresh — TWICE, once here (to learn which books the
+    reviewer actually accepted, since `promote.backfill`'s own internal compute is opaque to this
+    job) and once again inside `promote.backfill` itself for the real write — never a carried-
+    forward ops list, so the apply-time conflict filter is what decides whether a since-changed
+    book is skipped (T-02-30), not `carry`. `decide` is a pure read of already-captured tick
+    state, so calling it twice is safe."""
+    def body(con, ids, ctx):
+        from scourgify import promote
+        from scourgify.common import titles as book_titles, WriteResult
+        chg, adds, before = promote.backfill_plan()
+        effective_decide = decide if decide is not None else (lambda c, a: c)
+        chg_to_write = effective_decide(chg, adds)
+        accepted = set(chg_to_write) if chg_to_write else set()
+        if not accepted:
+            wr = WriteResult(run_id=None, backup=None, ops=0, books=0, skipped=[], outcome='noop')
+            return execute_result('backfill', [], wr)
+
+        writer = _Writer(ctx['api'])
+        promote.backfill(decide=effective_decide, write=writer)
+        wr = writer.result
+        if wr is None:
+            wr = WriteResult(run_id=None, backup=None, ops=0, books=0, skipped=[], outcome='noop')
+
+        skipped_pairs = {(b, f) for b, f in wr.skipped}
+        titles = book_titles(con, sorted(accepted))
+        rows, touched = [], []
+        for b in sorted(accepted):
+            skipped = (b, 'tags') in skipped_pairs
+            state = 'skipped: changed since the plan' if skipped else 'written'
+            rows.append({'book': b, 'title': titles.get(b, ''), 'field': 'tags',
+                        'before': ', '.join(before.get(b, [])), 'after': ', '.join(chg.get(b, [])),
+                        'state': state})
+            if not skipped:
+                touched.append(b)
+        return execute_result('backfill', rows, wr, touched=touched)
+
+    return _ceremony('backfill', body, lib_path, lib_uuid, ids, now_uuid, api=api,
+                     abort=abort, log=log, notifications=notifications)
+
+
 def job_execute_synopsis(lib_path, lib_uuid, ids, carry, engine_id, model, api, ticks,
                          now_uuid=None, abort=None, log=None, notifications=None):
     """EXECUTE, two dispatches sharing ONE job function — the shape D-13's per-book review needs
