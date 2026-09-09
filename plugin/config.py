@@ -19,54 +19,25 @@ dialog makes is a trait row first, so a newly registered engine appears here by 
 The verification probe is a network call, so it is a ThreadedJob like everything else (B5.4) —
 never inline in the dialog, which runs on the GUI thread.
 
+The stored-key store itself (`_prefs`/`stored_keys`) and the verify job (`job_verify`) live in
+`plugin/jobs.py` (plan 02-03 task 2), not here: this module imports `qt.core` at module level, and
+`jobs.py` — which classify's PLAN/EXECUTE jobs also need `stored_keys()` from, and which must stay
+importable under plain CI Python with no Calibre and no GUI — cannot import a module that does.
+ONE owner of the stored-key shape, reachable from both this Qt dialog and a worker job.
+
 ponytail: plain QWidget + a grid, no model/view, no per-engine subclass. Five rows.
 """
 import os
 
 from qt.core import (QGridLayout, QGroupBox, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget)
 
-from calibre.utils.config import JSONConfig
-
-# The same path FanFicFare uses: ~/Library/Preferences/calibre/plugins/scourgify.json
-prefs = JSONConfig('plugins/scourgify')
-prefs.defaults['keys'] = {}
+from calibre_plugins.scourgify.jobs import job_verify, stored_keys, _prefs
 
 BANNER = (
     '<b>Keys are saved in plain text</b>, in Calibre’s own plugin settings file — the same '
     'place every Calibre plugin keeps its logins. Anyone with your config folder can read them, so '
     'don’t sync it somewhere public, and rotate a key if you ever share it. '
     '<code>OPENAI_API_KEY</code> and friends still win when set, so scripts keep working.')
-
-
-def stored_keys() -> dict:
-    """{engine: key} as saved by this dialog. The one reader — phase 6's classify verb resolves
-    through `engines.resolve_keys(stored_keys())` so the GUI and a shell agree about which key wins."""
-    return dict(prefs['keys'] or {})
-
-
-# ---------------------------------------------------------------- job function (worker thread)
-
-def job_verify(engine, key, abort=None, log=None, notifications=None):
-    """One cheap request against a real endpoint, classified per the auth taxonomy (B5.4 / B3.6).
-
-    `key` is passed in rather than read from anywhere: the whole point of the constructor seam is
-    that a stored key can reach an engine without the environment being touched. It never reaches
-    `log` or the job description.
-
-    Apple is refused, not skipped quietly: constructing it spawns a subprocess pipe, and
-    `usable_engines` already answers the only question there is about it (is the afm binary or a
-    swift toolchain present)."""
-    from scourgify import engines
-    if engine not in engines.ENGINE_ENV:
-        return {'engine': engine, 'ok': False, 'cls': '', 'detail': 'on-device — nothing to verify'}
-    try:
-        eng = engines.ENGINES[engine]('', 30, env={engines.ENGINE_ENV[engine][0]: key})
-    except Exception as e:                                   # a missing/blank key never gets to fly
-        return {'engine': engine, 'ok': False, 'cls': engines.AUTH,
-                'detail': engines.redact('%s' % e, key)}
-    out, reason = engines.ask_retry(eng, 'Reply with the single word: ok', tries=1)
-    return {'engine': engine, 'ok': bool(out and not reason), 'cls': engines.failure_class(reason),
-            'detail': reason or (out or '').strip()[:80]}
 
 
 VERDICT = {'refusal': 'refused the probe — the key works',   # a refusal proves auth succeeded
@@ -211,9 +182,9 @@ class ConfigWidget(QWidget):
                 continue
             key = self.engines.unmask(field.text(), stored.get(e, ''))
             if key: out[e] = key
-        prefs['keys'] = out
+        _prefs()['keys'] = out
         try:
-            os.chmod(prefs.file_path, 0o600)
+            os.chmod(_prefs().file_path, 0o600)
         except OSError:
             pass                                           # a config dir we cannot chmod is not a
         return out                                         # reason to lose the keys

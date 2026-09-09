@@ -44,6 +44,86 @@ def _open(lib_path, lib_uuid, now_uuid=None):
     return common.ro_connect(), None
 
 
+# ---------------------------------------------------------------------- stored keys (relocated
+# from plugin/config.py, plan 02-03 task 2) — `plugin/config.py` imports `qt.core` at module
+# level, so THIS file (which must stay importable under plain CI Python with no Calibre and no
+# GUI, per the module docstring above) cannot import it. The key store therefore lives here, with
+# `config.py` importing it back — ONE owner of the stored-key shape, reachable from both a Qt
+# settings dialog and a worker job.
+_PREFS = None
+
+
+def _prefs():
+    """Lazily-constructed, cached `JSONConfig('plugins/scourgify')` — the import of
+    `calibre.utils.config` lives INSIDE this function, like every other non-stdlib import in this
+    file, so importing `jobs` costs nothing under plain CI Python."""
+    global _PREFS
+    if _PREFS is None:
+        from calibre.utils.config import JSONConfig
+        _PREFS = JSONConfig('plugins/scourgify')
+        _PREFS.defaults['keys'] = {}
+    return _PREFS
+
+
+def stored_keys() -> dict:
+    """{engine: key} as saved by the settings dialog. The one reader — classify's PLAN/EXECUTE
+    jobs resolve through `engines.resolve_keys(stored_keys())` so the GUI and a shell agree about
+    which key wins (env beats stored, NLSpec B5.2)."""
+    return dict(_prefs()['keys'] or {})
+
+
+def job_verify(engine, key, abort=None, log=None, notifications=None):
+    """One cheap request against a real endpoint, classified per the auth taxonomy (B5.4 / B3.6).
+
+    `key` is passed in rather than read from anywhere: the whole point of the constructor seam is
+    that a stored key can reach an engine without the environment being touched. It never reaches
+    `log` or the job description.
+
+    Apple is refused, not skipped quietly: constructing it spawns a subprocess pipe, and
+    `usable_engines` already answers the only question there is about it (is the afm binary or a
+    swift toolchain present)."""
+    from scourgify import engines
+    if engine not in engines.ENGINE_ENV:
+        return {'engine': engine, 'ok': False, 'cls': '', 'detail': 'on-device — nothing to verify'}
+    try:
+        eng = engines.ENGINES[engine]('', 30, env={engines.ENGINE_ENV[engine][0]: key})
+    except Exception as e:                                   # a missing/blank key never gets to fly
+        return {'engine': engine, 'ok': False, 'cls': engines.AUTH,
+                'detail': engines.redact('%s' % e, key)}
+    out, reason = engines.ask_retry(eng, 'Reply with the single word: ok', tries=1)
+    return {'engine': engine, 'ok': bool(out and not reason), 'cls': engines.failure_class(reason),
+            'detail': reason or (out or '').strip()[:80]}
+
+
+def _engine_ask(engine_id, model, timeout):
+    """The ONE place THIS phase constructs an engine for a classify run — modelled exactly on
+    `job_verify`'s existing pattern. Never call `Plan.run()` with `ask=None` from a job: the
+    module's own default construction passes no `env=`, so it can only see process-environment
+    keys, and a key typed into the settings dialog is invisible to it (the single most likely
+    "works for me" bug this phase can ship — see 02-RESEARCH.md Pattern 3 / Pitfall 1)."""
+    from scourgify import engines
+    env = engines.resolve_keys(stored_keys())
+    eng = engines.ENGINES[engine_id](model, timeout, env=env)
+    return lambda prompt: engines.ask_retry(eng, prompt)
+
+
+def _require_column(con, label, verb):
+    """The pre-flight that keeps a bare `ValueError` out of the job-failure path: `ops.apply_ops`'s
+    column-creation branch raises a plain `ValueError` whenever the legacy DB is absent — which is
+    ALWAYS true in-process (the in-process contract deliberately refuses `create_column`, since the
+    legacy-DB reopen it needs would desync a live GUI's models) — and a plain `ValueError` is not a
+    `GuardrailError`, so it would reach `gui.job_exception` as a raw traceback instead of `_ceremony`'s
+    clean refused result.
+
+    Scoped exactly to the column-creation case: only reached on the FIRST classify (or synopsis)
+    run on a library, and must never refuse an ordinary run just because some book lacks a value."""
+    from scourgify import common
+    if common.custom_column_id(con, label) is None:
+        raise common.GuardrailError(
+            '#%s does not exist in this library yet — run `scourgify setup` with Calibre closed, '
+            'then try again.' % label)
+
+
 # ---------------------------------------------------------------------- read jobs (relocated from
 # action.py verbatim, task 2 of the D-12 split — action.py now holds ZERO core imports)
 def job_inspect(lib_path, lib_uuid, ids, now_uuid=None, abort=None, log=None, notifications=None):
@@ -206,18 +286,24 @@ class _Writer:
 
     This is the ONLY place `engine`/`model` reach the edit log — the reason no producer function
     (`staleness.write`, and every later verb's write function) needs an `engine=` parameter of its
-    own; the transport carries it instead."""
+    own; the transport carries it instead.
 
-    def __init__(self, api, engine=None, model=None):
+    `outcome=` (D-08) names the footer outcome on the success path only, threaded straight through
+    to `common.write_ops`'s own `outcome=` — this is what lets classify's EXECUTE job close a
+    cancelled run's footer as "cancelled" instead of "ok" while its already-applied ops stay
+    logged and undoable exactly like an uninterrupted run's."""
+
+    def __init__(self, api, engine=None, model=None, outcome=None):
         self.api = api
         self.engine = engine
         self.model = model
+        self.outcome = outcome
         self.result = None
 
     def __call__(self, ops, force=False, tool='plugin', scope=None):
         from scourgify import common
         self.result = common.write_ops(self.api, ops, force=force, tool=tool, scope=scope,
-                                       engine=self.engine, model=self.model)
+                                       engine=self.engine, model=self.model, outcome=self.outcome)
         return self.result
 
 
@@ -343,4 +429,165 @@ def job_execute_staleness(lib_path, lib_uuid, ids, carry, api, now_uuid=None, ab
         return execute_result('staleness', out_rows, wr, touched=touched)
 
     return _ceremony('staleness', body, lib_path, lib_uuid, ids, now_uuid, api=api,
+                     abort=abort, log=log, notifications=notifications)
+
+
+# ---------------------------------------------------------------------- classify (the highest-
+# stakes verb this phase builds — the price on the engine button IS the confirmation, D-06/D-07)
+_CLASSIFY_BATCH_DEFAULT = 200   # a chunk a user can finish in one sitting — the CLI's own --unclassified default
+
+
+def job_scope_rows(lib_path, lib_uuid, ids, now_uuid=None, abort=None, log=None, notifications=None):
+    """Read job: `classify.scope_options(...)`'s rows plus the never-classified batch default.
+
+    `scope_options` needs `select.changed` and `select.pick('unclassified')`, both library reads —
+    they must never run on the GUI thread, which is the entire reason this is a job and not a
+    method on the scope dialog itself."""
+    con, err = _open(lib_path, lib_uuid, now_uuid)
+    if err:
+        return {'refused': True, 'msg': err}
+    try:
+        from scourgify import classify, common, select
+        ch = select.changed(con)
+        outstanding = len(select.pick(con, 'unclassified'))
+        total = common.book_count(con)
+        opts, default = classify.scope_options(ch, total, outstanding)
+        return {'refused': False, 'msg': '', 'opts': opts, 'default': default,
+                'batch_default': _CLASSIFY_BATCH_DEFAULT}
+    finally:
+        con.close()
+
+
+def job_plan_classify(lib_path, lib_uuid, ids, scope_spec, now_uuid=None, abort=None, log=None,
+                      notifications=None):
+    """PLAN: resolve the classify scope ONCE via `classify.plan()` — the expensive text extraction
+    never runs twice, and the price the engine picker shows is over the exact resolved `todo` set
+    the EXECUTE job will bill.
+
+    `scope_spec` is the plain dict the scope dialog (or the never-classified shortcut) produced:
+    `{'mode': 'ids'|'changed'|'unclassified'|'last'|'all', 'batch': int|None, 'last': int|None}`.
+    `mode='ids'` means "exactly the books in `ids`" — the plugin's own selection-only scope, never
+    one of `scope_options`' own rows (those never emit an id of `'ids'`); every other mode maps
+    onto the SAME scope flag `classify`'s CLI parser already exposes, so the plugin and the CLI
+    can never disagree about what a scope means."""
+    def body(con, ids, ctx):
+        from scourgify import classify
+        _require_column(con, 'wrangled', 'classify')
+        a = classify.default_opts()
+        mode = (scope_spec or {}).get('mode')
+        if mode == 'ids':
+            if not ids:
+                return plan_result('classify', [], [], '', {})
+            a.books = ','.join(str(i) for i in ids)
+        elif mode == 'changed':
+            a.incremental = True
+        elif mode == 'unclassified':
+            a.unclassified = True
+            a.batch = (scope_spec or {}).get('batch') or _CLASSIFY_BATCH_DEFAULT
+        elif mode == 'last':
+            a.last = (scope_spec or {}).get('last') or 0
+        elif mode == 'all':
+            a.all = True
+        else:                                    # 'skip', or an unrecognised mode — nothing to plan
+            return plan_result('classify', [], [], '', {})
+
+        p = classify.plan(a)
+        if not p.todo:
+            return plan_result('classify', [], [], '', {})
+
+        from scourgify import engines
+        keys = engines.resolve_keys(stored_keys())
+        engs = engines.engine_rows(env=keys)
+        usable = engines.usable_engines(env=keys)
+        opts = engines.engine_options(engs, len(p.todo), classify.est_cost)
+        default_engine = engines.default_engine_id(opts, usable=usable)
+
+        items = [('#%d  %s' % (b, str(p.titles.get(b, ''))[:64]), {'book': b, 'title': p.titles.get(b, '')})
+                for b, _d in p.todo]
+        summary = ['%d book(s) to send this run' % len(p.todo),
+                  '%d candidate(s) in scope' % len(p.targets)]
+        consequence = 'Classify %d book%s' % (len(p.todo), '' if len(p.todo) == 1 else 's')
+        carry = {'todo_ids': [b for b, _d in p.todo], 'n_todo': len(p.todo),
+                'n_targets': len(p.targets), 'scope_spec': scope_spec}
+        result = plan_result('classify', summary, items, consequence, carry)
+        result['engines'] = opts
+        result['default_engine'] = default_engine
+        return result
+
+    return _ceremony('classify', body, lib_path, lib_uuid, ids, now_uuid,
+                     abort=abort, log=log, notifications=notifications)
+
+
+def job_execute_classify(lib_path, lib_uuid, ids, carry, engine_id, model, api, now_uuid=None,
+                         abort=None, log=None, notifications=None):
+    """EXECUTE: the engine pass and the write, together (D-05) — ONE job, so there is no second
+    confirmation between the price the user saw and the spend: `p.opts.yes = True` below is what
+    makes the scope step the answer to `classify.spend_gate` — the user already clicked a button
+    that named the price, so a second dialog here would be exactly the confirmation this phase
+    deletes.
+
+    Rebuilds the plan from `carry['scope_spec']` RESTRICTED to `carry['todo_ids']` (mode `'ids'`)
+    — the set sent to the engine is exactly the set that was priced, never a re-resolve that could
+    widen it (a book added to the library between PLAN and EXECUTE must not silently join a run
+    whose price the user already confirmed)."""
+    def body(con, ids, ctx):
+        from scourgify import artifacts, classify
+        from scourgify.common import current_tags, titles as book_titles
+        _require_column(con, 'wrangled', 'classify')
+        todo_ids = carry['todo_ids']
+        if not todo_ids:
+            from scourgify.common import WriteResult
+            wr = WriteResult(run_id=None, backup=None, ops=0, books=0, skipped=[], outcome='noop')
+            return execute_result('classify', [], wr)
+
+        a = classify.default_opts()
+        a.books = ','.join(str(i) for i in todo_ids)
+        p = classify.plan(a)
+        p.opts.engine = engine_id
+        p.opts.model = model
+        p.opts.yes = True                        # the scope step already answered classify.spend_gate
+
+        cur = current_tags(con)
+        titles = book_titles(con, todo_ids)
+        before = {b: sorted(cur.get(b, set())) for b in todo_ids}
+
+        ask = _engine_ask(engine_id, model, p.opts.timeout)
+        stop = (lambda: abort is not None and abort.is_set())
+
+        def on_book(done, total, tagged, failed):
+            if notifications is not None:
+                notifications.put((done / max(total, 1),
+                                   'tagged %d · failed %d' % (tagged, failed)))
+
+        p.run(ask=ask, on_book=on_book, stop=stop)
+
+        writer = _Writer(ctx['api'], engine=engine_id, model=model,
+                         outcome=('cancelled' if p.cancelled else None))
+        classify.apply_proposal(write=writer)          # the whole pending proposal (CLI parity)
+        wr = writer.result
+
+        skipped_pairs = {(b, f) for b, f in wr.skipped}
+        rows, touched = [], []
+        for b, _d in p.todo:
+            entry = p.proposal.get(b)
+            if entry is None:
+                continue                          # errored this run — reported via engine_failures
+            vt, _nt = entry
+            after = sorted(set(before.get(b, ())) | set(vt))
+            skipped = (b, 'tags') in skipped_pairs
+            state = ('skipped: changed since the plan' if skipped
+                    else 'written' if vt else 'no new tags')
+            rows.append({'book': b, 'title': titles.get(b, ''), 'field': 'tags',
+                        'before': ', '.join(before.get(b, ())), 'after': ', '.join(after),
+                        'state': state})
+            if not skipped:
+                touched.append(b)
+
+        fails = {int(r['book_id']): r.get('reason', '') for r in artifacts.read_rows(artifacts.fail())
+                if str(r.get('book_id', '')).isdigit()}
+        engine_failures = [(b, fails[b]) for b in todo_ids if b in fails]
+
+        return execute_result('classify', rows, wr, engine_failures=engine_failures, touched=touched)
+
+    return _ceremony('classify', body, lib_path, lib_uuid, ids, now_uuid, api=api,
                      abort=abort, log=log, notifications=notifications)

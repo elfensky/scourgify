@@ -26,6 +26,20 @@ import test_write_path as _test_write_path             # noqa: E402 — the shar
 
 
 FakeApi = _test_write_path.FakeApi
+DESC = "A long enough description for the classifier to consider this book usable. " * 2
+
+
+def _classify_lib(n, wrangled=True):
+    """A throwaway library of n sendable (long-description) books, optionally missing the
+    #wrangled column (to drive the missing-column pre-flight refusal)."""
+    d = tempfile.mkdtemp()
+    books = [{"id": i, "added": "2026-01-01 %02d:%02d:%02d" % ((i // 3600) % 24, (i // 60) % 60, i % 60),
+             "desc": DESC} for i in range(1, n + 1)]
+    custom = [("wrangled", {})] if wrangled else []
+    con = fixture_db.build(os.path.join(d, "metadata.db"), books, custom=custom)
+    con.commit()
+    con.close()
+    return d
 
 
 def _lib(n=2):
@@ -194,6 +208,157 @@ def test_single_value_none_and_empty_string_compare_equal():
         writer([common.op_set_field("#status", {1: "Hiatus"}, expected={1: ""})])
     assert writer.result.skipped == []
     assert api.fields["#status"][1] == "Hiatus"
+
+
+# ---------------- classify: the highest-stakes verb (plan 02-03) ----------------
+def test_job_plan_classify_prices_over_the_resolved_todo_set_not_the_selection():
+    """The engine picker's price must be computed over len(todo), never the selection size that
+    triggered the menu — a 1-book selection choosing the whole-library scope must price 5 books."""
+    lib = _classify_lib(5)
+    saved_sk = jobs.stored_keys
+    jobs.stored_keys = lambda: {}      # PLAN prices every USABLE engine — never reach real JSONConfig
+    try:
+        with _pointed_at(lib):
+            r = jobs.job_plan_classify(lib, None, [1], {"mode": "all"})
+    finally:
+        jobs.stored_keys = saved_sk
+    assert r["refused"] is False and r["empty"] is False
+    assert r["carry"]["n_todo"] == 5
+    assert any("for 5 books" in row[3] for row in r["engines"]), r["engines"]
+    assert r["default_engine"]
+
+
+def test_job_plan_classify_returns_the_d04_empty_result_when_nothing_is_outstanding():
+    lib = _classify_lib(0, wrangled=True)
+    with _pointed_at(lib):
+        r = jobs.job_plan_classify(lib, None, [], {"mode": "all"})
+    assert r["empty"] is True and r["refused"] is False
+
+
+def test_job_plan_classify_refuses_cleanly_without_the_wrangled_column():
+    """Pitfall 3/5/6 (02-RESEARCH.md): a library that has never run `scourgify setup` must refuse
+    with a clean GuardrailError-derived result, never a bare ValueError from ops.apply_ops."""
+    from scourgify import artifacts
+    lib = _classify_lib(3, wrangled=False)
+    with _pointed_at(lib):
+        r = jobs.job_plan_classify(lib, None, [], {"mode": "all"})
+        assert r["refused"] is True
+        assert "#wrangled" in r["msg"] and "scourgify setup" in r["msg"]
+        assert not os.path.exists(artifacts.prop()), "a refused PLAN must write nothing"
+
+
+def test_engine_ask_reaches_a_stored_only_key_never_touching_the_environment():
+    """The single most likely 'works for me' bug this phase can ship (02-RESEARCH.md Pattern 3 /
+    Pitfall 1): a key typed into the settings dialog and never exported must reach the engine
+    _engine_ask constructs, and os.environ must stay untouched."""
+    from scourgify import engines
+    saved_engine = engines.ENGINES.get("openai")
+    saved_env = os.environ.pop("OPENAI_API_KEY", None)
+    seen = {}
+
+    class Capture:
+        def __init__(self, model, timeout, env=None):
+            seen["env"] = dict(env or {})
+
+        def ask(self, prompt):
+            return "ok"
+
+    engines.ENGINES["openai"] = Capture
+    saved_sk = jobs.stored_keys
+    jobs.stored_keys = lambda: {"openai": "sk-from-the-settings-dialog"}
+    try:
+        ask = jobs._engine_ask("openai", "", 30)
+        out, err = ask("ping")
+        env_during = os.environ.get("OPENAI_API_KEY")     # captured BEFORE the finally restores it
+    finally:
+        engines.ENGINES["openai"] = saved_engine
+        jobs.stored_keys = saved_sk
+        if saved_env is not None:
+            os.environ["OPENAI_API_KEY"] = saved_env
+    assert out == "ok" and err == ""
+    assert seen["env"].get("OPENAI_API_KEY") == "sk-from-the-settings-dialog"
+    assert env_during is None, "the environment must be left alone"
+
+
+class _FastNoMatchEngine:
+    """A trivial engine: no vocab hits, no proposed-new — fast, deterministic, no network."""
+    def __init__(self, model, timeout, env=None):
+        pass
+
+    def ask(self, prompt):
+        return '{"tags": [], "new": []}'
+
+
+def test_job_execute_classify_sets_yes_true_so_the_spend_gate_is_never_reached():
+    """The scope step already answered classify.spend_gate — a 201-book todo (above SPEND_GATE)
+    on a non-free engine must start with no prompt and no GuardrailError."""
+    from scourgify import classify, engines
+    lib = _classify_lib(201)
+    saved_engine = engines.ENGINES.get("openai")
+    saved_sk = jobs.stored_keys
+    engines.ENGINES["openai"] = _FastNoMatchEngine
+    jobs.stored_keys = lambda: {"openai": "sk-test"}     # _engine_ask must never reach real JSONConfig
+    try:
+        with _pointed_at(lib), _test_write_path._fake_calibre_utils_date():
+            assert classify.SPEND_GATE < 201
+            plan = jobs.job_plan_classify(lib, None, [], {"mode": "all"})
+            assert plan["refused"] is False and plan["carry"]["n_todo"] == 201
+            api = FakeApi(books=tuple(range(1, 202)), fields=("tags", "#wrangled"), multi=("tags",))
+            result = jobs.job_execute_classify(lib, None, [], plan["carry"], "openai", "", api)
+    finally:
+        engines.ENGINES["openai"] = saved_engine
+        jobs.stored_keys = saved_sk
+    assert result["refused"] is False
+    assert result["outcome"] == "ok"
+
+
+class _AbortAfter:
+    """A Calibre-shaped abort stub: `.is_set()` flips True once called more than `after` times —
+    mirrors the counting shape Plan.run's own `stop=` seam is pinned against."""
+    def __init__(self, after):
+        self.n = 0
+        self.after = after
+
+    def is_set(self):
+        self.n += 1
+        return self.n > self.after
+
+
+def test_job_execute_classify_closes_a_cancelled_run_as_cancelled_and_still_applies_it():
+    from scourgify import engines
+    lib = _classify_lib(5)
+    saved_engine = engines.ENGINES.get("openai")
+    saved_sk = jobs.stored_keys
+    engines.ENGINES["openai"] = _FastNoMatchEngine
+    jobs.stored_keys = lambda: {"openai": "sk-test"}
+    try:
+        with _pointed_at(lib), _test_write_path._fake_calibre_utils_date():
+            plan = jobs.job_plan_classify(lib, None, [], {"mode": "all"})
+            assert plan["carry"]["n_todo"] == 5
+            api = FakeApi(books=(1, 2, 3, 4, 5), fields=("tags", "#wrangled"), multi=("tags",))
+            result = jobs.job_execute_classify(lib, None, [], plan["carry"], "openai", "", api,
+                                               abort=_AbortAfter(2))
+    finally:
+        engines.ENGINES["openai"] = saved_engine
+        jobs.stored_keys = saved_sk
+    assert result["refused"] is False
+    assert result["outcome"] == "cancelled"
+    assert result["run_id"], "the applied ops must stay logged and undoable"
+
+
+def test_a_missing_wrangled_column_refuses_execute_too():
+    from scourgify import engines
+    lib = _classify_lib(2, wrangled=False)
+    saved_engine = engines.ENGINES.get("openai")
+    engines.ENGINES["openai"] = _FastNoMatchEngine
+    try:
+        with _pointed_at(lib):
+            api = FakeApi(books=(1, 2), fields=("tags", "#wrangled"), multi=("tags",))
+            result = jobs.job_execute_classify(lib, None, [], {"todo_ids": [1, 2]}, "openai", "", api)
+    finally:
+        engines.ENGINES["openai"] = saved_engine
+    assert result["refused"] is True
+    assert "#wrangled" in result["msg"]
 
 
 if __name__ == "__main__":
