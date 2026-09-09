@@ -5,16 +5,16 @@ milestone_name: (the terminal goes away)
 current_phase: 02
 current_phase_name: Write verbs on a selection
 status: executing
-stopped_at: Completed 02-04-PLAN.md
-last_updated: "2026-09-09T10:30:19.784Z"
+stopped_at: Completed 02-05-PLAN.md
+last_updated: "2026-09-09T10:51:09.538Z"
 last_activity: 2026-09-09
 last_activity_desc: Phase 02 execution started
-state_head: 5ad0a03f0f27b97cc0e102bc76d0afdbbdeb0a79
+state_head: 93a34a1ccc7d7afb7b22cd9c6315b2133e5a24d8
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 14
-  completed_plans: 10
+  completed_plans: 11
   percent: 17
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-28)
 ## Current Position
 
 Phase: 02 (Write verbs on a selection) — EXECUTING
-Plan: 5 of 8
+Plan: 6 of 8
 Status: Ready to execute
 Last activity: 2026-09-09 — Phase 02 execution started
 
@@ -70,6 +70,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 02-write-verbs-on-a-selection P02 | 55min | 2 tasks | 7 files |
 | Phase 02-write-verbs-on-a-selection P03 | 25min | 3 tasks | 10 files |
 | Phase 02-write-verbs-on-a-selection P04 | 20min | 3 tasks | 10 files |
+| Phase 02 P05 | 55min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -105,6 +106,10 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-03: restrict_to_selection is an explicit scope_spec flag (only the never-classified shortcut sets it), not an implicit ids-non-empty inference. — An implicit rule would have silently restricted the ScopeDialog's own never-classified row too, whose label already promises the whole-library backlog count.
 - [Phase 02]: 02-04: ui.checklist is the ONE item-shape normalization point — accepts plain strings or (label, payload) pairs, reads only the label, so the wizard needed zero edits (PUB-05). — Every decide= producer can emit structured payload without any front door having to special-case the shape; Phase 4/5 read the same payload keys.
 - [Phase 02]: 02-04: synopsis.step gains blurbs= so payload's 'before' comes from the caller's already-read description, not a new library read inside step(). — step() has no library connection of its own and shouldn't grow one just to fill a review column.
+- [Phase 02]: 02-05: _record_decide/_replay_decide (D-02) are sequence-aware generic decide= fabricators shared by staleness (single-call) and wrangle (per-book multi-call) review sites — a PLAN job records items and answers 'skip'; the matching EXECUTE job replays a reviewer's ticks, falling back to accept-everything when ticks is exhausted (the one-click Run path's contract).
+- [Phase 02]: 02-05: job_execute_staleness's new ticks= sits after now_uuid (not before, unlike wrangle's own EXECUTE job) so plugin/action.py's existing generic _EXECUTE_JOBS dispatch tuple stays intact — inserting it earlier would have silently misrouted now_uuid into the ticks position on every existing staleness dispatch.
+- [Phase 02]: 02-05: job_plan_wrangle overrides plan_result's own 'not items' empty test with p.n_books==0 — wrangle's review items cover only per-book UNIQUE edits, so a mass-only change-set (real work, zero review items) must not read as D-04 empty.
+- [Phase 02]: 02-05: wrangle EXECUTE deliberately recomputes the plan rather than carrying an ops list forward — _step_walk is what writes reject rows and recomputes a book's net change on a partial untick, and duplicating that in the plugin would violate 'the wizard ASKS, the tool modules DO'.
 
 ### Pending Todos
 
@@ -118,6 +123,7 @@ None yet.
 - [Phase 3]: `CreateCustomColumn.must_restart()`'s exact call sequence needs a direct Calibre source re-read at implementation time.
 - Branch protection on main is NOT updated. Lane is green (run 34150694155) but adding test-windows/smoke-calibre-windows/smoke-calibre-linux as required status checks needs a separate developer confirmation, per standing instruction. Command recorded in 01-02-SUMMARY.md.
 - 02-01: the tracer task's real-Calibre human-check (Re-derive status GUI walkthrough) was not run — no Calibre available in this environment; recorded in .planning/WINDOWS.md (unrun-verify, phase 02).
+- 02-05: the tracer/verb human-checks for Re-derive status (02-01), classify scope/engine pickers (02-03), Review 1-by-1 (02-04), and now Normalize fields (02-05) all need a real Calibre GUI walkthrough — no Calibre available in this environment; four open unrun-verify entries in .planning/WINDOWS.md.
 
 ## Deferred Items
 
@@ -129,6 +135,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-09T10:30:19.722Z
-Stopped at: Completed 02-04-PLAN.md
+Last session: 2026-09-09T10:51:09.489Z
+Stopped at: Completed 02-05-PLAN.md
 Resume file: None
