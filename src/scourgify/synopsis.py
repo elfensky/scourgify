@@ -200,6 +200,7 @@ class Plan:
             self.titles = book_titles(con)
             self.have_stamp = custom_column_id(con, STAMP) is not None
         self.todo = ids[:a.batch] if a.batch else ids
+        self.cancelled = False        # set True only by a stop=/on the run() abort path below
 
     def preview(self) -> None:
         """What a run WOULD do, without doing any of it. Unlike classify there is nothing to send
@@ -215,7 +216,7 @@ class Plan:
         report.say("\nDry run — nothing sent, nothing written. To run it: "
                    "scourgify synopsis --apply   (Calibre closed)")
 
-    def run(self, ask=None, *, write=None, decide=None) -> None:
+    def run(self, ask=None, *, write=None, decide=None, on_book=None, stop=None) -> None:
         """Execute. Without --apply this is preview() and stops — see the module docstring.
 
         `write=` is the injected write transport (the phase-2 seam): omitting it resolves to
@@ -233,7 +234,18 @@ class Plan:
         invariant to synopsis. This SUPERSEDES 02-RESEARCH.md's Open Question #1 — written before
         CONTEXT.md's D-13 settled the question the other way — which had recommended skipping the
         review here like classify does; do not resurrect that recommendation. CLI behaviour is
-        unchanged: with `decide=None` and `--step` unset, no review runs."""
+        unchanged: with `decide=None` and `--step` unset, no review runs.
+
+        `on_book(done, total, made, kept, failed)` / `stop()` mirror `classify.Plan.run`'s own
+        progress/abort seam (plan 02-03) exactly, so both engine passes are steerable the same
+        way. `on_book` is called after each processed book — `done` is the 1-based index,
+        `total` is `len(self.todo)`, and `made`/`kept`/`failed` are RUNNING COUNTS. `stop()` is
+        checked at the head of each loop iteration; a truthy answer breaks the loop, sets
+        `self.cancelled = True`, and falls through to the existing failure-log rewrite and write
+        of whatever was settled so far — a cancelled sweep still records what it did, keeping the
+        queue's three exits finite. `stop` is a plain zero-argument callable returning a bool —
+        the core must not learn a Calibre type. Both default to `None`, so the CLI path (which
+        passes neither) is byte-identical to before this seam existed."""
         if write is None:
             write = run_writer
         from scourgify import report
@@ -249,6 +261,9 @@ class Plan:
                    f"({'free, on-device — slow is fine' if a.engine == 'apple' else 'billed per book'})")
         made, kept, failures = {}, [], []
         for i, b in enumerate(self.todo, 1):
+            if stop is not None and stop():           # checked at the head of each iteration
+                self.cancelled = True
+                break
             title = str(self.titles.get(b, ""))
             out, err = settle(title, self.blurbs.get(b, ""), self.files.get(b), ask)
             if err:
@@ -258,6 +273,8 @@ class Plan:
             else:
                 kept.append(b); mark = "kept the existing blurb"
             report.say(f"  [{i}/{len(self.todo)}] #{b} {title[:40]:<40} {mark}")
+            if on_book is not None:
+                on_book(i, len(self.todo), len(made), len(kept), len(failures))
         # The log is rewritten every run, not only when this one failed: a book recovered on
         # another engine has to LEAVE the list or it reads as blocked forever — and stays out of
         # the queue with it. Books outside this run's scope are carried through untouched.
