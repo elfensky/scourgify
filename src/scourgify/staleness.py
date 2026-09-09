@@ -80,13 +80,18 @@ def step(status_label: str, rows: list, decide=None) -> list:
     return [] if action in ("skip", "quit") else [rows[i] for i in acc]
 
 
-def write(status_label: str, rows: list) -> None:
+def write(status_label: str, rows: list, *, write=run_writer) -> None:
     # `expected` (D-09) is the `old` value compute() already read when it built this change-set —
     # no fresh read at write time, so a book whose status was hand-edited in between is skipped,
     # not clobbered.
-    run_writer([op_set_field(status_label, {b: n for b, o, n, _ in rows},
-                             expected={b: o for b, o, n, _ in rows})],
-               tool="staleness", scope=f"{len(rows)} books")
+    #
+    # `write=` is the injected write transport (the phase-2 seam): defaults to the CLI's
+    # `run_writer` (subprocess `calibre-debug`), preserving CLI behaviour byte-for-byte. The
+    # Calibre plugin passes a `write_ops`-bound callable instead (`plugin/jobs.py::_Writer`) so
+    # the same compute logic writes in-process against the live library, with the same guards.
+    write([op_set_field(status_label, {b: n for b, o, n, _ in rows},
+                        expected={b: o for b, o, n, _ in rows})],
+         tool="staleness", scope=f"{len(rows)} books")
 
 
 def show(label: str, rows: list) -> None:
