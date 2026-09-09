@@ -263,11 +263,23 @@ def engine_options(engs: list, n_todo: int, cost_fn) -> list:
     numbered rows with per-engine cost over the books that will actually be billed (the plan's
     todo set). `cost_fn(n_books, engine) -> float` is INJECTED (classify.est_cost in production)
     rather than imported, because classify.py already imports engines and the reverse edge would
-    be a cycle (REVIEW: Codex agreed concern 5) — engines.py must gain no import of classify."""
+    be a cycle (REVIEW: Codex agreed concern 5) — engines.py must gain no import of classify.
+
+    The price fragment is THREE cases, not two: an engine whose list price is exactly 0.0 (an
+    on-device engine) reads `free`; a real but tiny estimate (one book on a cheap cloud engine is
+    fractions of a cent) must NOT round down to `~$0.00`, which a user reads as free when it is
+    not — it gets its own sub-cent label instead; anything at or above half a cent gets the usual
+    two-decimal price."""
     opts = []
     for i, (e, ok, hint) in enumerate(engs, 1):
         cost = cost_fn(n_todo, e)
-        opts.append((str(i), e, e, f"{hint}  ·  {'free' if not cost else f'~${cost:.2f}'} for {n_todo} books"))
+        if cost == 0.0:
+            price = "free"
+        elif cost < 0.005:
+            price = "~<$0.01"
+        else:
+            price = f"~${cost:.2f}"
+        opts.append((str(i), e, e, f"{hint}  ·  {price} for {n_todo} books"))
     return opts
 
 

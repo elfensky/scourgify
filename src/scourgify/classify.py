@@ -408,10 +408,27 @@ class Plan:
                     self.done.add(bid)
         self.todo = [(b, d) for b, d in self.targets if b not in self.done]
         if a.batch: self.todo = self.todo[:a.batch]
+        self.cancelled = False        # set True only by a stop=/on the run() abort path below
 
-    def run(self, ask=None) -> None:
+    def run(self, ask=None, *, on_book=None, stop=None) -> None:
         """Execute the plan. `ask`: prompt -> (text, err) — tests inject a callable (the same
-        seam promote.run has); default builds the configured engine and goes through ask_retry."""
+        seam promote.run has); default builds the configured engine and goes through ask_retry.
+
+        `on_book(done, total, tagged, failed)` — when not None, called after each future
+        resolves (and after the dashboard's own update): `done` is the number of books this run
+        has finished (tagged or failed), `total` is `len(self.todo)`, `tagged`/`failed` are the
+        running counts. This is the plugin's progress seam (`notifications.put`) — the core
+        never learns Calibre's job-list shape, only calls a plain callback.
+
+        `stop()` — a plain zero-argument callable returning a bool, checked at the head of each
+        loop iteration; a truthy answer breaks the loop exactly like the existing
+        `KeyboardInterrupt` branch does: the executor is shut down with `wait=False,
+        cancel_futures=True`, the partial proposal is dumped, and `self.cancelled` is set True.
+        `stop` is deliberately NOT Calibre's abort object — the core must not learn a Calibre
+        type; the plugin wraps its abort flag in a zero-arg lambda instead.
+
+        Both `on_book` and `stop` default to None, so the CLI path (which passes neither) is
+        byte-identical to before this seam existed."""
         a, titles, proposal = self.opts, self.titles, self.proposal
         print(f"engine={a.engine}  candidate books: {len(self.targets)}", flush=True)
         if self.done: print(f"  resuming: {len(self.done)} already in proposal (pass --fresh to restart)", flush=True)
@@ -435,13 +452,22 @@ class Plan:
         try:
             with _Dashboard(len(self.todo), len(self.done), len(self.targets)) as dash:
                 futs = [ex.submit(work, b, d) for b, d in self.todo]
+                done_n = tagged_n = 0
                 for fut in as_completed(futs):
+                    if stop is not None and stop():         # checked at the head of each iteration
+                        self.cancelled = True
+                        break
                     b, err, vt, nt = fut.result()
+                    done_n += 1
                     if err: failures.append((b, err))
-                    else: proposal[b] = (vt, nt)      # record EVERY non-errored book, even a no-match (vt=nt=[]):
-                                                      # --apply stamps every proposal row, so it isn't re-sent forever.
-                                                      # errors are excluded on purpose — they retry (e.g. --engine apple).
+                    else:
+                        proposal[b] = (vt, nt)      # record EVERY non-errored book, even a no-match (vt=nt=[]):
+                                                    # --apply stamps every proposal row, so it isn't re-sent forever.
+                                                    # errors are excluded on purpose — they retry (e.g. --engine apple).
+                        if vt: tagged_n += 1
                     dash.update(vt, nt, err)
+                    if on_book is not None:
+                        on_book(done_n, len(self.todo), tagged_n, len(failures))
                     if dash.n % 50 == 0: dump()       # checkpoint regardless of UI
         except KeyboardInterrupt:
             # Ctrl+C: never start queued work, don't wait for in-flight requests (they're
@@ -449,7 +475,9 @@ class Plan:
             interrupted = True
             ex.shutdown(wait=False, cancel_futures=True)
         else:
-            ex.shutdown()
+            # A stop()-driven cancel behaves exactly like Ctrl+C's shutdown, minus setting
+            # `interrupted` (that flag is CLI-only UX text — see below).
+            ex.shutdown(wait=False, cancel_futures=True) if self.cancelled else ex.shutdown()
         dump()
         if interrupted:
             print(f"\n  interrupted — {len(proposal)} results saved to the proposal; re-run to resume where you left off.")
