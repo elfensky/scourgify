@@ -362,14 +362,26 @@ def backfill_step(chg: dict, adds: dict, titles: dict, decide=None) -> dict:
     return {b: v for b, v in chg.items() if b in keep}
 
 
-def backfill(yes: bool = False, step: bool = False, decide=None) -> int:
+def backfill(yes: bool = False, step: bool = False, decide=None, *, write=None) -> int:
     """THE backfill flow — plan, preview, decide, guarded write — for every front door.
 
     `decide(chg, adds) -> chg to write` (falsy aborts) is the only thing that varies between them:
     the CLI's confirm/--step by default, the wizard's menu when it injects one. Same seam as
     Plan.run(ask=)/run(verify_ask=). The wizard used to assemble its own run_writer call here,
     which silently dropped this function's per-book preview — a wizard user saw less before a
-    write than a CLI user, and any guard added here would have missed them entirely."""
+    write than a CLI user, and any guard added here would have missed them entirely.
+
+    `write=` is the injected write transport (the phase-2 seam): omitting it resolves to
+    `write=run_writer` (the CLI's subprocess `calibre-debug` writer) at CALL time, not at def
+    time — the sentinel-default + late-lookup shape `decide=None` above already uses, not an
+    eagerly-bound `write=run_writer` default, which would freeze a stale reference to
+    `run_writer` the moment this module loads and silently break a `promote.run_writer = fake`
+    monkeypatch seam the same way it broke wrangle/classify (see those modules' `write()` /
+    `apply_proposal()` docstrings). The Calibre plugin passes a `write_ops`-bound callable
+    instead (`plugin/jobs.py::_Writer`) so the same compute logic writes in-process against the
+    live library, with the same guards."""
+    if write is None:
+        write = run_writer
     chg, adds, before = backfill_plan()
     if not chg:
         print("backfill: nothing to do — source books already carry their promoted tags ✓"); return 0
@@ -400,7 +412,7 @@ def backfill(yes: bool = False, step: bool = False, decide=None) -> int:
     # `expected` (D-09) is built from `before` — the plan-time tag set — over exactly the books
     # `chg` still names after decide()/backfill_step() may have narrowed it.
     expected = {b: before[b] for b in chg if b in before}
-    run_writer([op_set_field("tags", chg, expected=expected)], tool="promote", scope=f"backfill, {len(chg)} books")
+    write([op_set_field("tags", chg, expected=expected)], tool="promote", scope=f"backfill, {len(chg)} books")
     print(f"backfilled promoted tags onto {len(chg)} book(s).")
     return len(chg)
 

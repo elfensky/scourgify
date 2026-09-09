@@ -420,7 +420,16 @@ class Plan:
             print(f"  logged {len(rejects)} reject(s) -> {os.path.basename(rejects_path())}"
                   + (f"  ({nauto} → run `scourgify overrides` to stop them recurring)" if nauto else ""))
 
-    def write(self, force: bool = False) -> None:
+    def write(self, force: bool = False, *, write=None) -> None:
+        """Write this plan's changes. `write=` is the injected write transport (the phase-2 seam):
+        omitting it resolves to `write=run_writer` (the CLI's subprocess `calibre-debug` writer) at
+        CALL time, not at def time — the sentinel-default + late-lookup shape `ask=None`/`decide=None`
+        already use elsewhere in this codebase, not an eagerly-bound `write=run_writer` default, which
+        would freeze a stale reference to `run_writer` the moment this module loads and silently break
+        `tests/test_wizard_flow.py`'s existing `wrangle.run_writer = fake` monkeypatch seam (that test
+        may not be edited — PUB-05). The Calibre plugin passes a `write_ops`-bound callable instead
+        (`plugin/jobs.py::_Writer`) so the same compute logic writes in-process against the live
+        library, with the same guards."""
         # pass force through: the plan's own data_loss/tag_loss guards already ran, so a deliberately
         # --forced deletion here must not be second-guessed by run_writer's coarse last-line wipe guard.
         #
@@ -429,12 +438,14 @@ class Plan:
         # for the library-wide audit report and holds no per-book state at all. sorted() matches the
         # shape the transport's before-read returns for a multi-valued column, so editlog.conflict
         # compares like with like; restrict() narrows it for free because it narrows self.changes.
+        if write is None:
+            write = run_writer
         ops = []
         for lab, ch in self.changes.items():
             k = next(key for key, label in self.cols.items() if label == lab)
             expected = {b: sorted(self.perbook[b].get(k, [])) for b in ch}
             ops.append(op_set_field(lab, ch, expected=expected))
-        run_writer(ops, force=force, tool="wrangle", scope=self.scope)
+        write(ops, force=force, tool="wrangle", scope=self.scope)
 
     def audit_report(self) -> None:
         """The full `scourgify audit` output: distinct-value deltas, SAFETY, and per-rule examples

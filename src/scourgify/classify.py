@@ -223,10 +223,22 @@ def annotate_new(ranked, cutoff: float = DEDUP_CUTOFF, existing: list | None = N
 
 
 # ---- apply: 'added_tags' + stamp #wrangled — standalone, no LLM calls ----
-def apply_proposal(rows: list | None = None) -> None:
+def apply_proposal(rows: list | None = None, *, write=None) -> None:
     """rows=None (the --apply path): read the live proposal, apply + stamp it, archive it on
     success. Explicit rows (the --step path): apply + stamp exactly those; the proposal file is
-    the CALLER's to archive/rewrite — it is never touched here, so a writer refusal loses nothing."""
+    the CALLER's to archive/rewrite — it is never touched here, so a writer refusal loses nothing.
+
+    `write=` is the injected write transport (the phase-2 seam): omitting it resolves to
+    `write=run_writer` (the CLI's subprocess `calibre-debug` writer) at CALL time, not at def
+    time — the sentinel-default + late-lookup shape `ask=None`/`decide=None` already use
+    elsewhere in this codebase, not an eagerly-bound `write=run_writer` default, which would
+    freeze a stale reference to `run_writer` the moment this module loads and silently break
+    `tests/test_wizard.py`'s existing `classify.run_writer = fake` monkeypatch seam (that test
+    may not be edited — PUB-05). The Calibre plugin passes a `write_ops`-bound callable instead
+    (`plugin/jobs.py::_Writer`) so the same compute logic writes in-process against the live
+    library, with the same guards."""
+    if write is None:
+        write = run_writer
     from_file = rows is None
     if from_file:
         if not os.path.exists(prop()):
@@ -267,9 +279,13 @@ def apply_proposal(rows: list | None = None) -> None:
     # stamp EVERY processed book, tagged or not — an unstamped no-tag book would be re-sent to the LLM forever
     ops.append(op_stamp_now("#wrangled", processed))
     # engine/model stay unset here: --apply is its own invocation and the proposal CSV does not
-    # carry the engine that produced it. The plugin's classify verb runs the pass and the write in
-    # one job and passes both (write_ops(engine=…, model=…)).
-    run_writer(ops, tool="classify", scope=f"{len(processed)} books")
+    # carry the engine that produced it. This function grows no `engine=`/`model=` parameter — the
+    # CLI transport (`run_writer`) has none, so threading them through the generic `write` callable
+    # would break the default transport for every existing caller. The plugin's classify verb runs
+    # the pass and the write in one job and passes engine/model through the INJECTED TRANSPORT it
+    # builds (`plugin/jobs.py::_Writer`, which captures them in its closure), not through this
+    # function's parameters.
+    write(ops, tool="classify", scope=f"{len(processed)} books")
     tail = ""
     if from_file:
         # archive so a later --apply can't re-add tags you've since hand-removed (stale rows never re-apply)

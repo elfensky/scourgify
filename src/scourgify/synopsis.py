@@ -215,8 +215,20 @@ class Plan:
         report.say("\nDry run — nothing sent, nothing written. To run it: "
                    "scourgify synopsis --apply   (Calibre closed)")
 
-    def run(self, ask=None) -> None:
-        """Execute. Without --apply this is preview() and stops — see the module docstring."""
+    def run(self, ask=None, *, write=None) -> None:
+        """Execute. Without --apply this is preview() and stops — see the module docstring.
+
+        `write=` is the injected write transport (the phase-2 seam): omitting it resolves to
+        `write=run_writer` (the CLI's subprocess `calibre-debug` writer) at CALL time, not at def
+        time — the sentinel-default + late-lookup shape `ask=None` (this same method) already
+        uses, not an eagerly-bound `write=run_writer` default, which would freeze a stale
+        reference to `run_writer` the moment this module loads and silently break
+        `tests/test_synopsis.py`'s existing `synopsis.run_writer = fake` monkeypatch seam (that
+        test may not be edited — PUB-05). The Calibre plugin passes a `write_ops`-bound callable
+        instead (`plugin/jobs.py::_Writer`) so the same compute logic writes in-process against
+        the live library, with the same guards."""
+        if write is None:
+            write = run_writer
         from scourgify import report
         a = self.opts
         if not a.apply:
@@ -265,7 +277,7 @@ class Plan:
         # classify apply_proposal comment for the identical trade-off) and visible via the
         # skipped list on the footer/WriteResult/CLI output.
         ops.append(op_stamp_now(STAMP, sorted(set(made) | set(kept))))
-        run_writer(ops, tool="synopsis", scope=f"{len(made)} written, {len(kept)} kept")
+        write(ops, tool="synopsis", scope=f"{len(made)} written, {len(kept)} kept")
         report.say(f"settled {len(made) + len(kept)} book(s): {len(made)} new synopses, "
                    f"{len(kept)} existing blurbs kept.")
 
