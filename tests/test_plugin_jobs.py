@@ -169,6 +169,33 @@ def test_result_rows_are_ordered_by_book_then_field():
     assert pairs == sorted(pairs)
 
 
+# ---------------- editlog.conflict is set-wise (multi) / string-wise-with-None==""  (single) ----
+def test_a_reordered_multi_value_is_applied_not_skipped():
+    """editlog.conflict compares multi-value fields as SETS — a tags reorder (Calibre's own
+    doing, not a user edit) must not read as a conflict. Drives jobs._Writer directly, the same
+    transport every EXECUTE job (job_execute_staleness included) binds `write=` to."""
+    lib = _lib()
+    with _pointed_at(lib):
+        api = FakeApi(books=(1, 2), fields=("tags", "#status"), multi=("tags",))
+        api.set_field("tags", {1: ("Isekai", "Harem")})    # same members, different order
+        writer = jobs._Writer(api)
+        writer([common.op_set_field("tags", {1: ["New"]}, expected={1: ["Harem", "Isekai"]})])
+    assert writer.result.skipped == []
+    assert api.fields["tags"][1] == ("New",)
+
+
+def test_single_value_none_and_empty_string_compare_equal():
+    """editlog.conflict's single-value side: `None` (never set) and `""` (planned against an
+    empty value) are the same absence, not a conflict."""
+    lib = _lib()
+    with _pointed_at(lib):
+        api = FakeApi(books=(1, 2), fields=("tags", "#status"), multi=("tags",))
+        writer = jobs._Writer(api)
+        writer([common.op_set_field("#status", {1: "Hiatus"}, expected={1: ""})])
+    assert writer.result.skipped == []
+    assert api.fields["#status"][1] == "Hiatus"
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
