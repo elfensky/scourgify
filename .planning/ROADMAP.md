@@ -121,7 +121,7 @@ Plans:
 
 **Wave 6** *(blocked on Wave 5)*
 
-- [ ] 02-06-PLAN.md — The synopsis verb: the FanFicFare guard as an explicit choice, the engine picker, and the per-book review before the write
+- [x] 02-06-PLAN.md — The synopsis verb: the FanFicFare guard as an explicit choice, the engine picker, and the per-book review before the write
 
 **Wave 7** *(blocked on Wave 6)*
 

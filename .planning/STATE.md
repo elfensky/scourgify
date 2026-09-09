@@ -5,16 +5,16 @@ milestone_name: (the terminal goes away)
 current_phase: 02
 current_phase_name: Write verbs on a selection
 status: executing
-stopped_at: Completed 02-05-PLAN.md
-last_updated: "2026-09-09T10:51:09.538Z"
+stopped_at: Completed 02-06-PLAN.md
+last_updated: "2026-09-09T11:20:09.626Z"
 last_activity: 2026-09-09
 last_activity_desc: Phase 02 execution started
-state_head: 93a34a1ccc7d7afb7b22cd9c6315b2133e5a24d8
+state_head: 8305769a14975486480e20cc6ee9383cfc3d78d8
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 14
-  completed_plans: 11
+  completed_plans: 12
   percent: 17
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-28)
 ## Current Position
 
 Phase: 02 (Write verbs on a selection) — EXECUTING
-Plan: 6 of 8
+Plan: 7 of 8
 Status: Ready to execute
 Last activity: 2026-09-09 — Phase 02 execution started
 
@@ -71,6 +71,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 02-write-verbs-on-a-selection P03 | 25min | 3 tasks | 10 files |
 | Phase 02-write-verbs-on-a-selection P04 | 20min | 3 tasks | 10 files |
 | Phase 02 P05 | 55min | 2 tasks | 3 files |
+| Phase 02-write-verbs-on-a-selection P06 | 55min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -110,6 +111,8 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-05: job_execute_staleness's new ticks= sits after now_uuid (not before, unlike wrangle's own EXECUTE job) so plugin/action.py's existing generic _EXECUTE_JOBS dispatch tuple stays intact — inserting it earlier would have silently misrouted now_uuid into the ticks position on every existing staleness dispatch.
 - [Phase 02]: 02-05: job_plan_wrangle overrides plan_result's own 'not items' empty test with p.n_books==0 — wrangle's review items cover only per-book UNIQUE edits, so a mass-only change-set (real work, zero review items) must not read as D-04 empty.
 - [Phase 02]: 02-05: wrangle EXECUTE deliberately recomputes the plan rather than carrying an ops list forward — _step_walk is what writes reject rows and recomputes a book's net change on a partial untick, and duplicating that in the plugin would violate 'the wizard ASKS, the tool modules DO'.
+- [Phase 02-write-verbs-on-a-selection]: 02-06: job_execute_synopsis shares ONE function across two dispatches (ticks=None harvests generated descriptions via a no-op writer; ticks=list replays the reviewer's ticks and writes for real) — the shape D-13's per-book review needs when review items are engine-generated text, not a free-to-compute diff. — The second dispatch RE-RUNS the engine pass rather than caching the first dispatch's generated text (no cross-dispatch state on synopsis.Plan) — mirrors job_execute_wrangle's own recompute-not-carry-forward choice, generalised to a non-deterministic pass; batch size (not a cache) bounds the cost.
+- [Phase 02-write-verbs-on-a-selection]: 02-06: jobs._synopsis_cost prices every book as the full-generation worst case (never under-quote) since a book's judge verdict isn't knowable before the call — the same lesson CLAUDE.md already records for classify.est_cost's out_tokens fix. — A flat/optimistic per-book estimate would under-quote every book that turns out to need generation, the same direction classify's own gemini out_tokens miscalibration went before it was fixed.
 
 ### Pending Todos
 
@@ -135,6 +138,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-09T10:51:09.489Z
-Stopped at: Completed 02-05-PLAN.md
+Last session: 2026-09-09T11:19:52.492Z
+Stopped at: Completed 02-06-PLAN.md
 Resume file: None
