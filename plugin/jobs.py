@@ -482,8 +482,20 @@ def job_plan_classify(lib_path, lib_uuid, ids, scope_spec, now_uuid=None, abort=
         elif mode == 'changed':
             a.incremental = True
         elif mode == 'unclassified':
-            a.unclassified = True
-            a.batch = (scope_spec or {}).get('batch') or _CLASSIFY_BATCH_DEFAULT
+            if (scope_spec or {}).get('restrict_to_selection') and ids:
+                # the "Classify the never-classified here" shortcut on a mixed selection: never
+                # the ScopeDialog's own row (that one means the WHOLE-library backlog, matching
+                # its label's count regardless of what happens to be selected) — only the
+                # dedicated shortcut sets this flag.
+                from scourgify import select as select_mod
+                backlog = set(select_mod.pick(con, 'unclassified'))
+                restricted = [b for b in ids if b in backlog]
+                if not restricted:
+                    return plan_result('classify', [], [], '', {})
+                a.books = ','.join(str(i) for i in restricted)
+            else:
+                a.unclassified = True
+                a.batch = (scope_spec or {}).get('batch') or _CLASSIFY_BATCH_DEFAULT
         elif mode == 'last':
             a.last = (scope_spec or {}).get('last') or 0
         elif mode == 'all':
@@ -501,6 +513,11 @@ def job_plan_classify(lib_path, lib_uuid, ids, scope_spec, now_uuid=None, abort=
         usable = engines.usable_engines(env=keys)
         opts = engines.engine_options(engs, len(p.todo), classify.est_cost)
         default_engine = engines.default_engine_id(opts, usable=usable)
+        # `engine_options` deliberately carries no usability flag (its 4-tuple is (key, id, id,
+        # label) only) and no TRAITS 'limits' text — picker.py may import NOTHING from scourgify
+        # (D-01's own contract), so the engine picker needs both handed to it as plain data here,
+        # rather than deriving them itself.
+        limits = {e: engines.trait(e, 'limits') for e, _ok, _hint in engs}
 
         items = [('#%d  %s' % (b, str(p.titles.get(b, ''))[:64]), {'book': b, 'title': p.titles.get(b, '')})
                 for b, _d in p.todo]
@@ -512,6 +529,8 @@ def job_plan_classify(lib_path, lib_uuid, ids, scope_spec, now_uuid=None, abort=
         result = plan_result('classify', summary, items, consequence, carry)
         result['engines'] = opts
         result['default_engine'] = default_engine
+        result['usable'] = usable
+        result['engine_limits'] = limits
         return result
 
     return _ceremony('classify', body, lib_path, lib_uuid, ids, now_uuid,

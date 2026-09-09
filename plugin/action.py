@@ -37,8 +37,10 @@ from calibre_plugins.scourgify import jobs
 FREE, COSTS, WRITES = 'free', 'costs', 'writes'
 SOON = 'not built yet'                    # the honest reason a phase-6/7 slot is grey
 
-# verb -> the EXECUTE job it dispatches. One row per write verb this phase adds; every job takes
-# the same (lib, uuid, ids, carry, api, now_uuid) argument tuple.
+# verb -> the EXECUTE job it dispatches, for every verb whose EXECUTE job takes the SAME
+# (lib, uuid, ids, carry, api, now_uuid) argument tuple as `_start_execute` builds. Classify's
+# EXECUTE job needs `engine_id`/`model` between `carry` and `api` (the engine picker's answer),
+# so it dispatches through its own `_start_classify_execute` instead of this generic table.
 _EXECUTE_JOBS = {'staleness': jobs.job_execute_staleness}
 
 
@@ -92,14 +94,12 @@ class ScourgifyAction(InterfaceAction):
         head.setEnabled(False)
         m.addSeparator()
 
-        self._verb(m, 'Classify %s' % _these(n), COSTS, SOON)
+        write_reason = ('%s is running' % self._write_running) if self._write_running else None
+        status_reason = 'nothing selected' if not n else write_reason
+        self._verb(m, 'Classify %s' % _these(n), COSTS, status_reason,
+                   None if not n else lambda: self.classify(scope),
+                   'Choose a scope, then an engine — the price on the button IS the confirmation.')
         self._verb(m, 'Normalize fields', WRITES, SOON)
-        if not n:
-            status_reason = 'nothing selected'
-        elif self._write_running:
-            status_reason = '%s is running' % self._write_running
-        else:
-            status_reason = None
         self._verb(m, 'Re-derive status', WRITES, status_reason, lambda: self.staleness(scope),
                    "Re-derive #status from #updated age for the selection's activity-family books.")
         m.addSeparator()
@@ -107,7 +107,10 @@ class ScourgifyAction(InterfaceAction):
                    lambda: self.inspect(scope),
                    'Last classified when, from which proposal, and what you rejected.' if n == 1
                    else 'Classification state across the selection, and what is outstanding.')
-        self._verb(m, 'Classify the never-classified here', COSTS, SOON)
+        self._verb(m, 'Classify the never-classified here', COSTS, write_reason,
+                   lambda: self.classify_backlog(scope),
+                   'Skip the scope dialog: never-classified books, restricted to the selection '
+                   'when one exists — a chunk at a time (the scope that advances).')
         self._verb(m, 'Retry on another engine', COSTS, SOON)
         m.addSeparator()
         self._verb(m, 'Edit tags…', WRITES, SOON)
@@ -176,6 +179,69 @@ class ScourgifyAction(InterfaceAction):
             from calibre_plugins.scourgify.picker import show_picker
             show_picker(self.gui, r, lambda carry: self._start_execute(verb, carry))
         return done
+
+    # ---- classify: scope dialog -> PLAN job -> engine picker -> EXECUTE job (D-06/D-07) ----
+    def classify(self, scope):
+        """'Classify <these N books>' — step 1: a read job for `classify.scope_options`' rows
+        (library reads that must never run on the GUI thread), then `ScopeDialog`."""
+        lib, uuid, ids = scope
+        self._run('scourgify: classify scope for %s' % _these(len(ids)),
+                  jobs.job_scope_rows, (lib, uuid, ids, self.current_uuid),
+                  done=self._scope_rows_done(scope))
+
+    def classify_backlog(self, scope):
+        """'Classify the never-classified here' — skips the scope dialog entirely and goes
+        straight to the PLAN job with the never-classified scope, restricted to the selection
+        when one exists (the shortcut for a mixed selection); the batch size is the job's own
+        default (`None` here)."""
+        self._classify_plan(scope, {'mode': 'unclassified', 'batch': None,
+                                    'restrict_to_selection': True})
+
+    def _scope_rows_done(self, scope):
+        def done(job):
+            if job.failed:
+                return self.gui.job_exception(job, dialog_title='scourgify failed')
+            r = job.result or {}
+            if r.get('refused'):
+                return info_dialog(self.gui, 'scourgify', r.get('msg', ''), show=True)
+            _lib, _uuid, ids = scope
+            from calibre_plugins.scourgify.picker import show_scope_dialog
+            show_scope_dialog(self.gui, r, len(ids),
+                              lambda scope_spec: self._classify_plan(scope, scope_spec))
+        return done
+
+    def _classify_plan(self, scope, scope_spec):
+        """Step 2: the PLAN job resolves the todo set ONCE through `classify.plan()` and prices
+        every usable engine over it."""
+        lib, uuid, ids = scope
+        self._run('scourgify: classify plan for %s' % _these(len(ids)),
+                  jobs.job_plan_classify, (lib, uuid, ids, scope_spec, self.current_uuid),
+                  done=self._classify_plan_done)
+
+    def _classify_plan_done(self, job):
+        """Step 3: the engine picker opens over the PLAN result — clicking a button IS the run
+        (D-07), dispatching the EXECUTE job with no further dialog in between."""
+        if job.failed:
+            return self.gui.job_exception(job, dialog_title='scourgify failed')
+        r = job.result or {}
+        if r.get('refused'):
+            return info_dialog(self.gui, 'scourgify', r.get('msg', ''), show=True)
+        if r.get('empty'):
+            return info_dialog(self.gui, 'scourgify', 'Nothing to classify for these books.', show=True)
+        from calibre_plugins.scourgify.picker import show_engine_picker
+        show_engine_picker(self.gui, r, lambda engine_id: self._start_classify_execute(r['carry'], engine_id))
+
+    def _start_classify_execute(self, carry, engine_id):
+        """Dispatched from the engine button — re-reads the selection at click time and passes the
+        GUI's live `new_api` handle, exactly as `_start_execute` does for every other write verb.
+        No `model=` override in this phase's UI: the engine's own default model is used."""
+        db = self.gui.current_db
+        ids = list(self.gui.library_view.get_selected_ids())
+        lib, uuid = db.library_path, getattr(db.new_api, 'library_id', None)
+        self._write_running = 'classify'
+        self._run('scourgify: classifying %s with %s' % (_these(len(ids)), engine_id),
+                  jobs.job_execute_classify, (lib, uuid, ids, carry, engine_id, '', db.new_api, self.current_uuid),
+                  done=self._execute_done)
 
     def _start_execute(self, verb, carry):
         """Dispatched from the picker's Run button — re-reads the selection at click time (it may

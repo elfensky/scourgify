@@ -29,13 +29,14 @@ FakeApi = _test_write_path.FakeApi
 DESC = "A long enough description for the classifier to consider this book usable. " * 2
 
 
-def _classify_lib(n, wrangled=True):
+def _classify_lib(n, wrangled=True, stamped=None):
     """A throwaway library of n sendable (long-description) books, optionally missing the
-    #wrangled column (to drive the missing-column pre-flight refusal)."""
+    #wrangled column (to drive the missing-column pre-flight refusal). `stamped` (a
+    {book_id: datetime-string} dict) pre-stamps specific books as already classified."""
     d = tempfile.mkdtemp()
     books = [{"id": i, "added": "2026-01-01 %02d:%02d:%02d" % ((i // 3600) % 24, (i // 60) % 60, i % 60),
              "desc": DESC} for i in range(1, n + 1)]
-    custom = [("wrangled", {})] if wrangled else []
+    custom = [("wrangled", dict(stamped or {}))] if wrangled else []
     con = fixture_db.build(os.path.join(d, "metadata.db"), books, custom=custom)
     con.commit()
     con.close()
@@ -226,6 +227,49 @@ def test_job_plan_classify_prices_over_the_resolved_todo_set_not_the_selection()
     assert r["carry"]["n_todo"] == 5
     assert any("for 5 books" in row[3] for row in r["engines"]), r["engines"]
     assert r["default_engine"]
+    # the engine picker (Qt-only, no core import) needs BOTH handed to it as plain data:
+    # usability (engine_options' own tuple carries none) and the TRAITS 'limits' failure-mode text.
+    assert set(r["engine_limits"]) == {eid for _key, eid, _eid2, _label in r["engines"]}
+    assert all(r["engine_limits"].values())            # every engine states how it will let you down
+    assert isinstance(r["usable"], list)
+
+
+def test_job_plan_classify_unclassified_shortcut_restricts_to_the_selection():
+    """'Classify the never-classified here' on a mixed selection: only the SELECTED books that
+    are actually never-classified enter the todo set — never the whole-library backlog, and
+    never a book outside the selection."""
+    from scourgify import artifacts
+    lib = _classify_lib(5)
+    saved_sk = jobs.stored_keys
+    jobs.stored_keys = lambda: {}
+    try:
+        with _pointed_at(lib):
+            common.set_library(lib)      # _LIBRARY may still point at a prior test's library
+            os.makedirs(common.data_dir(), exist_ok=True)
+            # book 1 already attempted (a pending proposal row) — the other four are still backlog
+            artifacts.write_proposal([{"book_id": 1, "title": "", "added_tags": [], "proposed_new": []}])
+            r = jobs.job_plan_classify(lib, None, [1, 2, 3], {"mode": "unclassified", "batch": None,
+                                                              "restrict_to_selection": True})
+    finally:
+        jobs.stored_keys = saved_sk
+    assert r["refused"] is False and r["empty"] is False
+    # book 1 (already attempted) and books 4/5 (outside the selection) are both excluded; order
+    # is newest-added-first (select.pick's own ordering), not the selection's own order.
+    assert set(r["carry"]["todo_ids"]) == {2, 3}
+
+
+def test_job_plan_classify_unclassified_without_a_selection_is_the_whole_backlog():
+    """The ScopeDialog's OWN 'never classified' row never sets restrict_to_selection — it means
+    the whole-library backlog, matching its label's count, regardless of what is selected."""
+    lib = _classify_lib(3)
+    saved_sk = jobs.stored_keys
+    jobs.stored_keys = lambda: {}
+    try:
+        with _pointed_at(lib):
+            r = jobs.job_plan_classify(lib, None, [], {"mode": "unclassified", "batch": None})
+    finally:
+        jobs.stored_keys = saved_sk
+    assert r["carry"]["n_todo"] == 3
 
 
 def test_job_plan_classify_returns_the_d04_empty_result_when_nothing_is_outstanding():
