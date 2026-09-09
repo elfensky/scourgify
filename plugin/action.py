@@ -74,6 +74,10 @@ class ScourgifyAction(InterfaceAction):
         # on any later PLAN that DIDN'T hit that refusal — so fixing the FanFicFare setting
         # un-greys 'Settle descriptions' the next time the menu opens, no Calibre restart needed.
         self._comments_reason = ''
+        # Cached exactly the same way: the empty-backfill reason from the last completed backfill
+        # PLAN job — cleared automatically the next time that PLAN reports real work, so
+        # promoting a new candidate un-greys 'Backfill promoted tags' with no Calibre restart.
+        self._backfill_reason = ''
 
     def initialization_complete(self):
         """Where gui.current_db is finally real — and where the spike froze Calibre by reading the
@@ -115,6 +119,17 @@ class ScourgifyAction(InterfaceAction):
         self._verb(m, 'Settle descriptions', COSTS, synopsis_reason, lambda: self.synopsis(scope),
                    'Judge each existing blurb — keep the good ones, generate a spoiler-safe back '
                    'cover for the rest — reviewed per book before anything is written.')
+        # Adjudicate/backfill are library-scope verbs (classify's OUTPUT, not a book selection),
+        # so — unlike the four verbs above — they are never disabled just because nothing is
+        # selected; only a running write (or, for backfill, an empty plan) greys them.
+        self._verb(m, 'Adjudicate new tags', COSTS, write_reason, lambda: self.promote(scope),
+                   "Advocate + skeptic adjudication of classify's new-tag candidates on a "
+                   "judge-capable engine — reviewed 1-by-1 before anything is folded into "
+                   "overrides/.")
+        self._verb(m, 'Backfill promoted tags', WRITES,
+                   write_reason or self._backfill_reason or None, lambda: self.backfill(scope),
+                   'Apply promoted/aliased tags onto the books that first proposed them — '
+                   'deterministic, no LLM.')
         m.addSeparator()
         self._verb(m, 'What does scourgify know?', FREE, None,
                    lambda: self.inspect(scope),
@@ -265,6 +280,125 @@ class ScourgifyAction(InterfaceAction):
         ticks = _synopsis_ticks(dlg)
         self._run('scourgify: writing settled descriptions', jobs.job_execute_synopsis,
                   (lib, uuid, ids, carry, engine_id, '', db.new_api, ticks, self.current_uuid),
+                  done=self._execute_done)
+
+    # ---- promote: PLAN -> engine picker -> EXECUTE (harvest) -> review -> EXECUTE (apply ticks) ----
+    def promote(self, scope):
+        """'Adjudicate new tags' — PLAN: `jobs.job_plan_promote` reads the undecided candidates
+        and prices every judge-capable engine over them (sends nothing). Library-scope: `ids` is
+        always `[]`, never the selection — promote works over classify's OUTPUT, not a book pick."""
+        lib, uuid, _ids = scope
+        self._run('scourgify: promote plan', jobs.job_plan_promote,
+                  (lib, uuid, [], {}, self.current_uuid), done=self._promote_plan_done())
+
+    def _promote_plan_done(self):
+        def done(job):
+            if job.failed:
+                return self.gui.job_exception(job, dialog_title='scourgify failed')
+            r = job.result or {}
+            if r.get('refused'):
+                return info_dialog(self.gui, 'scourgify', r.get('msg', ''), show=True)
+            if r.get('empty'):
+                return info_dialog(self.gui, 'scourgify', 'No undecided candidates to adjudicate.', show=True)
+            from calibre_plugins.scourgify.picker import show_engine_picker
+            show_engine_picker(self.gui, r,
+                               lambda engine_id: self._start_promote_execute(r['carry'], engine_id))
+        return done
+
+    def _start_promote_execute(self, carry, engine_id):
+        """Dispatched from the engine button — re-reads the live library at click time (like
+        `_start_classify_execute`/`_start_synopsis_execute`; a multi-step round trip must not
+        carry a stale `lib_path` from when the menu was built). The FIRST of two
+        `job_execute_promote` dispatches (`ticks=None`): the adjudication runs for real, but
+        nothing is folded into the overrides directory or the ledger until the reviewer has seen
+        every verdict (T-02-27). Promote writes no book field, so no `_write_running` here — that
+        flag names a book WRITE, and this dispatch is not one (see `_start_backfill_execute`, the
+        only one of the four promote/backfill dispatches that is)."""
+        db = self.gui.current_db
+        lib, uuid = db.library_path, getattr(db.new_api, 'library_id', None)
+        self._run('scourgify: adjudicating new tags', jobs.job_execute_promote,
+                  (lib, uuid, [], carry, engine_id, '', None, None, self.current_uuid),
+                  done=self._promote_review_done(carry, engine_id))
+
+    def _promote_review_done(self, carry, engine_id):
+        """The harvest dispatch's completion: its `items` (each candidate's advocate/skeptic
+        verdict) feed the SAME `Picker`/Review-1-by-1 table every other verb uses (D-01) — no
+        second review widget for this verb."""
+        def done(job):
+            if job.failed:
+                return self.gui.job_exception(job, dialog_title='scourgify failed')
+            r = job.result or {}
+            if r.get('refused'):
+                return info_dialog(self.gui, 'scourgify', r.get('msg', ''), show=True)
+            if r.get('empty'):
+                return info_dialog(self.gui, 'scourgify', 'Nothing to review — no applicable verdicts.', show=True)
+            from calibre_plugins.scourgify.picker import show_picker
+            dlg = show_picker(self.gui, r, lambda run_carry: self._finish_promote(run_carry, engine_id, dlg))
+        return done
+
+    def _finish_promote(self, carry, engine_id, dlg):
+        """The SECOND `job_execute_promote` dispatch — `ticks` replays exactly what the reviewer
+        left (`_promote_ticks`, reusing `picker.checklist_decide` unchanged, D-04): `[]` (Run
+        clicked with no review) accepts every verdict, matching D-02's one-click-Run contract."""
+        db = self.gui.current_db
+        lib, uuid = db.library_path, getattr(db.new_api, 'library_id', None)
+        ticks = _promote_ticks(dlg)
+        self._run('scourgify: applying adjudicated verdicts', jobs.job_execute_promote,
+                  (lib, uuid, [], carry, engine_id, '', None, ticks, self.current_uuid),
+                  done=self._promote_apply_done)
+
+    def _promote_apply_done(self, job):
+        """Promote writes no book field, so unlike `_execute_done` this never refreshes the
+        library view — there is nothing in it to refresh."""
+        if job.failed:
+            return self.gui.job_exception(job, dialog_title='scourgify failed')
+        r = job.result or {}
+        from calibre_plugins.scourgify.result_dialog import show_result
+        show_result(self.gui, r)
+
+    # ---- backfill: PLAN -> Picker -> EXECUTE (deterministic, no LLM, no engine picker) ----
+    def backfill(self, scope):
+        """'Backfill promoted tags' — PLAN: `jobs.job_plan_backfill` previews which books would
+        gain which promoted/aliased tags. Library-scope, like `promote` above: `ids` is always
+        `[]`."""
+        lib, uuid, _ids = scope
+        self._run('scourgify: backfill plan', jobs.job_plan_backfill,
+                  (lib, uuid, [], self.current_uuid), done=self._backfill_plan_done())
+
+    def _backfill_plan_done(self):
+        """Caches the empty-backfill reason on the action (`self._backfill_reason`), mirroring
+        `self._comments_reason`'s own cache — cleared the next time this PLAN reports real work,
+        so promoting a new candidate un-greys the slot with no Calibre restart needed."""
+        def done(job):
+            if job.failed:
+                return self.gui.job_exception(job, dialog_title='scourgify failed')
+            r = job.result or {}
+            if r.get('refused'):
+                return info_dialog(self.gui, 'scourgify', r.get('msg', ''), show=True)
+            if r.get('empty'):
+                self._backfill_reason = 'nothing to backfill'
+                return info_dialog(self.gui, 'scourgify',
+                                   'Nothing to backfill — every source book already carries its '
+                                   'promoted tags.', show=True)
+            self._backfill_reason = ''
+            from calibre_plugins.scourgify.picker import show_picker
+            dlg = show_picker(self.gui, r, lambda carry: self._start_backfill_execute(carry, dlg))
+        return done
+
+    def _start_backfill_execute(self, carry, dlg):
+        """Dispatched from the picker's Run button (or a finished 1-by-1 review). `decide` is
+        `picker.backfill_decide(dlg)` when the reviewer actually reviewed (`dlg.reviewed`) — the
+        backfill-shaped adapter (`decide(chg, adds) -> chg_to_write`, falsy aborts, T-02-15) — or
+        the identity function when the plain Run button was clicked (nothing reviewed, D-02's
+        one-click-accepts-everything contract). `_write_running` is set HERE, and only here: this
+        is the only one of the four promote/backfill dispatches that writes a book field."""
+        from calibre_plugins.scourgify.picker import backfill_decide
+        decide = backfill_decide(dlg) if getattr(dlg, 'reviewed', False) else (lambda chg, adds: chg)
+        db = self.gui.current_db
+        lib, uuid = db.library_path, getattr(db.new_api, 'library_id', None)
+        self._write_running = 'backfill'
+        self._run('scourgify: backfilling promoted tags', jobs.job_execute_backfill,
+                  (lib, uuid, [], carry, decide, db.new_api, self.current_uuid),
                   done=self._execute_done)
 
     def _plan_done(self, verb):
@@ -464,6 +598,22 @@ def _synopsis_ticks(dlg):
 
     Not reviewed (the plain Run button) -> `[]` — `_replay_decide`'s own accept-everything
     fallback, no Qt call needed to answer that (mirrors `_wrangle_ticks`'s own empty case)."""
+    if dlg is None or not getattr(dlg, 'reviewed', False) or dlg._table is None:
+        return []
+    from calibre_plugins.scourgify.picker import checklist_decide
+    decide = checklist_decide(dlg)
+    acc, rej, action = decide('', dlg._items)
+    return [(list(acc), list(rej), action)]
+
+
+def _promote_ticks(dlg):
+    """Build the single-call `ticks` list `job_execute_promote`'s second dispatch replays — the
+    same shape `_synopsis_ticks` builds, reusing `picker.checklist_decide` (D-04) since promote's
+    review (like synopsis's, unlike wrangle's per-book one) calls its `decide=` exactly once for
+    the whole batch of verdicts.
+
+    Not reviewed (the plain Run button) -> `[]` — `_replay_decide`'s own accept-everything
+    fallback, no Qt call needed to answer that (mirrors `_synopsis_ticks`'s own empty case)."""
     if dlg is None or not getattr(dlg, 'reviewed', False) or dlg._table is None:
         return []
     from calibre_plugins.scourgify.picker import checklist_decide
