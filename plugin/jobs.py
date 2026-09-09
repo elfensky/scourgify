@@ -350,11 +350,18 @@ def plan_result(verb, summary, items, consequence, carry, safety=''):
     }
 
 
-def execute_result(verb, rows, write_result, engine_failures=(), touched=()):
+def execute_result(verb, rows, write_result, engine_failures=(), touched=(), groups=()):
     """An EXECUTE job's result, built from a `_Writer`'s `common.WriteResult` — flattened into
     scalar keys so no dataclass, no Qt object and no live handle ever crosses the Dispatcher
     boundary, and the whole dict is JSON-serializable. `rows` are sorted by (book, field) so two
-    rows that compare equal on book id never swap order between runs."""
+    rows that compare equal on book id never swap order between runs.
+
+    `groups` (D-09/D-10, plan 02-08): the caller's own `failure_groups(...)` output, computed
+    HERE in the job body (worker thread) rather than by the result dialog — the dialog renders
+    plain data only, never calls the core (D-01's own contract, extended to the retry controls).
+    Only classify populates this today (the one verb with a matching retry job); every other
+    verb's `()` default keeps this key an empty list, and the dialog degrades to the old
+    written/skipped/failed-count-only rendering."""
     rows = sorted(rows, key=lambda r: (r['book'], r['field']))
     written = sum(1 for r in rows if r.get('state') == 'written')
     return {
@@ -369,6 +376,7 @@ def execute_result(verb, rows, write_result, engine_failures=(), touched=()):
         'rows': rows,
         'engine_failures': [list(f) for f in engine_failures],
         'touched': list(touched),
+        'groups': list(groups),
     }
 
 
@@ -722,7 +730,7 @@ def job_execute_classify(lib_path, lib_uuid, ids, carry, engine_id, model, api, 
     widen it (a book added to the library between PLAN and EXECUTE must not silently join a run
     whose price the user already confirmed)."""
     def body(con, ids, ctx):
-        from scourgify import artifacts, classify
+        from scourgify import artifacts, classify, engines
         from scourgify.common import current_tags, titles as book_titles
         _require_column(con, 'wrangled', 'classify')
         todo_ids = carry['todo_ids']
@@ -757,12 +765,23 @@ def job_execute_classify(lib_path, lib_uuid, ids, carry, engine_id, model, api, 
         classify.apply_proposal(write=writer)          # the whole pending proposal (CLI parity)
         wr = writer.result
 
+        fails = {int(r['book_id']): (r.get('title', ''), r.get('reason', ''))
+                for r in artifacts.read_rows(artifacts.fail())
+                if str(r.get('book_id', '')).isdigit()}
+
         skipped_pairs = {(b, f) for b, f in wr.skipped}
         rows, touched = [], []
         for b, _d in p.todo:
             entry = p.proposal.get(b)
             if entry is None:
-                continue                          # errored this run — reported via engine_failures
+                # errored this run — never a collapsed "success" number (WRITE-07): the failed
+                # book earns its OWN row, state naming the class the failure was and the engine
+                # that produced it, and is reported below via engine_failures/groups too.
+                reason = fails.get(b, ('', ''))[1]
+                rows.append({'book': b, 'title': titles.get(b, ''), 'field': 'tags',
+                            'before': ', '.join(before.get(b, ())), 'after': ', '.join(before.get(b, ())),
+                            'state': '%s on %s' % (engines.failure_class(reason), engine_id)})
+                continue
             vt, _nt = entry
             after = sorted(set(before.get(b, ())) | set(vt))
             skipped = (b, 'tags') in skipped_pairs
@@ -774,11 +793,18 @@ def job_execute_classify(lib_path, lib_uuid, ids, carry, engine_id, model, api, 
             if not skipped:
                 touched.append(b)
 
-        fails = {int(r['book_id']): r.get('reason', '') for r in artifacts.read_rows(artifacts.fail())
-                if str(r.get('book_id', '')).isdigit()}
-        engine_failures = [(b, fails[b]) for b in todo_ids if b in fails]
+        engine_failures = [(b, fails[b][0] or titles.get(b, ''), fails[b][1])
+                           for b in todo_ids if b in fails]
+        # `engine` is stamped on every fail row here — this run used exactly ONE engine
+        # (engine_id) for its whole batch, so this is the one context in the codebase that
+        # actually knows which engine produced a given failure (the persistent classify_failures
+        # log itself carries no engine column — see failure_groups' own docstring).
+        fail_rows = [{'book_id': b, 'title': t, 'reason': r, 'engine': engine_id}
+                    for b, t, r in engine_failures]
+        groups = failure_groups(fail_rows) if fail_rows else []
 
-        return execute_result('classify', rows, wr, engine_failures=engine_failures, touched=touched)
+        return execute_result('classify', rows, wr, engine_failures=engine_failures,
+                              touched=touched, groups=groups)
 
     return _ceremony('classify', body, lib_path, lib_uuid, ids, now_uuid, api=api,
                      abort=abort, log=log, notifications=notifications)
@@ -1247,3 +1273,109 @@ def job_execute_synopsis(lib_path, lib_uuid, ids, carry, engine_id, model, api, 
 
     return _ceremony('synopsis', body, lib_path, lib_uuid, ids, now_uuid, api=api,
                      abort=abort, log=log, notifications=notifications)
+
+
+# ---------------------------------------------------------------------- the failure-class
+# taxonomy -> a recovery verb (D-09/D-10, plan 02-08, WRITE-07/WRITE-08): the ONE shared
+# derivation both the result dialog's retry buttons and the persistent 'Retry on another engine'
+# menu slot read, so the two surfaces can never disagree about what is retryable.
+def _retry_label(engine, n):
+    """A retry control's label, reusing `engines.engine_options`' own three-case price fragment
+    (02-03 task 1a: free / sub-cent / usual) rather than reformatting a price here — one rounding
+    rule for a price exists in the codebase, not two."""
+    from scourgify import classify, engines
+    opts = engines.engine_options([(engine, True, '')], n, classify.est_cost)
+    frag = opts[0][3]
+    price = frag.split('·', 1)[1].strip() if '·' in frag else frag.strip()
+    return 'Retry %d on %s — %s' % (n, engine, price)
+
+
+def failure_groups(rows, env=None):
+    """Given failure rows (`[{book_id, title, reason}, ...]` — the failure log's own shape),
+    return one group per `engines.CLASSES` class present. Each group: `cls`, `books` (sorted
+    ints), `titles` (book -> title), `targets` (`[{engine, cost, label}, ...]`).
+
+    A row may ALSO carry `'engine'` — the engine that produced it, when the caller knows it (only
+    `job_execute_classify` does: one run uses exactly one engine for its whole batch). The
+    persistent `classify_failures.csv` the menu's own `job_retry_targets` reads carries no engine
+    column, so rows built from it never set this key.
+
+    `targets` comes from the taxonomy, never a name test:
+      - `refusal` -> one target per USABLE engine, excluding any engine this group's rows name as
+        the one that refused. Without a known engine (the persistent-log case) nothing is
+        excluded — offering every usable engine is the safe default; we would rather offer one
+        extra option than silently exclude the wrong one.
+      - a class in `engines.RETRYABLE` -> exactly one target, the SAME engine, and ONLY when
+        every row in the group agrees on which engine that was — a quota/timeout/parse/error
+        failure is answered by trying again, never by guessing which engine to name.
+      - `auth`/`permission` -> NO targets: retrying a bad key elsewhere is the same failure plus a
+        wasted click, so a control that exists here would be a lie about what it can fix."""
+    from scourgify import classify, engines
+    by_cls = {}
+    for r in rows:
+        try:
+            b = int(r.get('book_id'))
+        except (TypeError, ValueError):
+            continue
+        g = by_cls.setdefault(engines.failure_class(r.get('reason') or ''),
+                              {'books': [], 'titles': {}, 'engines': set()})
+        g['books'].append(b)
+        g['titles'][b] = r.get('title', '')
+        eng = r.get('engine')
+        if eng:
+            g['engines'].add(eng)
+
+    keys = engines.resolve_keys(stored_keys()) if env is None else env
+    usable = engines.usable_engines(env=keys)
+
+    groups = []
+    for cls in engines.CLASSES:
+        if cls not in by_cls:
+            continue
+        g = by_cls[cls]
+        n = len(g['books'])
+        targets = []
+        if cls == engines.REFUSAL:
+            for e in usable:
+                if e in g['engines']:
+                    continue
+                targets.append({'engine': e, 'cost': classify.est_cost(n, e), 'label': _retry_label(e, n)})
+        elif cls in engines.RETRYABLE and len(g['engines']) == 1:
+            (e,) = g['engines']
+            if e in usable:
+                targets.append({'engine': e, 'cost': classify.est_cost(n, e), 'label': _retry_label(e, n)})
+        groups.append({'cls': cls, 'books': sorted(g['books']), 'titles': g['titles'], 'targets': targets})
+    return groups
+
+
+def job_retry_classify(lib_path, lib_uuid, book_ids, engine_id, model, api, now_uuid=None,
+                       abort=None, log=None, notifications=None):
+    """The ONE retry entry point (D-10) — called by the result dialog's retry buttons AND the
+    'Retry on another engine' menu slot's chooser, so there is one place that dispatches a retry,
+    never a second implementation that could drift. `job_execute_classify` restricted to an
+    explicit id list: mode `'ids'` over `book_ids`, steered onto `engine_id`/`model`. Relies on
+    the SAME per-run failure-log rewrite `job_execute_classify` already triggers via
+    `classify.Plan.run`'s own tail (`merge_failures`) — a book recovered on this retry leaves the
+    log rather than accumulating a second row."""
+    return job_execute_classify(lib_path, lib_uuid, book_ids, {'todo_ids': list(book_ids)},
+                                engine_id, model, api, now_uuid=now_uuid, abort=abort, log=log,
+                                notifications=notifications)
+
+
+def job_retry_targets(lib_path, lib_uuid, ids, now_uuid=None, abort=None, log=None,
+                      notifications=None):
+    """Read job: which retry targets exist right now for `ids` (or the whole library at `ids=[]`)?
+    `build_menu` cannot call the core, so the action caches this result to grey or un-grey the
+    'Retry on another engine' slot — dispatched on menu open and after every completed job."""
+    con, err = _open(lib_path, lib_uuid, now_uuid)
+    if err:
+        return {'refused': True, 'msg': err, 'groups': []}
+    try:
+        from scourgify import artifacts
+        rows = artifacts.read_rows(artifacts.fail())
+        if ids:
+            idset = set(ids)
+            rows = [r for r in rows if str(r.get('book_id', '')).isdigit() and int(r['book_id']) in idset]
+        return {'refused': False, 'msg': '', 'groups': failure_groups(rows)}
+    finally:
+        con.close()

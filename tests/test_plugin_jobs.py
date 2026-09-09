@@ -918,6 +918,133 @@ def test_job_execute_backfill_a_falsy_decide_writes_nothing():
     assert api.fields["tags"][1] == ("Existing",)     # untouched — the falsy decide aborted the write
 
 
+# ---------------- failure_groups / job_retry_classify / job_retry_targets (plan 02-08) ----------------
+def test_failure_groups_auth_and_permission_classes_yield_no_targets():
+    rows = [{"book_id": 1, "title": "A", "reason": "auth: HTTPError: 401", "engine": "openai"},
+            {"book_id": 2, "title": "B", "reason": "permission: HTTPError: 403", "engine": "openai"}]
+    groups = jobs.failure_groups(rows, env={"OPENAI_API_KEY": "sk-test"})
+    by_cls = {g["cls"]: g for g in groups}
+    assert by_cls["auth"]["targets"] == []
+    assert by_cls["permission"]["targets"] == []
+    assert by_cls["auth"]["books"] == [1] and by_cls["auth"]["titles"] == {1: "A"}
+
+
+def test_failure_groups_refusal_targets_exclude_the_refusing_engine():
+    rows = [{"book_id": 1, "title": "A", "reason": "refusal: RuntimeError: blocked", "engine": "gemini"}]
+    groups = jobs.failure_groups(rows, env={"OPENAI_API_KEY": "sk-test", "GEMINI_API_KEY": "sk-test"})
+    g = next(g for g in groups if g["cls"] == "refusal")
+    offered = {t["engine"] for t in g["targets"]}
+    assert "gemini" not in offered
+    assert "openai" in offered
+
+
+def test_failure_groups_retryable_class_targets_only_the_same_engine():
+    rows = [{"book_id": 1, "title": "A", "reason": "quota: HTTPError: 429", "engine": "openai"}]
+    groups = jobs.failure_groups(rows, env={"OPENAI_API_KEY": "sk-test", "GEMINI_API_KEY": "sk-test"})
+    g = next(g for g in groups if g["cls"] == "quota")
+    assert [t["engine"] for t in g["targets"]] == ["openai"]
+
+
+def test_failure_groups_a_retryable_row_with_no_known_engine_offers_no_target():
+    """The persistent classify_failures.csv (job_retry_targets' own read) carries no engine
+    column — a retryable class must not GUESS which engine to name."""
+    rows = [{"book_id": 1, "title": "A", "reason": "timeout: TimeoutError"}]
+    groups = jobs.failure_groups(rows, env={"OPENAI_API_KEY": "sk-test"})
+    g = next(g for g in groups if g["cls"] == "timeout")
+    assert g["targets"] == []
+
+
+def test_retry_label_reuses_engine_options_price_fragment():
+    """One book on the free on-device engine says free; one book on a cloud engine never rounds
+    down to '$0.00' — the exact price-fragment discipline 02-03 established for engine_options."""
+    assert "free" in jobs._retry_label("apple", 1)
+    label = jobs._retry_label("openai", 1)
+    assert "$0.00" not in label
+    assert label.startswith("Retry 1 on openai")
+
+
+def test_job_retry_classify_second_attempt_recovers_and_clears_the_failure_row():
+    from scourgify import artifacts
+
+    def fake_engine_ask(engine_id, model, timeout):
+        if engine_id == "gemini":
+            return lambda prompt: ("", "refusal: RuntimeError: blocked")
+        return lambda prompt: ('{"tags": [], "new": []}', "")
+
+    lib = _classify_lib(2)
+    saved_ask, saved_sk = jobs._engine_ask, jobs.stored_keys
+    jobs._engine_ask = fake_engine_ask
+    jobs.stored_keys = lambda: {}
+    try:
+        with _pointed_at(lib), _test_write_path._fake_calibre_utils_date():
+            plan = jobs.job_plan_classify(lib, None, [], {"mode": "all"})
+            api = FakeApi(books=(1, 2), fields=("tags", "#wrangled"), multi=("tags",))
+            first = jobs.job_execute_classify(lib, None, [], plan["carry"], "gemini", "", api)
+            assert len(first["engine_failures"]) == 2, "both books refused on gemini"
+            assert all(len(row) == 3 for row in first["engine_failures"]), \
+                "engine_failures must carry [book, title, reason], not [book, reason]"
+            assert all(row["state"].startswith("refusal on gemini") for row in first["rows"])
+            book_ids = [row[0] for row in first["engine_failures"]]
+            groups = {g["cls"]: g for g in first["groups"]}
+            assert "gemini" not in {t["engine"] for t in groups["refusal"]["targets"]}
+
+            second = jobs.job_retry_classify(lib, None, book_ids, "openai", "", api)
+            assert second["refused"] is False
+            assert second["engine_failures"] == []
+            rows_left = artifacts.read_rows(artifacts.fail())
+    finally:
+        jobs._engine_ask, jobs.stored_keys = saved_ask, saved_sk
+    assert rows_left == [], \
+        "a book recovered on the retry must leave the failure log, not accumulate a second row"
+
+
+def test_job_retry_targets_reads_the_failure_log_scoped_to_ids():
+    from scourgify import artifacts
+    lib = _classify_lib(2)
+    saved_sk = jobs.stored_keys
+    jobs.stored_keys = lambda: {}
+    try:
+        with _pointed_at(lib):
+            common.set_library(None)   # _LIBRARY may still point at a prior test's library
+            os.makedirs(common.data_dir(), exist_ok=True)
+            artifacts.write_failures([[1, "Book One", "auth: HTTPError: 401"],
+                                      [2, "Book Two", "refusal: RuntimeError: blocked"]])
+            whole_library = jobs.job_retry_targets(lib, None, [])
+            scoped = jobs.job_retry_targets(lib, None, [1])
+    finally:
+        jobs.stored_keys = saved_sk
+    assert whole_library["refused"] is False
+    by_cls = {g["cls"]: g for g in whole_library["groups"]}
+    assert by_cls["auth"]["books"] == [1] and by_cls["auth"]["targets"] == []
+    assert by_cls["refusal"]["books"] == [2]
+    scoped_classes = {g["cls"] for g in scoped["groups"]}
+    assert scoped_classes == {"auth"}, "scoped to book 1 only — book 2's refusal must not appear"
+
+
+def test_two_execute_results_are_independent():
+    """The CI-side half of 'two completed runs render independently' (the Qt-side half is the
+    task 2 human-check): neither EXECUTE result shares a mutable object with the other, and both
+    still survive json.dumps after the second one lands."""
+    lib = _lib()
+    with _pointed_at(lib):
+        plan1 = jobs.job_plan_staleness(lib, None, [1, 2])
+        api1 = FakeApi(books=(1, 2), fields=("tags", "#status"), multi=("tags",))
+        api1.set_field("#status", {1: "In-Progress"})
+        first = jobs.job_execute_staleness(lib, None, [1, 2], plan1["carry"], api1)
+
+        plan2 = jobs.job_plan_staleness(lib, None, [1, 2])
+        api2 = FakeApi(books=(1, 2), fields=("tags", "#status"), multi=("tags",))
+        api2.set_field("#status", {1: "In-Progress"})
+        second = jobs.job_execute_staleness(lib, None, [1, 2], plan2["carry"], api2)
+
+    assert first["rows"] is not second["rows"]
+    assert first["rows"][0] is not second["rows"][0]
+    json.dumps(first)
+    first["rows"][0]["state"] = "mutated"
+    json.dumps(second)
+    assert second["rows"][0]["state"] != "mutated"
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:
