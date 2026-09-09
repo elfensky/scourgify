@@ -566,6 +566,193 @@ def test_job_execute_wrangle_refuses_cleanly_on_a_guard_trip():
     assert "last fandom" in result["msg"]
 
 
+# ---------------- synopsis (plan 02-06) ----------------
+import test_synopsis as _test_synopsis   # noqa: E402 — reuses its EPUB-building `lib()` fixture
+
+
+def _synopsis_lib_ctx(books=None, prefs=_test_synopsis.PREFS_ON, custom=None):
+    """`test_synopsis.lib()`, but yielding the resolved CALIBRE_LIBRARY path this file's
+    job_plan_synopsis/job_execute_synopsis calls need — that module's own `lib()` context manager
+    yields nothing (its callers read the env var directly).
+
+    Resets `common.set_library(None)` FIRST: unlike every other test in this file,
+    `jobs.job_plan_synopsis`/`job_execute_synopsis` call `common.set_library()` (via `_open`),
+    which WINS over `$CALIBRE_LIBRARY` and is process-global — a prior synopsis test's call would
+    otherwise still be in effect when `test_synopsis.lib()`'s own `os.makedirs(common.data_dir())`
+    setup runs, pointing it at the WRONG (stale) library's data dir (same class of gap
+    `test_job_plan_classify_unclassified_shortcut_restricts_to_the_selection` already works
+    around for classify's own `set_library` calls)."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _cm():
+        common.set_library(None)
+        kw = {"prefs": prefs}
+        if books is not None:
+            kw["books"] = books
+        if custom is not None:
+            kw["custom"] = custom
+        with _test_synopsis.lib(**kw):
+            yield os.environ["CALIBRE_LIBRARY"]
+    return _cm()
+
+
+def _no_real_prefs():
+    """`job_plan_synopsis` reaches `engines.resolve_keys(stored_keys())` unconditionally (to
+    price every USABLE engine) — never let it touch the real `JSONConfig` (no Calibre here)."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _cm():
+        saved = jobs.stored_keys
+        jobs.stored_keys = lambda: {}
+        try:
+            yield
+        finally:
+            jobs.stored_keys = saved
+    return _cm()
+
+
+def test_job_plan_synopsis_refuses_when_fanficfare_would_clobber_the_synopsis():
+    off = {"std_cols_newonly": {"comments": False}, "custom_cols": {}}
+    with _no_real_prefs(), _synopsis_lib_ctx(prefs=off) as lib:
+        r = jobs.job_plan_synopsis(lib, None, [1, 2], {"force": False, "batch": None})
+    assert r["refused"] is True
+    assert r["degraded_available"] is True
+    assert "New Only" in r["msg"]
+
+
+def test_job_plan_synopsis_proceeds_with_force_true():
+    off = {"std_cols_newonly": {"comments": False}, "custom_cols": {}}
+    with _no_real_prefs(), _synopsis_lib_ctx(prefs=off) as lib:
+        r = jobs.job_plan_synopsis(lib, None, [1, 2], {"force": True, "batch": None})
+    assert r["refused"] is False
+
+
+def test_job_plan_synopsis_refuses_cleanly_without_the_synopsized_column():
+    """Pitfall 3/5/6 (02-RESEARCH.md), reused for synopsis: a library that has never run
+    `scourgify setup` must refuse cleanly, never a bare exception from deep in the pass."""
+    with _synopsis_lib_ctx(custom=[]) as lib:
+        r = jobs.job_plan_synopsis(lib, None, [1, 2], {"force": False, "batch": None})
+    assert r["refused"] is True
+    assert "#synopsized" in r["msg"] and "scourgify setup" in r["msg"]
+    assert "degraded_available" not in r
+
+
+def test_job_plan_synopsis_returns_the_d04_empty_result_for_an_empty_selection():
+    with _synopsis_lib_ctx() as lib:
+        r = jobs.job_plan_synopsis(lib, None, [], {"force": False, "batch": None})
+    assert r["empty"] is True and r["refused"] is False
+
+
+def test_job_plan_synopsis_prices_every_usable_engine_over_the_resolved_todo_set():
+    with _no_real_prefs(), _synopsis_lib_ctx() as lib:
+        r = jobs.job_plan_synopsis(lib, None, [1, 2], {"force": False, "batch": None})
+    assert r["refused"] is False and r["empty"] is False
+    assert sorted(r["carry"]["todo_ids"]) == [1, 2]
+    assert r["consequence"] == "Settle 2 descriptions"
+    assert r["default_engine"]
+    assert isinstance(r["usable"], list)
+    assert set(r["engine_limits"]) == {eid for _key, eid, _eid2, _label in r["engines"]}
+    apple_row = next(row for row in r["engines"] if row[1] == "apple")
+    assert "free" in apple_row[3]                       # apple's list price is always (0, 0)
+
+
+def _no_engine_call(engine_id, model, timeout):
+    raise AssertionError("job_plan_synopsis must reach no engine — it sends nothing")
+
+
+def test_job_plan_synopsis_sends_nothing_to_an_engine():
+    saved = jobs._engine_ask
+    jobs._engine_ask = _no_engine_call
+    try:
+        with _no_real_prefs(), _synopsis_lib_ctx() as lib:
+            jobs.job_plan_synopsis(lib, None, [1, 2], {"force": False, "batch": None})
+    finally:
+        jobs._engine_ask = saved
+
+
+def test_job_execute_synopsis_first_dispatch_harvests_review_items_and_writes_nothing():
+    """The harvest dispatch (`ticks=None`) runs the real engine pass but its write= transport
+    touches nothing — the generated descriptions come back as review items instead."""
+    ask = _test_synopsis.FakeAsk(judge="NO", back=_test_synopsis.BACK)   # both books -> generation
+    saved = jobs._engine_ask
+    jobs._engine_ask = lambda engine_id, model, timeout: ask
+    try:
+        with _no_real_prefs(), _synopsis_lib_ctx() as lib:
+            plan = jobs.job_plan_synopsis(lib, None, [1, 2], {"force": False, "batch": None})
+            api = FakeApi(books=(1, 2), fields=("comments", "#synopsized"), multi=())
+            result = jobs.job_execute_synopsis(lib, None, [1, 2], plan["carry"], "apple", "", api, None)
+    finally:
+        jobs._engine_ask = saved
+    assert result["refused"] is False
+    assert result["items"], "the generated descriptions must come back as review items"
+    for label, payload in result["items"]:
+        assert payload["field"] == "comments" and payload["after"]
+    assert api.fields == {}, "the harvest dispatch must write nothing"
+
+
+def test_job_execute_synopsis_second_dispatch_writes_only_the_ticked_books():
+    """An unticked book (rejected in the review) receives neither its generated description nor
+    its #synopsized stamp — it stays in the queue."""
+    ask = _test_synopsis.FakeAsk(judge="NO", back=_test_synopsis.BACK)   # both books -> generation
+    saved = jobs._engine_ask
+    jobs._engine_ask = lambda engine_id, model, timeout: ask
+    try:
+        with _no_real_prefs(), _synopsis_lib_ctx() as lib:
+            plan = jobs.job_plan_synopsis(lib, None, [1, 2], {"force": False, "batch": None})
+            api = FakeApi(books=(1, 2), fields=("comments", "#synopsized"), multi=())
+            api.set_field("comments", {1: _test_synopsis.FAT, 2: _test_synopsis.THIN})
+            harvest = jobs.job_execute_synopsis(lib, None, [1, 2], plan["carry"], "apple", "", api, None)
+            book_order = [payload["book"] for _label, payload in harvest["items"]]
+            assert sorted(book_order) == [1, 2]
+            accept = [i for i, b in enumerate(book_order) if b == 1]     # keep book 1
+            reject = [i for i, b in enumerate(book_order) if b == 2]     # reject book 2
+            ticks = [(accept, reject, "apply")]
+            with _test_write_path._fake_calibre_utils_date():
+                result = jobs.job_execute_synopsis(lib, None, [1, 2], plan["carry"], "apple", "", api, ticks)
+    finally:
+        jobs._engine_ask = saved
+    assert result["refused"] is False
+    assert api.fields["comments"][1].startswith("A generated back cover")
+    assert 1 in api.fields.get("#synopsized", {})
+    assert api.fields["comments"][2] == _test_synopsis.THIN, \
+        "an unticked book must not receive its generated description"
+    assert 2 not in api.fields.get("#synopsized", {}), "an unticked book must not receive its stamp either"
+
+
+def test_job_execute_synopsis_a_book_with_an_adequate_blurb_is_stamped_and_kept_untouched():
+    """book 1 (a good, long blurb) is judged adequate and KEPT — comments untouched, but stamped
+    #synopsized alongside book 2 (thin blurb -> generated and accepted)."""
+    ask = _test_synopsis.FakeAsk(judge="YES", back=_test_synopsis.BACK)  # book1's blurb judged adequate
+    saved = jobs._engine_ask
+    jobs._engine_ask = lambda engine_id, model, timeout: ask
+    try:
+        with _no_real_prefs(), _synopsis_lib_ctx() as lib:      # default BOOKS2: book1 FAT blurb, book2 THIN blurb
+            plan = jobs.job_plan_synopsis(lib, None, [1, 2], {"force": False, "batch": None})
+            api = FakeApi(books=(1, 2), fields=("comments", "#synopsized"), multi=())
+            api.set_field("comments", {1: _test_synopsis.FAT, 2: _test_synopsis.THIN})
+            jobs.job_execute_synopsis(lib, None, [1, 2], plan["carry"], "apple", "", api, None)   # harvest
+            with _test_write_path._fake_calibre_utils_date():
+                result = jobs.job_execute_synopsis(lib, None, [1, 2], plan["carry"], "apple", "", api, [])
+    finally:
+        jobs._engine_ask = saved
+    assert result["refused"] is False
+    assert api.fields["comments"][1] == _test_synopsis.FAT, "an adequate blurb is kept — comments untouched"
+    assert 1 in api.fields.get("#synopsized", {}), "a kept book is still stamped"
+    assert api.fields["comments"][2].startswith("A generated back cover")
+    assert 2 in api.fields.get("#synopsized", {})
+
+
+def test_a_missing_synopsized_column_refuses_execute_too():
+    with _synopsis_lib_ctx(custom=[]) as lib:
+        api = FakeApi(books=(1, 2), fields=("comments", "#synopsized"), multi=())
+        result = jobs.job_execute_synopsis(lib, None, [1, 2], {"todo_ids": [1, 2], "force": False},
+                                           "apple", "", api, None)
+    assert result["refused"] is True
+    assert "#synopsized" in result["msg"]
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

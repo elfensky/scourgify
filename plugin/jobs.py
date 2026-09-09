@@ -782,3 +782,230 @@ def job_execute_classify(lib_path, lib_uuid, ids, carry, engine_id, model, api, 
 
     return _ceremony('classify', body, lib_path, lib_uuid, ids, now_uuid, api=api,
                      abort=abort, log=log, notifications=notifications)
+
+
+# ---------------------------------------------------------------------- synopsis (the pass that
+# writes into a field FanFicFare can also write — the FFF guard is rendered as a visible,
+# explicit choice, and every generated description passes a per-book review before it is
+# written, D-13)
+class _NullWriter:
+    """The write= transport for synopsis's harvest-only first EXECUTE dispatch (D-13): NEVER
+    touches the library. `synopsis.Plan.run` calls `write()` once it has anything settled — even
+    a kept-only run stamps its books — and the review point comes BEFORE any write is allowed, so
+    the harvest dispatch cannot use `_Writer` (which always reaches `common.write_ops`)."""
+
+    def __init__(self):
+        self.result = None
+
+    def __call__(self, ops, force=False, tool='plugin', scope=None):
+        from scourgify.common import WriteResult
+        self.result = WriteResult(run_id=None, backup=None, ops=0, books=0, skipped=[], outcome='noop')
+        return self.result
+
+
+def _synopsis_cost(n_todo: int, engine: str) -> float:
+    """Rough list-price $ estimate for `engines.engine_options` — deliberately the PESSIMISTIC
+    (never-under-quote) case: every book costs the FULL generation path (one judge call plus
+    MAX_CHUNKS note calls plus one back-cover call), since whether a book's existing blurb turns
+    out to be adequate is not knowable before the judge call runs. Same 'never under-quote'
+    lesson CLAUDE.md records for `classify.est_cost`'s `out_tokens` fix — a flat guess that
+    ignores a reasoning model's hidden thinking tokens quoted gemini at a fifth of its real
+    price, right before the user spent money."""
+    from scourgify import engines
+    from scourgify.synopsis import CHUNK, JUDGE_CAP, MAX_CHUNKS, NOTE_CAP
+    i, o = engines.PRICING.get(engine, (0.0, 0.0))
+    out_tok = engines.trait(engine, 'out_tokens')
+    tokens_in = (JUDGE_CAP + MAX_CHUNKS * CHUNK + MAX_CHUNKS * NOTE_CAP) / 4
+    calls_out = (MAX_CHUNKS + 2) * out_tok
+    return n_todo * (tokens_in * i + calls_out * o) / 1e6
+
+
+def job_plan_synopsis(lib_path, lib_uuid, ids, opts, now_uuid=None, abort=None, log=None,
+                      notifications=None):
+    """PLAN: which of the selected books would this run judge, and what would each usable engine
+    cost over that exact set? `opts` is the plain dict the menu supplies:
+    `{'force': bool, 'batch': int|None}`.
+
+    Sends NOTHING to an engine — unlike classify's PLAN job there is no proposal artifact to
+    build here either, so this step is genuinely free; that is what makes it safe to open
+    casually, unlike CLAUDE.md's own "'dry run' does NOT mean 'no engine call'" warning, which is
+    about `classify`, not this pass.
+
+    The guard (`synopsis.guard_comments`, run inside `synopsis.Plan.__init__`) is rendered as an
+    explicit, visible choice rather than a silent flag (T-02-21): a refusal here carries
+    `degraded_available: True` and the guard's own remedy sentence, so the picker can offer
+    `--force`'s degraded self-healing mode as a control the user actually sees and clicks, never
+    a default and never silent. The protection state for the result's `detail` line is read
+    through `setup.comments_protected(con)` — never re-derived from the FFF prefs blob here."""
+    def body(con, ids, ctx):
+        from scourgify import engines, setup as setup_mod, synopsis
+        from scourgify.common import GuardrailError
+        _require_column(con, 'synopsized', 'synopsis')
+        if not ids:
+            return plan_result('synopsis', [], [], '', {})
+
+        a = synopsis.default_opts()
+        a.force = bool((opts or {}).get('force'))
+        a.books = ','.join(str(i) for i in ids)
+        batch = (opts or {}).get('batch')
+        if batch:
+            a.batch = batch
+        try:
+            p = synopsis.plan(a)
+        except GuardrailError as e:
+            protected = setup_mod.comments_protected(con)
+            return {'verb': 'synopsis', 'refused': True, 'msg': str(e),
+                   'degraded_available': True,
+                   'detail': ('FanFicFare Comments protection is off for this library.'
+                              if protected is False else
+                              'FanFicFare has no configuration for this library — nothing to protect.')}
+        if not p.todo:
+            return plan_result('synopsis', [], [], '', {})
+
+        n = len(p.todo)
+        judged = sum(1 for b in p.todo if len(p.blurbs.get(b, '')) >= synopsis.MIN_JUDGE)
+        summary = ['%d book(s) to send this run' % n,
+                  '%d have a blurb to judge (kept if adequate)' % judged,
+                  '%d go straight to whole-book generation' % (n - judged)]
+        consequence = 'Settle %d description%s' % (n, '' if n == 1 else 's')
+
+        keys = engines.resolve_keys(stored_keys())
+        engs = engines.engine_rows(env=keys)
+        usable = engines.usable_engines(env=keys)
+        opts_engines = engines.engine_options(engs, n, _synopsis_cost)
+        default_engine = engines.default_engine_id(opts_engines, usable=usable)
+        # engine_options carries no usability flag and no TRAITS 'limits' text (its 4-tuple is
+        # (key, id, id, label) only) and picker.py may import NOTHING from scourgify (D-01) —
+        # same enrichment job_plan_classify already hands its own engine picker.
+        limits = {e: engines.trait(e, 'limits') for e, _ok, _hint in engs}
+
+        carry = {'todo_ids': list(p.todo), 'force': a.force, 'batch': batch}
+        result = plan_result('synopsis', summary, [], consequence, carry)
+        # items is deliberately [] here — D-13's review items are GENERATED descriptions that do
+        # not exist until the engine has run, so `plan_result`'s own `not items` empty test would
+        # be wrong: there is real work to do (the todo set is non-empty), it just has no items to
+        # show yet. Mirrors job_plan_wrangle's own override of the same field, for the same
+        # reason (real work, empty items).
+        result['empty'] = False
+        result['engines'] = opts_engines
+        result['default_engine'] = default_engine
+        result['usable'] = usable
+        result['engine_limits'] = limits
+        return result
+
+    return _ceremony('synopsis', body, lib_path, lib_uuid, ids, now_uuid,
+                     abort=abort, log=log, notifications=notifications)
+
+
+def job_execute_synopsis(lib_path, lib_uuid, ids, carry, engine_id, model, api, ticks,
+                         now_uuid=None, abort=None, log=None, notifications=None):
+    """EXECUTE, two dispatches sharing ONE job function — the shape D-13's per-book review needs
+    for a pass whose review items are GENERATED descriptions: unlike wrangle/staleness/classify,
+    whose PLAN job harvests review items for free, a synopsis review item does not exist until
+    the engine has actually run, so the harvest has to happen mid-EXECUTE.
+
+    First dispatch (`ticks=None`): rebuild the plan restricted to `carry['todo_ids']` with
+    `force=carry['force']`, run the FULL engine pass (`Plan.run`) with a write= that touches
+    nothing (`_NullWriter`) and a `decide=` that only HARVESTS items (`_record_decide()`, D-02) —
+    the generated descriptions come back as review items, paired against the blurb each would
+    replace, for the SAME `Picker`/Review-1-by-1 table every other verb uses. Nothing is written.
+
+    Second dispatch (`ticks` a list): rebuild the SAME plan again and re-run the SAME engine pass
+    — `synopsis.Plan` carries no cross-dispatch cache of what it generated, so this is a genuine
+    second engine pass over the same books, not a cached replay — this time with the real
+    in-process writer and `decide=_replay_decide(ticks)` (D-02) to apply exactly the reviewer's
+    ticks. This is the same "recompute rather than carry a result forward" choice
+    `job_execute_wrangle` makes for its own deterministic pass (see that function's docstring),
+    generalised to a non-deterministic one: unlike wrangle's recompute, an engine's answer for
+    the SAME unchanged prompt can in principle differ between the two runs, so replaying `ticks`
+    by POSITION assumes the same set of generated books reappears in the same order — true in
+    practice for a fixed judge/generation prompt against unchanged text, and the reason batch
+    size (not a cache) is what keeps a review session small and low-risk. This two-dispatch shape
+    is what keeps CLAUDE.md's 1-by-1-review rule true for a pass whose items only exist after
+    real per-book compute."""
+    def body(con, ids, ctx):
+        from scourgify import synopsis
+        from scourgify.common import WriteResult, titles as book_titles
+        _require_column(con, 'synopsized', 'synopsis')
+        todo_ids = carry['todo_ids']
+        if not todo_ids:
+            wr = WriteResult(run_id=None, backup=None, ops=0, books=0, skipped=[], outcome='noop')
+            return execute_result('synopsis', [], wr)
+
+        a = synopsis.default_opts(apply=True)
+        a.books = ','.join(str(i) for i in todo_ids)
+        a.force = bool(carry.get('force'))
+        p = synopsis.plan(a)
+        p.opts.engine = engine_id
+        p.opts.model = model
+
+        ask = _engine_ask(engine_id, model, p.opts.timeout)
+
+        def on_book(done, total, made, kept, failed):
+            if notifications is not None:
+                notifications.put((done / max(total, 1),
+                                   'settled %d · kept %d · failed %d' % (made, kept, failed)))
+
+        if ticks is None:
+            # first dispatch: harvest the review items, write NOTHING
+            decide, calls = _record_decide()
+            writer = _NullWriter()
+            stop = (lambda: abort is not None and abort.is_set())
+            p.run(ask=ask, write=writer, decide=decide, on_book=on_book, stop=stop)
+            items = calls[0]['items'] if calls else []
+            n = len(p.todo)
+            consequence = ('Review %d new synopsis%s' % (len(items), '' if len(items) == 1 else 'es')
+                          if items else
+                          'Settle %d description%s (nothing to review)' % (n, '' if n == 1 else 's'))
+            result = plan_result('synopsis', [], items, consequence, carry)
+            result['empty'] = False    # real work either way — see job_plan_synopsis's own note
+            return result
+
+        # second dispatch: replay the reviewer's ticks and write for real
+        writer = _Writer(ctx['api'], engine=engine_id, model=model)
+
+        def stop():
+            if abort is not None and abort.is_set():
+                writer.outcome = 'cancelled'   # set BEFORE Plan.run's own trailing write() call
+                return True
+            return False
+
+        before = {b: (p.raw_blurbs.get(b) or '') for b in todo_ids}
+        p.run(ask=ask, write=writer, decide=_replay_decide(ticks), on_book=on_book, stop=stop)
+        wr = writer.result
+        if wr is None:                 # nothing settled at all (every book failed) — write() never ran
+            wr = WriteResult(run_id=None, backup=None, ops=0, books=0, skipped=[], outcome='noop')
+
+        from scourgify import artifacts
+        fails = {int(r['book_id']): r.get('reason', '') for r in artifacts.read_rows(artifacts.syn_fail())
+                if str(r.get('book_id', '')).isdigit()}
+        skipped_pairs = {(b, f) for b, f in wr.skipped}
+        try:
+            after = dict(ctx['api'].all_field_for('comments', todo_ids))
+        except Exception:
+            after = {}
+        titles = book_titles(con, todo_ids)
+        rows, touched = [], []
+        for b in todo_ids:
+            bef = before.get(b, '') or ''
+            aft = after.get(b, bef) or ''
+            skipped = (b, 'comments') in skipped_pairs
+            changed = aft != bef
+            if b in fails and not changed:
+                state = 'failed: %s' % fails[b][:60]
+            elif skipped:
+                state = 'skipped: changed since the plan'
+            elif changed:
+                state = 'written'
+            else:
+                state = 'kept the existing blurb'
+            rows.append({'book': b, 'title': titles.get(b, ''), 'field': 'comments',
+                        'before': bef, 'after': aft, 'state': state})
+            if not skipped and b not in fails:
+                touched.append(b)
+
+        engine_failures = [(b, fails[b]) for b in todo_ids if b in fails]
+        return execute_result('synopsis', rows, wr, engine_failures=engine_failures, touched=touched)
+
+    return _ceremony('synopsis', body, lib_path, lib_uuid, ids, now_uuid, api=api,
+                     abort=abort, log=log, notifications=notifications)
