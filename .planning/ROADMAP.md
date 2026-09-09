@@ -113,7 +113,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3)*
 
-- [ ] 02-04-PLAN.md — `(label, payload)` review items at every decision seam, the two missing `decide=` seams, and the picker's Review 1-by-1 control
+- [x] 02-04-PLAN.md — `(label, payload)` review items at every decision seam, the two missing `decide=` seams, and the picker's Review 1-by-1 control
 
 **Wave 5** *(blocked on Wave 4)*
 
