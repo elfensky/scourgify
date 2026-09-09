@@ -5,16 +5,16 @@ milestone_name: (the terminal goes away)
 current_phase: 02
 current_phase_name: Write verbs on a selection
 status: executing
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-09-09T08:17:04.707Z"
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-09-09T09:42:42.267Z"
 last_activity: 2026-09-09
 last_activity_desc: Phase 02 execution started
-state_head: 0180e7cdf898cb2e0b5ae37852209c3fadf68c82
+state_head: c02955f6d005b1bce7ec5e8fee9cc9c5a040e081
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 14
-  completed_plans: 7
+  completed_plans: 8
   percent: 17
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-28)
 ## Current Position
 
 Phase: 02 (Write verbs on a selection) — EXECUTING
-Plan: 2 of 8
+Plan: 3 of 8
 Status: Ready to execute
 Last activity: 2026-09-09 — Phase 02 execution started
 
@@ -67,6 +67,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 01-foundation-a-hostable-core P05 | 40 min | 2 tasks | 8 files |
 | Phase 01 P06 | 55 min | 3 tasks | 14 files |
 | Phase 02 P01 | 40min | 3 tasks | 10 files |
+| Phase 02-write-verbs-on-a-selection P02 | 55min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -96,6 +97,7 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-06: synopsis.Plan keeps raw_blurbs (unstripped) alongside blurbs (stripped); the comments op's expected is built from raw_blurbs — Comparing the stripped text against the stored HTML before-value would make every op read as a conflict and silently disable the whole pass
 - [Phase 02]: 02-01: staleness.write gains write= (default run_writer); the plugin's jobs._Writer passes a write_ops-bound callable — the pattern plan 02-02 replicates across wrangle/classify/promote/synopsis/setup.
 - [Phase 02]: 02-01: plugin/action.py reduced to zero core imports (D-12/D-14) — every job body lives in plugin/jobs.py, importing scourgify only inside functions; tests/test_plugin_source.py's MODULES/QT_MODULES are now glob-derived.
+- [Phase 02]: 02-02: write= sentinel is write=None + late lookup, not an eagerly-bound write=run_writer default (also fixed on staleness.write from 02-01) — A default-argument value is bound once at function-definition time; the module.run_writer test-monkeypatches already used by tests/test_wizard_flow.py, tests/test_wizard.py, tests/test_synopsis.py mutate the module attribute AFTER def time, so an eager default silently keeps calling the original run_writer and falls through to a real calibre-debug subprocess. write=None + a late lookup performs a live lookup at call time instead, matching this codebase's existing ask=None/decide=None convention.
 
 ### Pending Todos
 
@@ -120,6 +122,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-09T08:17:04.664Z
-Stopped at: Completed 02-01-PLAN.md
+Last session: 2026-09-09T09:42:16.937Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None

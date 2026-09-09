@@ -105,7 +105,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1)*
 
-- [ ] 02-02-PLAN.md — The injected `write=` transport on the five remaining write producers, and the dual-transport shadow-replay invariant
+- [x] 02-02-PLAN.md — The injected `write=` transport on the five remaining write producers, and the dual-transport shadow-replay invariant
 
 **Wave 3** *(blocked on Wave 2)*
 
