@@ -488,6 +488,84 @@ def test_job_plan_wrangle_a_fandom_emptying_change_set_is_refused_with_no_dialog
     assert r.get("items", []) == []
 
 
+def test_job_execute_wrangle_writes_through_write_ops_and_the_fake_apis_state_changes():
+    lib = _wrangle_lib([{"id": 1, "tags": ["ZWrangleJunk"]}])
+    with _pointed_at(lib) as home:
+        _write_override(home, "junk.txt", ["zwranglejunk"])
+        plan = jobs.job_plan_wrangle(lib, None, [1])
+        api = FakeApi(books=(1,), fields=("tags",), multi=("tags",))
+        api.set_field("tags", {1: ("ZWrangleJunk",)})
+        result = jobs.job_execute_wrangle(lib, None, [1], plan["carry"], [], api)
+    assert result["refused"] is False
+    assert result["written"] == 1
+    assert result["touched"] == [1]
+    assert api.fields["tags"][1] == ()
+
+
+def test_job_execute_wrangle_a_skipped_book_is_deferred_and_writes_no_reject_row():
+    lib = _wrangle_lib([{"id": 1, "tags": ["ZWrangleJunkOne"]}, {"id": 2, "tags": ["ZWrangleJunkTwo"]}])
+    with _pointed_at(lib) as home:
+        _write_override(home, "junk.txt", ["zwranglejunkone", "zwranglejunktwo"])
+        plan = jobs.job_plan_wrangle(lib, None, [1, 2])
+        api = FakeApi(books=(1, 2), fields=("tags",), multi=("tags",))
+        api.set_field("tags", {1: ("ZWrangleJunkOne",), 2: ("ZWrangleJunkTwo",)})
+        # call order is newest-id-first (_step_walk): book 2's call replays first, book 1's second.
+        ticks = [([], [0], "skip"), ([0], [], "apply")]
+        result = jobs.job_execute_wrangle(lib, None, [1, 2], plan["carry"], ticks, api)
+        assert not os.path.exists(common.rejects_path())
+    assert result["refused"] is False
+    assert api.fields["tags"][2] == ("ZWrangleJunkTwo",)      # book 2 deferred: untouched
+    assert api.fields["tags"][1] == ()                         # book 1 written (accepted)
+    assert result["touched"] == [1]
+
+
+def test_job_execute_wrangle_an_explicit_untick_writes_a_declared_reject_row():
+    lib = _wrangle_lib([{"id": 1, "tags": ["ZWrangleJunkThree"]}])
+    with _pointed_at(lib) as home:
+        _write_override(home, "junk.txt", ["zwranglejunkthree"])
+        plan = jobs.job_plan_wrangle(lib, None, [1])
+        api = FakeApi(books=(1,), fields=("tags",), multi=("tags",))
+        api.set_field("tags", {1: ("ZWrangleJunkThree",)})
+        ticks = [([], [0], "apply")]                     # apply, with the one edit rejected
+        result = jobs.job_execute_wrangle(lib, None, [1], plan["carry"], ticks, api)
+        from scourgify import artifacts
+        rows = artifacts.read_rows(common.rejects_path())
+    assert result["refused"] is False
+    assert len(rows) == 1
+    assert rows[0]["book"] == "1" and rows[0]["kind"] == "drop" and rows[0]["column"] == "tags"
+    assert api.fields["tags"][1] == ("ZWrangleJunkThree",)     # rejected -> kept unchanged
+
+
+def test_a_second_plan_after_a_successful_wrangle_write_returns_the_d04_empty_result():
+    lib = _wrangle_lib([{"id": 1, "tags": ["ZWrangleJunkFour"]}])
+    with _pointed_at(lib) as home:
+        _write_override(home, "junk.txt", ["zwranglejunkfour"])
+        plan = jobs.job_plan_wrangle(lib, None, [1])
+        api = FakeApi(books=(1,), fields=("tags",), multi=("tags",))
+        api.set_field("tags", {1: ("ZWrangleJunkFour",)})
+        result = jobs.job_execute_wrangle(lib, None, [1], plan["carry"], [], api)
+        assert result["written"] == 1
+        # This job's own transport is a fixture FakeApi (never persisted to metadata.db) —
+        # test_write_path.py pins that both transports emit the identical ops for the same
+        # producer, so applying the same op to the real sqlite file simulates a real write.
+        import sqlite3
+        con = sqlite3.connect(os.path.join(lib, "metadata.db"))
+        con.execute("DELETE FROM books_tags_link WHERE book=1")
+        con.commit(); con.close()
+        second = jobs.job_plan_wrangle(lib, None, [1])
+    assert second["empty"] is True
+
+
+def test_job_execute_wrangle_refuses_cleanly_on_a_guard_trip():
+    lib = _wrangle_lib([{"id": 1, "fandoms": ["ZGhostFandomTwo"]}])
+    with _pointed_at(lib) as home:
+        _write_override(home, "fandoms.csv", ["alias,canonical", "ZGhostFandomTwo,"])
+        api = FakeApi(books=(1,), fields=("#fandoms",))
+        result = jobs.job_execute_wrangle(lib, None, [1], {"ids": [1], "n_books": 1}, [], api)
+    assert result["refused"] is True
+    assert "last fandom" in result["msg"]
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

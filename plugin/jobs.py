@@ -550,6 +550,60 @@ def job_plan_wrangle(lib_path, lib_uuid, ids, now_uuid=None, abort=None, log=Non
                      abort=abort, log=log, notifications=notifications)
 
 
+def job_execute_wrangle(lib_path, lib_uuid, ids, carry, ticks, api, now_uuid=None, abort=None,
+                        log=None, notifications=None):
+    """EXECUTE: recompute `p = wrangle.plan(cfg, m).restrict(carry['ids'])`, replay `ticks`
+    through the SAME `_step_walk` the terminal's `apply --step` drives (via
+    `p.step(decide=_replay_decide(ticks))`), then write.
+
+    **Resolving the "no recompute" discretion note, on the record.** CONTEXT.md's Claude's
+    Discretion says an EXECUTE job should apply exactly the PLAN job's ops with no recompute. For
+    wrangle this is a deliberate divergence: `_step_walk` is what writes the reject rows to
+    `data/rejects.csv` and what recomputes a book's net change when an individual edit is
+    unticked, and `Plan.write` is what builds each op's `expected` from `perbook`. Carrying an ops
+    list forward instead would move both of those into the plugin — a second place that
+    assembles a write and a second place that decides what a reject is, which is precisely the
+    duplication CLAUDE.md's "the wizard ASKS, the tool modules DO" rule exists to prevent. The
+    recompute is deterministic over an unchanged library, costs ~870 ms off the GUI thread
+    (02-RESEARCH.md's own accepted-cost note, matching `apply --books`), and any drift between the
+    two computes is caught by the apply-time conflict filter — the staleness net the discretion
+    note itself names. Staleness (above) keeps the carry-forward shape (its rows carry their own
+    before-values and it has no reject log), so both shapes exist for a stated reason, not by
+    accident."""
+    def body(con, ids, ctx):
+        from scourgify import wrangle
+        from scourgify.common import load_config, titles as book_titles
+        cfg = load_config()
+        m = wrangle.load_maps(cfg)
+        p = wrangle.plan(cfg, m).restrict(carry['ids'])
+        p.guard(force=False)
+        titles = book_titles(con, carry['ids'])
+        before = {b: {k: sorted(p.perbook[b].get(k, [])) for k in p.cols} for b in carry['ids']}
+
+        p.step(decide=_replay_decide(ticks))
+
+        writer = _Writer(ctx['api'])
+        p.write(write=writer)
+        wr = writer.result
+
+        skipped_pairs = {(b, f) for b, f in wr.skipped}
+        rows, touched = [], []
+        for lab, ch in sorted(p.changes.items()):
+            k = next(key for key, label in p.cols.items() if label == lab)
+            for b, newv in sorted(ch.items()):
+                oldv = before.get(b, {}).get(k, [])
+                skipped = (b, lab) in skipped_pairs
+                state = 'skipped: changed since the plan' if skipped else 'written'
+                rows.append({'book': b, 'title': titles.get(b, ''), 'field': lab,
+                            'before': ', '.join(oldv), 'after': ', '.join(newv), 'state': state})
+                if not skipped and b not in touched:
+                    touched.append(b)
+        return execute_result('wrangle', rows, wr, touched=touched)
+
+    return _ceremony('wrangle', body, lib_path, lib_uuid, ids, now_uuid, api=api,
+                     abort=abort, log=log, notifications=notifications)
+
+
 # ---------------------------------------------------------------------- classify (the highest-
 # stakes verb this phase builds — the price on the engine button IS the confirmation, D-06/D-07)
 _CLASSIFY_BATCH_DEFAULT = 200   # a chunk a user can finish in one sitting — the CLI's own --unclassified default

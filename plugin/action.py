@@ -22,7 +22,7 @@ never changes meaning (B1 edge case, mirroring the wizard's fixed-slot rule).
 import os
 import time
 
-from qt.core import QMenu, QToolButton
+from qt.core import QMenu, QToolButton, Qt
 
 from calibre import prints
 from calibre.gui2 import Dispatcher, info_dialog
@@ -39,8 +39,10 @@ SOON = 'not built yet'                    # the honest reason a phase-6/7 slot i
 
 # verb -> the EXECUTE job it dispatches, for every verb whose EXECUTE job takes the SAME
 # (lib, uuid, ids, carry, api, now_uuid) argument tuple as `_start_execute` builds. Classify's
-# EXECUTE job needs `engine_id`/`model` between `carry` and `api` (the engine picker's answer),
-# so it dispatches through its own `_start_classify_execute` instead of this generic table.
+# EXECUTE job needs `engine_id`/`model` between `carry` and `api` (the engine picker's answer), so
+# it dispatches through its own `_start_classify_execute` instead of this generic table. Wrangle's
+# EXECUTE job needs `ticks` between `carry` and `api` (the reviewer's per-book replay, D-02) for
+# the same reason — `_start_execute` special-cases it below rather than adding it here.
 _EXECUTE_JOBS = {'staleness': jobs.job_execute_staleness}
 
 
@@ -99,7 +101,9 @@ class ScourgifyAction(InterfaceAction):
         self._verb(m, 'Classify %s' % _these(n), COSTS, status_reason,
                    None if not n else lambda: self.classify(scope),
                    'Choose a scope, then an engine — the price on the button IS the confirmation.')
-        self._verb(m, 'Normalize fields', WRITES, SOON)
+        self._verb(m, 'Normalize fields', WRITES, status_reason, lambda: self.wrangle(scope),
+                   'Deterministic normalization (alias folds, junk drop, mis-filed values) — '
+                   'reviewable per book, with the same data-loss guards `apply` has.')
         self._verb(m, 'Re-derive status', WRITES, status_reason, lambda: self.staleness(scope),
                    "Re-derive #status from #updated age for the selection's activity-family books.")
         m.addSeparator()
@@ -162,11 +166,28 @@ class ScourgifyAction(InterfaceAction):
                   jobs.job_plan_staleness, (lib, uuid, ids, self.current_uuid),
                   done=self._plan_done('staleness'))
 
+    def wrangle(self, scope):
+        """PLAN: which of the selected books' fields would change under the deterministic
+        normalization pass? Same completion path as `staleness` — `_plan_done` opens the picker,
+        and its Run (or a finished 1-by-1 review) dispatches `job_execute_wrangle` via
+        `_start_execute`."""
+        lib, uuid, ids = scope
+        self._run('scourgify: wrangle plan for %s' % _these(len(ids)),
+                  jobs.job_plan_wrangle, (lib, uuid, ids, self.current_uuid),
+                  done=self._plan_done('wrangle'))
+
     def _plan_done(self, verb):
         """A Dispatcher-safe callback factory: a real job failure still reaches
         `gui.job_exception`; a refused PLAN (identity mismatch, a GuardrailError) shows its
         message plainly; an empty PLAN (D-04) shows a one-line notice and opens no dialog;
-        otherwise the picker opens, and its Run button dispatches the matching EXECUTE job."""
+        otherwise the picker opens, and its Run button dispatches the matching EXECUTE job.
+
+        The picker object itself (`dlg`) is threaded into `_start_execute`'s `on_run` callback —
+        every verb still dispatches through the SAME `_start_execute`, so this stays the ONE
+        completion path (no new one added for wrangle); only wrangle's own branch inside
+        `_start_execute` actually reads `dlg` (see `_wrangle_ticks` — `_step_walk` calls its
+        `decide=` once per book, so a flat review table's ticks must be regrouped per book, unlike
+        every other verb's single-call review)."""
         def done(job):
             if job.failed:
                 return self.gui.job_exception(job, dialog_title='scourgify failed')
@@ -177,7 +198,7 @@ class ScourgifyAction(InterfaceAction):
                 return info_dialog(self.gui, 'scourgify',
                                    'Nothing to change for these books.', show=True)
             from calibre_plugins.scourgify.picker import show_picker
-            show_picker(self.gui, r, lambda carry: self._start_execute(verb, carry))
+            dlg = show_picker(self.gui, r, lambda carry: self._start_execute(verb, carry, dlg))
         return done
 
     # ---- classify: scope dialog -> PLAN job -> engine picker -> EXECUTE job (D-06/D-07) ----
@@ -243,14 +264,23 @@ class ScourgifyAction(InterfaceAction):
                   jobs.job_execute_classify, (lib, uuid, ids, carry, engine_id, '', db.new_api, self.current_uuid),
                   done=self._execute_done)
 
-    def _start_execute(self, verb, carry):
-        """Dispatched from the picker's Run button — re-reads the selection at click time (it may
-        have changed since the PLAN job ran) and passes the GUI's live `new_api` handle exactly as
-        `db_smoke` already does, so the EXECUTE job writes in-process, never through `run_writer`."""
+    def _start_execute(self, verb, carry, dlg=None):
+        """Dispatched from the picker's Run button (or a finished 1-by-1 review) — re-reads the
+        selection at click time (it may have changed since the PLAN job ran) and passes the GUI's
+        live `new_api` handle exactly as `db_smoke` already does, so the EXECUTE job writes
+        in-process, never through `run_writer`.
+
+        `dlg` is the closed-but-not-destroyed Picker (see `_plan_done`); only wrangle reads it."""
         db = self.gui.current_db
         ids = list(self.gui.library_view.get_selected_ids())
         lib, uuid = db.library_path, getattr(db.new_api, 'library_id', None)
         self._write_running = verb
+        if verb == 'wrangle':
+            ticks = _wrangle_ticks(dlg)
+            self._run('scourgify: writing %s' % verb, jobs.job_execute_wrangle,
+                      (lib, uuid, ids, carry, ticks, db.new_api, self.current_uuid),
+                      done=self._execute_done)
+            return
         self._run('scourgify: writing %s' % verb, _EXECUTE_JOBS[verb],
                   (lib, uuid, ids, carry, db.new_api, self.current_uuid), done=self._execute_done)
 
@@ -288,6 +318,48 @@ class ScourgifyAction(InterfaceAction):
         r = job.result or {}
         info_dialog(self.gui, r.get('title', 'scourgify'), r.get('msg', ''),
                     det_msg=r.get('det', ''), show=True)
+
+
+def _wrangle_ticks(dlg):
+    """Convert the picker's flat, all-books review table (D-02) into wrangle's per-book `ticks` —
+    `wrangle.Plan.step` (via `_step_walk`) calls its `decide=` ONCE PER BOOK, so a single global
+    tick state has to be regrouped into one `(accepted_idx, rejected_idx, action)` triple per
+    book, with indices LOCAL to that book's own run of items — matching the call order
+    `jobs.job_plan_wrangle`'s `_record_decide()` recorded and `jobs._replay_decide` expects to
+    replay. This is why wrangle cannot reuse `picker.checklist_decide` (D-04's own adapter):
+    that one returns GLOBAL table-row indices for every call, which is correct only for a
+    single-call review (staleness, promote, classify, overrides) and wrong from the second book
+    onward here.
+
+    Not reviewed (the plain Run button) -> `[]`, which `_replay_decide` treats as accept
+    everything (D-02's one-click path — no Qt call needed to answer that). A book with every item
+    left unticked -> `'skip'` (deferred, no reject row — `_step_walk`'s own semantics). A book
+    with a partial untick -> `'apply'` with the unticked LOCAL indices as declared rejects. The
+    picker's own global "skip" button (abandon the whole review) forces every book to `'skip'`
+    rather than falling through to `_replay_decide`'s empty-ticks fallback, which means the
+    opposite (accept everything)."""
+    if dlg is None or not getattr(dlg, 'reviewed', False) or dlg._table is None:
+        return []
+    from calibre_plugins.scourgify.picker import BOOK_ROLE
+    table = dlg._table
+    n = table.rowCount()
+    books = [table.item(row, 0).data(BOOK_ROLE) for row in range(n)]
+    kept = [table.item(row, 0).checkState() == Qt.CheckState.Checked for row in range(n)]
+    global_skip = dlg.review_action in ('skip', 'quit')
+    ticks, start = [], 0
+    while start < n:
+        end = start + 1
+        while end < n and books[end] == books[start]:
+            end += 1
+        if global_skip:
+            ticks.append(([], [], 'skip'))
+        else:
+            run = kept[start:end]
+            acc = [i for i, k in enumerate(run) if k]
+            rej = [i for i, k in enumerate(run) if not k]
+            ticks.append((acc, [] if not acc else rej, 'skip' if not acc else 'apply'))
+        start = end
+    return ticks
 
 
 def _these(n):
