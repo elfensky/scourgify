@@ -48,10 +48,10 @@ authority for plugin behaviour; B-references below point at it.
       from the plugin, with the same verdict-per-candidate review the wizard offers
 - [x] **WRITE-06**: Every write from the plugin appends per-op edit-log lines (run header,
       before/after per `(book, field)`, footer) — identical record shape to the CLI
-- [ ] **WRITE-07**: After a write, the user sees a diff-after notice: counts, skipped conflicts,
+- [x] **WRITE-07**: After a write, the user sees a diff-after notice: counts, skipped conflicts,
       failures classed by `failure_class()` with a "retry on <engine>" verb where a refusal
       occurred; the library view refreshes the touched rows
-- [ ] **WRITE-08**: The plugin never calls `run_writer`, never spawns a second writer process,
+- [x] **WRITE-08**: The plugin never calls `run_writer`, never spawns a second writer process,
       and dispatches every job through the ONE `action._run` — enforced by source-grep tests
 
 ### Setup & onboarding (B5/B6.5)
@@ -176,8 +176,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | WRITE-04 | Phase 2 | Complete |
 | WRITE-05 | Phase 2 | Complete |
 | WRITE-06 | Phase 2 | Complete |
-| WRITE-07 | Phase 2 | Pending |
-| WRITE-08 | Phase 2 | Pending |
+| WRITE-07 | Phase 2 | Complete |
+| WRITE-08 | Phase 2 | Complete |
 | SETUP-01 | Phase 3 | Pending |
 | SETUP-02 | Phase 3 | Pending |
 | SETUP-03 | Phase 3 | Pending |
