@@ -283,13 +283,13 @@ class ScourgifyAction(InterfaceAction):
 
     def _finish_synopsis(self, carry, engine_id, dlg):
         """The SECOND `job_execute_synopsis` dispatch — `ticks` replays exactly what the
-        reviewer left (`_synopsis_ticks`, reusing `picker.checklist_decide` unchanged, D-04):
+        reviewer left (`_batch_ticks`, reusing `picker.checklist_decide` unchanged, D-04):
         `[]` (Run clicked with no review) accepts every generated description, matching D-02's
         one-click-Run contract. Clears `_write_running` via the shared `_execute_done`."""
         db = self.gui.current_db
         ids = list(self.gui.library_view.get_selected_ids())
         lib, uuid = db.library_path, getattr(db.new_api, 'library_id', None)
-        ticks = _synopsis_ticks(dlg)
+        ticks = _batch_ticks(dlg)
         self._run('scourgify: writing settled descriptions', jobs.job_execute_synopsis,
                   (lib, uuid, ids, carry, engine_id, '', db.new_api, ticks, self.current_uuid),
                   done=self._execute_done)
@@ -350,11 +350,11 @@ class ScourgifyAction(InterfaceAction):
 
     def _finish_promote(self, carry, engine_id, dlg):
         """The SECOND `job_execute_promote` dispatch — `ticks` replays exactly what the reviewer
-        left (`_promote_ticks`, reusing `picker.checklist_decide` unchanged, D-04): `[]` (Run
+        left (`_batch_ticks`, reusing `picker.checklist_decide` unchanged, D-04): `[]` (Run
         clicked with no review) accepts every verdict, matching D-02's one-click-Run contract."""
         db = self.gui.current_db
         lib, uuid = db.library_path, getattr(db.new_api, 'library_id', None)
-        ticks = _promote_ticks(dlg)
+        ticks = _batch_ticks(dlg)
         self._run('scourgify: applying adjudicated verdicts', jobs.job_execute_promote,
                   (lib, uuid, [], carry, engine_id, '', None, ticks, self.current_uuid),
                   done=self._promote_apply_done)
@@ -645,33 +645,17 @@ def _wrangle_ticks(dlg):
     return ticks
 
 
-def _synopsis_ticks(dlg):
-    """Build the single-call `ticks` list `job_execute_synopsis`'s second dispatch replays.
-    Reuses `picker.checklist_decide` (D-04) rather than re-deriving the tick-reading logic a
-    second time — `synopsis.step` (unlike `wrangle.Plan.step`'s own `_step_walk`) calls its
-    `decide=` exactly ONCE for the whole batch of generated descriptions, the same single-call
-    shape `checklist_decide` already covers (staleness, promote, classify all share it); only the
-    OUTPUT here is plain data (a list), not a callable, because `ticks` travels across a SECOND
-    job dispatch (D-13's own two-dispatch shape), not a same-call closure.
+def _batch_ticks(dlg):
+    """Build the single-call `ticks` list a second job dispatch replays — used by BOTH
+    `job_execute_synopsis` and `job_execute_promote`, whose reviews share one shape: unlike
+    `wrangle.Plan.step`'s per-book `_step_walk`, each calls its `decide=` exactly ONCE for the
+    whole batch, which is the single-call shape `picker.checklist_decide` (D-04) already covers
+    (staleness and classify share it too). Reusing that rather than re-deriving tick-reading a
+    second time; only the OUTPUT here is plain data (a list), not a callable, because `ticks`
+    travels across a SECOND job dispatch (D-13's two-dispatch shape), not a same-call closure.
 
     Not reviewed (the plain Run button) -> `[]` — `_replay_decide`'s own accept-everything
     fallback, no Qt call needed to answer that (mirrors `_wrangle_ticks`'s own empty case)."""
-    if dlg is None or not getattr(dlg, 'reviewed', False) or dlg._table is None:
-        return []
-    from calibre_plugins.scourgify.picker import checklist_decide
-    decide = checklist_decide(dlg)
-    acc, rej, action = decide('', dlg._items)
-    return [(list(acc), list(rej), action)]
-
-
-def _promote_ticks(dlg):
-    """Build the single-call `ticks` list `job_execute_promote`'s second dispatch replays — the
-    same shape `_synopsis_ticks` builds, reusing `picker.checklist_decide` (D-04) since promote's
-    review (like synopsis's, unlike wrangle's per-book one) calls its `decide=` exactly once for
-    the whole batch of verdicts.
-
-    Not reviewed (the plain Run button) -> `[]` — `_replay_decide`'s own accept-everything
-    fallback, no Qt call needed to answer that (mirrors `_synopsis_ticks`'s own empty case)."""
     if dlg is None or not getattr(dlg, 'reviewed', False) or dlg._table is None:
         return []
     from calibre_plugins.scourgify.picker import checklist_decide

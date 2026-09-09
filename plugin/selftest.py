@@ -324,7 +324,7 @@ class Harness(object):
         # save a fake key through the real widget, exactly as clicking OK does
         w.rows['openai'][0].setText(self.FAKE)
         out = w.save_settings()
-        mode = oct(os.stat(config.prefs.file_path).st_mode & 0o777)
+        mode = oct(os.stat(config._prefs().file_path).st_mode & 0o777)
         self.say('saved: engines with a stored key = %s; config file mode %s' % (sorted(out), mode))
 
         stored = config.stored_keys()
@@ -462,7 +462,7 @@ class Harness(object):
 
     def finish(self):
         if getattr(self, 'cfg', None) is not None:
-            self.cfg.prefs['keys'] = self.saved_keys      # put the user's own keys back
+            self.cfg._prefs()['keys'] = self.saved_keys  # put the user's own keys back
             self.say('restored stored keys: %s' % sorted(self.saved_keys))
         self.mod.info_dialog = self._orig['info_dialog']
         from calibre_plugins.scourgify import picker as picker_mod
