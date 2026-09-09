@@ -5,16 +5,16 @@ milestone_name: (the terminal goes away)
 current_phase: 02
 current_phase_name: Write verbs on a selection
 status: executing
-stopped_at: Completed 02-02-PLAN.md
-last_updated: "2026-09-09T09:42:42.267Z"
+stopped_at: Completed 02-03-PLAN.md
+last_updated: "2026-09-09T10:10:33.791Z"
 last_activity: 2026-09-09
 last_activity_desc: Phase 02 execution started
-state_head: c02955f6d005b1bce7ec5e8fee9cc9c5a040e081
+state_head: 0e1575fd16b832b7ca5007f720b366b5be8757c7
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 14
-  completed_plans: 8
+  completed_plans: 9
   percent: 17
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-28)
 ## Current Position
 
 Phase: 02 (Write verbs on a selection) — EXECUTING
-Plan: 3 of 8
+Plan: 4 of 8
 Status: Ready to execute
 Last activity: 2026-09-09 — Phase 02 execution started
 
@@ -68,6 +68,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 01 P06 | 55 min | 3 tasks | 14 files |
 | Phase 02 P01 | 40min | 3 tasks | 10 files |
 | Phase 02-write-verbs-on-a-selection P02 | 55min | 2 tasks | 7 files |
+| Phase 02-write-verbs-on-a-selection P03 | 25min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -98,6 +99,9 @@ Recent decisions affecting current work:
 - [Phase 02]: 02-01: staleness.write gains write= (default run_writer); the plugin's jobs._Writer passes a write_ops-bound callable — the pattern plan 02-02 replicates across wrangle/classify/promote/synopsis/setup.
 - [Phase 02]: 02-01: plugin/action.py reduced to zero core imports (D-12/D-14) — every job body lives in plugin/jobs.py, importing scourgify only inside functions; tests/test_plugin_source.py's MODULES/QT_MODULES are now glob-derived.
 - [Phase 02]: 02-02: write= sentinel is write=None + late lookup, not an eagerly-bound write=run_writer default (also fixed on staleness.write from 02-01) — A default-argument value is bound once at function-definition time; the module.run_writer test-monkeypatches already used by tests/test_wizard_flow.py, tests/test_wizard.py, tests/test_synopsis.py mutate the module attribute AFTER def time, so an eager default silently keeps calling the original run_writer and falls through to a real calibre-debug subprocess. write=None + a late lookup performs a live lookup at call time instead, matching this codebase's existing ask=None/decide=None convention.
+- [Phase 02]: 02-03: engine_options' price fragment is three cases (free / sub-cent / usual) — a real cost under half a cent must never render as '~$0.00' (which reads as free). — A user reading '~$0.00' assumes no charge; the sub-cent label makes the real, nonzero cost visible.
+- [Phase 02]: 02-03: job_plan_classify hands the engine picker usable/engine_limits as sibling keys — engine_options' own tuple carries neither, and plugin/picker.py may import nothing from scourgify. — D-01's picker contract (no core import) means TRAITS-derived text must arrive as plain data from the job, not be derived by the Qt dialog.
+- [Phase 02]: 02-03: restrict_to_selection is an explicit scope_spec flag (only the never-classified shortcut sets it), not an implicit ids-non-empty inference. — An implicit rule would have silently restricted the ScopeDialog's own never-classified row too, whose label already promises the whole-library backlog count.
 
 ### Pending Todos
 
@@ -122,6 +126,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-09T09:42:16.937Z
-Stopped at: Completed 02-02-PLAN.md
+Last session: 2026-09-09T10:10:33.703Z
+Stopped at: Completed 02-03-PLAN.md
 Resume file: None

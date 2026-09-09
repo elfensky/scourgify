@@ -37,7 +37,7 @@ authority for plugin behaviour; B-references below point at it.
       edits, then write through `common.write_ops` (snapshot + wipe guard + SAFETY guards apply)
 - [ ] **WRITE-02**: User can run **staleness** on the selected books, with the per-book
       `#status` change shown before writing
-- [ ] **WRITE-03**: User can run **classify** on a scope (selection / new-changed / never
+- [x] **WRITE-03**: User can run **classify** on a scope (selection / new-changed / never
       classified with a batch size / whole library) with an engine picker that shows, per
       usable engine, the per-run price over the exact resolved scope and its failure modes
       (from `engines.TRAITS`/`PRICING`, never hardcoded) — no confirmation dialog
@@ -46,7 +46,7 @@ authority for plugin behaviour; B-references below point at it.
       switch is on (or the degraded self-healing mode is chosen explicitly)
 - [ ] **WRITE-05**: User can run **promote** (adjudicate new-tag candidates) and **backfill**
       from the plugin, with the same verdict-per-candidate review the wizard offers
-- [ ] **WRITE-06**: Every write from the plugin appends per-op edit-log lines (run header,
+- [x] **WRITE-06**: Every write from the plugin appends per-op edit-log lines (run header,
       before/after per `(book, field)`, footer) — identical record shape to the CLI
 - [ ] **WRITE-07**: After a write, the user sees a diff-after notice: counts, skipped conflicts,
       failures classed by `failure_class()` with a "retry on <engine>" verb where a refusal
@@ -172,10 +172,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | FOUND-07 | Phase 1 | Complete |
 | WRITE-01 | Phase 2 | Pending |
 | WRITE-02 | Phase 2 | Pending |
-| WRITE-03 | Phase 2 | Pending |
+| WRITE-03 | Phase 2 | Complete |
 | WRITE-04 | Phase 2 | Pending |
 | WRITE-05 | Phase 2 | Pending |
-| WRITE-06 | Phase 2 | Pending |
+| WRITE-06 | Phase 2 | Complete |
 | WRITE-07 | Phase 2 | Pending |
 | WRITE-08 | Phase 2 | Pending |
 | SETUP-01 | Phase 3 | Pending |

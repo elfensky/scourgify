@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 1
+open_count: 2
 waived_count: 0
 fixed_count: 0
-total_count: 1
-last_updated: 2026-09-09T08:15:35.653Z
+total_count: 2
+last_updated: 2026-09-09T10:07:28.323Z
 ---
 
 # Broken Windows Ledger
@@ -16,6 +16,7 @@ last_updated: 2026-09-09T08:15:35.653Z
 | id | phase | kind | file | line | description | status | reason | recorded_at | resolved_at |
 |----|-------|------|------|------|-------------|--------|--------|-------------|-------------|
 | 1 | 02 | unrun-verify | plugin/action.py |  | Task 1 (02-01) human-check not run: real-Calibre GUI verification of Re-derive status (picker/result dialog/row refresh) — no Calibre available in this environment; all automated checks pass. | open |  | 2026-09-09T08:15:35.653Z |  |
+| 2 | 02 | unrun-verify | plugin/picker.py |  | Task 3 human-check not run (no Calibre in this environment): real-Calibre walkthrough of classify's scope dialog + engine picker on a throwaway library (select 2 books, click Classify these 2 books). | open |  | 2026-09-09T10:07:28.323Z |  |
 
 ````json
 [
@@ -29,6 +30,18 @@ last_updated: 2026-09-09T08:15:35.653Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-09T08:15:35.653Z",
+    "resolved_at": null
+  },
+  {
+    "id": 2,
+    "kind": "unrun-verify",
+    "phase": "02",
+    "file": "plugin/picker.py",
+    "line": null,
+    "description": "Task 3 human-check not run (no Calibre in this environment): real-Calibre walkthrough of classify's scope dialog + engine picker on a throwaway library (select 2 books, click Classify these 2 books).",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-09T10:07:28.323Z",
     "resolved_at": null
   }
 ]
