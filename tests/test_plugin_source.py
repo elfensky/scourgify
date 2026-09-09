@@ -182,6 +182,29 @@ def test_only_one_module_dispatches_jobs():
             "%s must dispatch through action._run, not build its own ThreadedJob" % name
 
 
+def test_every_write_verb_dispatches_a_plan_and_an_execute_job():
+    """Catches a verb wired to a dialog but never to a job (plan 02-08's own phase sweep): every
+    write verb this phase added must have a matching `job_plan_*`/`job_execute_*` pair defined in
+    `jobs.py` (or, for retry, the single `job_retry_*`) AND be referenced from `action.py` — a
+    dispatch site that got the dialog wired but forgot the job import."""
+    verbs = {
+        "staleness": ("job_plan_staleness", "job_execute_staleness"),
+        "wrangle": ("job_plan_wrangle", "job_execute_wrangle"),
+        "classify": ("job_plan_classify", "job_execute_classify"),
+        "synopsis": ("job_plan_synopsis", "job_execute_synopsis"),
+        "promote": ("job_plan_promote", "job_execute_promote"),
+        "backfill": ("job_plan_backfill", "job_execute_backfill"),
+        "retry": ("job_retry_classify",),
+    }
+    jobs_src = _src("jobs.py")
+    action_src = _src("action.py")
+    for verb, names in verbs.items():
+        for name in names:
+            assert "def %s(" % name in jobs_src, "%s: no job function for the %s verb" % (name, verb)
+            assert ("jobs.%s" % name) in action_src, \
+                "%s: never referenced from action.py — a verb wired to a dialog but not a job" % name
+
+
 def test_the_settings_dialog_hangs_off_the_plugin_base_and_imports_qt_lazily():
     """Calibre asks the InterfaceActionBase for its config widget, not the toolbar action. And the
     widget import must live INSIDE config_widget(): at module level it drags Qt into every
