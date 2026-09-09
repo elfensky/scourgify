@@ -402,17 +402,27 @@ class Plan:
         data_loss_guard(self.lostF, self.lostC, force)
         tag_loss_guard(self.tagsB, self.tagsA, force)
 
-    def step(self) -> None:
+    def step(self, decide=None) -> None:
         """1-by-1 review of the per-book UNIQUE edits (ui.checklist); rejected edits are removed
-        from this plan's changes and logged for `scourgify overrides`."""
-        from scourgify import ui
-        if not ui.interactive():
-            raise GuardrailError("--step needs an interactive terminal (omit it for a bulk apply).")
+        from this plan's changes and logged for `scourgify overrides`.
+
+        `decide=` is the injected checklist seam — the one `decide=` gap this plan closes (six of
+        the seven review-checklist sites already had it). Omitting it means the interactive
+        terminal path: `ui.interactive()` is checked and `ui.checklist` imported ONLY when
+        `decide is None`, matching the pattern every other `decide=` site in this codebase already
+        follows (D-11), so an injected `decide` never needs an interactive terminal and never
+        imports the interactive module — the plugin's picker can drive this review with rich
+        blocked."""
+        if decide is None:
+            from scourgify import ui
+            if not ui.interactive():
+                raise GuardrailError("--step needs an interactive terminal (omit it for a bulk apply).")
+            decide = ui.checklist
         _, unique = _classify_edits(self.m, self.diffs)
         if not unique: return
         from scourgify.overrides import _step_walk   # lazy: breaks the wrangle<->overrides import cycle
         rejects = _step_walk(self.m, self.beh, self.cols, self.perbook, self.changes, unique,
-                             self.known_chars, self.tagcanon)
+                             self.known_chars, self.tagcanon, decide=decide)
         if rejects:
             from scourgify.common import log_rejects, rejects_path
             log_rejects(rejects)

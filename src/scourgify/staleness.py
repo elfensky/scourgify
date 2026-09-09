@@ -67,7 +67,9 @@ def step(status_label: str, rows: list, decide=None) -> list:
     function the subcommand does, so `staleness --apply --step` and the wizard share one path.
 
     `decide(title, items) -> (accepted_idx, rejected_idx, action)` defaults to ui.checklist
-    (D-11) — the lazy import of ui moves BEHIND that default."""
+    (D-11) — the lazy import of ui moves BEHIND that default. `items` are `(label, payload)`
+    pairs (D-03): `payload` carries `book`/`title`/`field`/`before`/`after` so a Qt review table
+    can render a before -> after column; `ui.checklist` reads only the label."""
     if decide is None:
         from scourgify import ui
         if not ui.interactive():
@@ -75,8 +77,10 @@ def step(status_label: str, rows: list, decide=None) -> list:
         decide = ui.checklist
     with contextlib.closing(ro_connect()) as con:
         titles = book_titles(con)
-    acc, _, action = decide(f"{status_label} changes — untick to leave a book alone",
-                            [status_line(r, str(titles.get(r[0], ""))) for r in rows])
+    items = [(status_line(r, str(titles.get(r[0], ""))),
+             {"book": r[0], "title": str(titles.get(r[0], "")), "field": status_label,
+              "before": r[1], "after": r[2]}) for r in rows]
+    acc, _, action = decide(f"{status_label} changes — untick to leave a book alone", items)
     return [] if action in ("skip", "quit") else [rows[i] for i in acc]
 
 

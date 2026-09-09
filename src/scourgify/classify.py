@@ -300,7 +300,9 @@ def apply_proposal_step(decide=None) -> None:
 
     `decide(title, items, subtitle=) -> (accepted_idx, rejected_idx, action)` defaults to
     ui.checklist (D-11) — the lazy import of ui moves BEHIND that default, so a front door
-    injecting its own callback never imports the interactive module."""
+    injecting its own callback never imports the interactive module. `items` are
+    `(label, payload)` pairs (D-03), one per proposed tag: `label` is the tag itself (unchanged);
+    `payload`'s `before`/`after` are this book's current tags without/with that one tag."""
     if not os.path.exists(prop()):
         raise GuardrailError(f"no proposal to apply ({os.path.basename(prop())} not found — run a classify pass first).")
     if decide is None:
@@ -312,13 +314,17 @@ def apply_proposal_step(decide=None) -> None:
     with contextlib.closing(ro_connect()) as con:
         desc = {b: strip_html(t) for b, t in con.execute("SELECT book, text FROM comments")}
         titles = book_titles(con)
+        cur = current_tags(con)
     decided, pending, rejects, quit_ = [], [], [], False
     for r in read_proposal():
         tags = r["added_tags"]
         if quit_: pending.append(r); continue
         if not tags: decided.append(r); continue               # no-tag book: stamp only (else re-sent forever)
         b = r["book_id"]; title = str(r.get("title") or titles.get(b, ""))
-        acc, rej, action = decide(f"[bold]#{b}[/]  {title[:64]}", tags, subtitle=(desc.get(b, "")[:280] or "(no description)"))
+        before = sorted(cur.get(b, set()))
+        items = [(tag, {"book": b, "title": title, "field": "tags",
+                        "before": before, "after": sorted(set(before) | {tag})}) for tag in tags]
+        acc, rej, action = decide(f"[bold]#{b}[/]  {title[:64]}", items, subtitle=(desc.get(b, "")[:280] or "(no description)"))
         if action == "quit": quit_ = True; pending.append(r); continue
         if action == "skip": pending.append(r); continue
         for i in rej:

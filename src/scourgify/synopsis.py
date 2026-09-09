@@ -215,7 +215,7 @@ class Plan:
         report.say("\nDry run — nothing sent, nothing written. To run it: "
                    "scourgify synopsis --apply   (Calibre closed)")
 
-    def run(self, ask=None, *, write=None) -> None:
+    def run(self, ask=None, *, write=None, decide=None) -> None:
         """Execute. Without --apply this is preview() and stops — see the module docstring.
 
         `write=` is the injected write transport (the phase-2 seam): omitting it resolves to
@@ -226,7 +226,14 @@ class Plan:
         `tests/test_synopsis.py`'s existing `synopsis.run_writer = fake` monkeypatch seam (that
         test may not be edited — PUB-05). The Calibre plugin passes a `write_ops`-bound callable
         instead (`plugin/jobs.py::_Writer`) so the same compute logic writes in-process against
-        the live library, with the same guards."""
+        the live library, with the same guards.
+
+        `decide=` (D-13) threads to the internal per-book review (`step()`): the synopsis verb
+        gets the same 1-by-1 review every other write verb offers, extending CLAUDE.md's review
+        invariant to synopsis. This SUPERSEDES 02-RESEARCH.md's Open Question #1 — written before
+        CONTEXT.md's D-13 settled the question the other way — which had recommended skipping the
+        review here like classify does; do not resurrect that recommendation. CLI behaviour is
+        unchanged: with `decide=None` and `--step` unset, no review runs."""
         if write is None:
             write = run_writer
         from scourgify import report
@@ -259,8 +266,8 @@ class Plan:
         if failures:
             report.say(f"  {len(failures)} failed -> {os.path.basename(syn_fail())}  "
                        "(retry on another engine: scourgify synopsis --apply --engine openai)")
-        if a.step and made:
-            made = step(made, self.titles)
+        if made and (decide is not None or a.step):
+            made = step(made, self.titles, decide=decide, blurbs=self.blurbs)
         if not (made or kept):
             report.say("(nothing settled — nothing written.)"); return
         ops = []
@@ -296,7 +303,7 @@ def options(n: int) -> list:
     ]
 
 
-def step(made: dict, titles: dict, decide=None) -> dict:
+def step(made: dict, titles: dict, decide=None, blurbs: dict | None = None) -> dict:
     """1-by-1 review of the generated synopses -> the ACCEPTED subset ({} = nothing decided).
 
     Lives here, not in the wizard: CLAUDE.md's rule is that a wizard stage calls the same engine
@@ -305,16 +312,22 @@ def step(made: dict, titles: dict, decide=None) -> dict:
     the point of rejecting it.
 
     `decide(title, items) -> (accepted_idx, rejected_idx, action)` defaults to ui.checklist
-    (D-11) — the lazy import of ui moves BEHIND that default."""
+    (D-11) — the lazy import of ui moves BEHIND that default. `items` are `(label, payload)`
+    pairs (D-03): `payload`'s `before` is `blurbs[b]` — the existing description the CALLER
+    already read (`Plan.run`'s `self.blurbs`), never a fresh `ro_connect()` read here, since
+    `step()` has no library connection of its own."""
     if decide is None:
         from scourgify import ui
         if not ui.interactive():
             raise GuardrailError("--step needs an interactive terminal (omit it to write every synopsis).")
         decide = ui.checklist
+    blurbs = blurbs or {}
     ids = sorted(made)
+    items = [(f"[bold]#{b}[/] {str(titles.get(b, ''))[:36]:<36} [dim]{made[b][:120]}…[/]",
+             {"book": b, "title": str(titles.get(b, "")), "field": "comments",
+              "before": blurbs.get(b, ""), "after": made[b]}) for b in ids]
     acc, _, action = decide(
-        "new synopses — untick one to leave that book's description alone",
-        [f"[bold]#{b}[/] {str(titles.get(b, ''))[:36]:<36} [dim]{made[b][:120]}…[/]" for b in ids])
+        "new synopses — untick one to leave that book's description alone", items)
     if action in ("skip", "quit"): return {}
     return {ids[i]: made[ids[i]] for i in acc}
 

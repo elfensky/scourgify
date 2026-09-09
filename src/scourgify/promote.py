@@ -199,7 +199,9 @@ def apply_decisions_step(review_path: str | None = None, decide=None) -> dict:
     item, which is how the wrangle and classify reviews already work.
 
     `decide(title, items, subtitle=) -> (accepted_idx, rejected_idx, action)` defaults to
-    ui.checklist (D-11) — the lazy import of ui moves BEHIND that default."""
+    ui.checklist (D-11) — the lazy import of ui moves BEHIND that default. `items` are
+    `(label, payload)` pairs (D-03): `payload` carries `target`/`reason` too, so a Qt review
+    table can show why a verdict landed where it did."""
     from scourgify.artifacts import archive_rows
     review_path = review_path or review()
     if not os.path.exists(review_path):
@@ -214,8 +216,10 @@ def apply_decisions_step(review_path: str | None = None, decide=None) -> dict:
     other = [r for r in rows if r not in actionable]          # errors: never applicable, stay pending
     if not actionable:
         print("(no applicable verdicts — nothing to review.)"); return {}
-    acc, rej, action = decide("verdicts — untick any you disagree with",
-                              [verdict_line(r) for r in actionable],
+    items = [(verdict_line(r), {"book": None, "title": r.get("tag", ""), "field": "verdict",
+              "before": "", "after": r.get("verdict", ""), "target": r.get("target", ""),
+              "reason": r.get("reason", "")}) for r in actionable]
+    acc, rej, action = decide("verdicts — untick any you disagree with", items,
                               subtitle="ticked verdicts are applied; unticked ones stay undecided "
                                        "and are offered again")
     if action in ("skip", "quit") or not acc:
@@ -349,14 +353,19 @@ def backfill_step(chg: dict, adds: dict, titles: dict, decide=None) -> dict:
     `promote --backfill --step` and the wizard stage, per CLAUDE.md's same-engine-function rule.
 
     `decide(title, items) -> (accepted_idx, rejected_idx, action)` defaults to ui.checklist
-    (D-11) — the lazy import of ui moves BEHIND that default."""
+    (D-11) — the lazy import of ui moves BEHIND that default. `items` are `(label, payload)`
+    pairs (D-03): `payload`'s `before`/`after` are the book's tag set without/with this
+    backfill's additions."""
     if decide is None:
         from scourgify import ui
         decide = ui.checklist
     books = sorted(adds)
-    acc, _, action = decide("backfill — untick a book to leave it untagged",
-                            [f"[bold]#{b}[/] {str(titles.get(b, ''))[:44]}  + "
-                             f"[cyan]{', '.join(sorted(adds[b]))}[/]" for b in books])
+    items = [(f"[bold]#{b}[/] {str(titles.get(b, ''))[:44]}  + "
+              f"[cyan]{', '.join(sorted(adds[b]))}[/]",
+              {"book": b, "title": titles.get(b, ""), "field": "tags",
+               "before": sorted(set(chg.get(b, [])) - set(adds[b])),
+               "after": sorted(chg.get(b, []))}) for b in books]
+    acc, _, action = decide("backfill — untick a book to leave it untagged", items)
     if action in ("skip", "quit"): return {}
     keep = {books[i] for i in acc}
     return {b: v for b, v in chg.items() if b in keep}
