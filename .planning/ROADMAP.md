@@ -96,12 +96,12 @@ Plans:
   4. After any write the user sees a diff-after notice — counts, skipped conflicts by book, failures grouped by `failure_class()` with a "retry on <engine>" verb where a refusal occurred — the touched rows refresh in the library view, and the per-library `edits.jsonl` holds a run header, one before/after line per `(book, field)` and a footer in the same record shape as a CLI run (engine + model filled in for classify).
   5. `tests/test_plugin_source.py` still proves the plugin never calls `run_writer`, never spawns a second writer process, and dispatches every job through the ONE `action._run`; a write verb greys out, naming the running job, while another write-run holds the library's lock.
 
-**Plans**: 8 plans
+**Plans**: 1/8 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 02-01-PLAN.md — Tracer: `Re-derive status` end-to-end (menu → PLAN job → picker → EXECUTE job → `write_ops` → result dialog → row refresh), the Qt-free `plugin/jobs.py` split and the lock-greying mirror
+- [x] 02-01-PLAN.md — Tracer: `Re-derive status` end-to-end (menu → PLAN job → picker → EXECUTE job → `write_ops` → result dialog → row refresh), the Qt-free `plugin/jobs.py` split and the lock-greying mirror
 
 **Wave 2** *(blocked on Wave 1)*
 
@@ -204,7 +204,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6. Phase 3's colu
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation — a hostable core | 6/6 | Complete    | 2026-09-08 |
-| 2. Write verbs on a selection | 0/8 | Planned     | - |
+| 2. Write verbs on a selection | 1/8 | In Progress|  |
 | 3. In-plugin setup and onboarding | 0/TBD | Not started | - |
 | 4. The dashboard | 0/TBD | Not started | - |
 | 5. Review in the library view and undo | 0/TBD | Not started | - |

@@ -5,16 +5,16 @@ milestone_name: (the terminal goes away)
 current_phase: 02
 current_phase_name: Write verbs on a selection
 status: executing
-stopped_at: Phase 2 context gathered
-last_updated: "2026-09-08T23:42:11.749Z"
-last_activity: 2026-09-08
-last_activity_desc: Phase 01 complete, transitioned to Phase 2
-state_head: 27ba8997870c3178e341dc7c0a5245be83245fe6
+stopped_at: Completed 02-01-PLAN.md
+last_updated: "2026-09-09T08:17:04.707Z"
+last_activity: 2026-09-09
+last_activity_desc: Phase 02 execution started
+state_head: 0180e7cdf898cb2e0b5ae37852209c3fadf68c82
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 14
-  completed_plans: 6
+  completed_plans: 7
   percent: 17
 ---
 
@@ -25,16 +25,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-28)
 
 **Core value:** The full maintenance loop (wrangle → staleness → synopsis → classify → review → promote → backfill) runs from a Calibre toolbar button, on the live library, with every guard, backup and undo the CLI has — and never freezes or corrupts Calibre.
-**Current focus:** Phase 01 — Foundation — a hostable core
+**Current focus:** Phase 02 — Write verbs on a selection
 
 ## Current Position
 
-Phase: 02 (Write verbs on a selection) — READY TO EXECUTE
-Plan: Not started
+Phase: 02 (Write verbs on a selection) — EXECUTING
+Plan: 2 of 8
 Status: Ready to execute
-Last activity: 2026-09-08 — Phase 01 complete, transitioned to Phase 2
+Last activity: 2026-09-09 — Phase 02 execution started
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [██░░░░░░░░] 17%
 
 ## Performance Metrics
 
@@ -66,6 +66,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P04 | 50 min | 3 tasks | 4 files |
 | Phase 01-foundation-a-hostable-core P05 | 40 min | 2 tasks | 8 files |
 | Phase 01 P06 | 55 min | 3 tasks | 14 files |
+| Phase 02 P01 | 40min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -93,6 +94,8 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-06: an all-skipped run is a dedicated early-exit inside _write_run (header+footer, no snapshot) rather than routing an empty ops list through the normal apply path — Makes 'no snapshot, still a footer' an exact special case instead of a general property every caller has to reason about
 - [Phase 01]: 01-06: classify's expected comes from a fresh cur=current_tags(con) read at the head of apply_proposal, not the proposal's own state — The proposal schema has no before-state column; a proposal-time expected would permanently retire an edited book from the --unclassified backlog untagged, since its #wrangled stamp carries no expected
 - [Phase 01]: 01-06: synopsis.Plan keeps raw_blurbs (unstripped) alongside blurbs (stripped); the comments op's expected is built from raw_blurbs — Comparing the stripped text against the stored HTML before-value would make every op read as a conflict and silently disable the whole pass
+- [Phase 02]: 02-01: staleness.write gains write= (default run_writer); the plugin's jobs._Writer passes a write_ops-bound callable — the pattern plan 02-02 replicates across wrangle/classify/promote/synopsis/setup.
+- [Phase 02]: 02-01: plugin/action.py reduced to zero core imports (D-12/D-14) — every job body lives in plugin/jobs.py, importing scourgify only inside functions; tests/test_plugin_source.py's MODULES/QT_MODULES are now glob-derived.
 
 ### Pending Todos
 
@@ -105,6 +108,7 @@ None yet.
 - [Phase 5]: The exact read-back call for current marked ids (`db.data.marked_ids`?) is unverified against a live Calibre 9.11 — a five-minute spike before the snapshot/restore helper's shape is finalized.
 - [Phase 3]: `CreateCustomColumn.must_restart()`'s exact call sequence needs a direct Calibre source re-read at implementation time.
 - Branch protection on main is NOT updated. Lane is green (run 34150694155) but adding test-windows/smoke-calibre-windows/smoke-calibre-linux as required status checks needs a separate developer confirmation, per standing instruction. Command recorded in 01-02-SUMMARY.md.
+- 02-01: the tracer task's real-Calibre human-check (Re-derive status GUI walkthrough) was not run — no Calibre available in this environment; recorded in .planning/WINDOWS.md (unrun-verify, phase 02).
 
 ## Deferred Items
 
@@ -116,6 +120,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-09-08T19:24:38.688Z
-Stopped at: Phase 2 context gathered
-Resume file: .planning/phases/02-write-verbs-on-a-selection/02-CONTEXT.md
+Last session: 2026-09-09T08:17:04.664Z
+Stopped at: Completed 02-01-PLAN.md
+Resume file: None
