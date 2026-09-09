@@ -405,6 +405,89 @@ def test_a_missing_wrangled_column_refuses_execute_too():
     assert "#wrangled" in result["msg"]
 
 
+# ---------------- the generic decide= helpers (D-02, plan 02-05) ----------------
+def test_record_decide_grows_one_call_per_invocation_in_order():
+    decide, calls = jobs._record_decide()
+    acc1, rej1, action1 = decide("book B", [("a", {"x": 1}), ("b", {"x": 2})], subtitle="1/2")
+    acc2, rej2, action2 = decide("book A", [("c", {"x": 3})])
+    assert acc1 == [] and rej1 == [0, 1] and action1 == "skip"
+    assert acc2 == [] and rej2 == [0] and action2 == "skip"
+    assert [c["title"] for c in calls] == ["book B", "book A"]
+    assert calls[0]["items"] == [("a", {"x": 1}), ("b", {"x": 2})]
+    assert calls[0]["subtitle"] == "1/2"
+
+
+def test_replay_decide_pops_ticks_in_call_order_and_falls_back_to_accept_everything():
+    decide = jobs._replay_decide([([], [0, 1], "skip"), ([0], [1], "apply")])
+    assert decide("t1", [1, 2]) == ([], [0, 1], "skip")
+    assert decide("t2", [1, 2]) == ([0], [1], "apply")
+    # exhausted -> accept-everything fallback, whatever the items list looks like
+    assert decide("t3", ["x", "y", "z"]) == ([0, 1, 2], [], "apply")
+
+
+def test_replay_decide_of_an_empty_ticks_list_always_accepts_everything():
+    decide = jobs._replay_decide([])
+    acc, rej, action = decide("title", [("a", {}), ("b", {})])
+    assert acc == [0, 1] and rej == [] and action == "apply"
+
+
+# ---------------- wrangle (plan 02-05) ----------------
+def _wrangle_lib(books):
+    """A throwaway library for wrangle tests. `books`: [{"id":, "tags":[...], "fandoms": [...]}]."""
+    d = tempfile.mkdtemp()
+    fandoms = {b["id"]: b["fandoms"] for b in books if b.get("fandoms")}
+    custom = [("fandoms", fandoms)] if fandoms else []
+    con = fixture_db.build(os.path.join(d, "metadata.db"),
+                           [{"id": b["id"], "title": b.get("title", "book %d" % b["id"]),
+                             "tags": b.get("tags", [])} for b in books],
+                           custom=custom)
+    con.commit(); con.close()
+    return d
+
+
+def _write_override(home, name, lines):
+    path = os.path.join(home, "overrides", name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def test_job_plan_wrangle_returns_the_d04_empty_result_for_an_already_normalized_library():
+    lib = _wrangle_lib([{"id": 1, "title": "Plain Book"}])
+    with _pointed_at(lib):
+        r = jobs.job_plan_wrangle(lib, None, [1])
+    assert r["refused"] is False and r["empty"] is True and r["items"] == []
+
+
+def test_job_plan_wrangle_produces_per_book_reviewable_items_in_step_walks_own_order():
+    """Two books, each with the SAME single junk-drop edit — MASS_MIN is 3, so at 2 books this
+    stays a per-book 'unique' edit and is reviewable, in `_step_walk`'s own newest-id-first order."""
+    lib = _wrangle_lib([{"id": 1, "tags": ["ZWrangleJunk"]}, {"id": 2, "tags": ["ZWrangleJunk"]}])
+    with _pointed_at(lib) as home:
+        _write_override(home, "junk.txt", ["zwranglejunk"])
+        r = jobs.job_plan_wrangle(lib, None, [1, 2])
+    assert r["refused"] is False and r["empty"] is False
+    assert r["consequence"] == "Normalize fields on 2 books"
+    assert "SAFETY" in r["safety"]
+    assert len(r["items"]) == 2
+    books = [payload["book"] for _label, payload in r["items"]]
+    assert books == [2, 1]                                  # newest id first
+    for _label, payload in r["items"]:
+        assert payload["kind"] == "drop" and payload["before"] == "ZWrangleJunk"
+        assert payload["field"] == "tags"
+    assert r["carry"] == {"ids": [1, 2], "n_books": 2}
+
+
+def test_job_plan_wrangle_a_fandom_emptying_change_set_is_refused_with_no_dialog():
+    lib = _wrangle_lib([{"id": 1, "fandoms": ["ZGhostFandom"]}])
+    with _pointed_at(lib) as home:
+        _write_override(home, "fandoms.csv", ["alias,canonical", "ZGhostFandom,"])
+        r = jobs.job_plan_wrangle(lib, None, [1])
+    assert r["refused"] is True
+    assert "last fandom" in r["msg"]
+    assert r.get("items", []) == []
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

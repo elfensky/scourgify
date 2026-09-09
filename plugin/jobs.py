@@ -372,24 +372,77 @@ def execute_result(verb, rows, write_result, engine_failures=(), touched=()):
     }
 
 
+# ---------------------------------------------------------------------- the two generic decide=
+# helpers (D-02): every review-checklist site in the core takes a `decide(title, items,
+# subtitle='') -> (accepted_idx, rejected_idx, action)` callback (D-11). A PLAN job needs to
+# HARVEST what a review would show without deciding anything (the Plan/rows object it walks is
+# discarded at the end of the job anyway); the matching EXECUTE job needs to REPLAY a reviewer's
+# actual ticks against a freshly (re)computed object. These two functions are the ONLY places the
+# plugin ever fabricates a decide= answer — neither one narrows a change-set itself, the tool
+# module's own `_step_walk`/`step` does that, which is what keeps the reject log and the
+# overrides flow working for the plugin exactly as they do for the terminal's `--step`.
+#
+# Some sites (`staleness.step`, and every other `decide=` producer outside `_step_walk`) call
+# decide() exactly ONCE with every candidate item; `wrangle.Plan.step` (via `_step_walk`) calls it
+# ONCE PER BOOK. Both helpers are written sequence-aware so they work for either shape: `calls`
+# grows one entry per invocation, and `_replay_decide` pops one tuple per invocation, in the same
+# order.
+def _record_decide():
+    """The PLAN-side helper: returns `(callback, calls)`. `calls` grows one
+    `{'title':, 'subtitle':, 'items':}` entry per call — the PLAN job flattens it into the
+    result's `items`, in call order, so a later replay lines up call-for-call. The callback itself
+    always answers `([], list(range(len(items))), 'skip')` — nothing accepted, so whatever object
+    is being walked is left untouched (or, for `_step_walk`, deferred) — it is being read for its
+    items only, and the object it mutates is thrown away at the end of the PLAN job regardless."""
+    calls = []
+
+    def decide(title, items, subtitle=''):
+        items = list(items)
+        calls.append({'title': title, 'subtitle': subtitle, 'items': items})
+        return [], list(range(len(items))), 'skip'
+    return decide, calls
+
+
+def _replay_decide(ticks):
+    """The EXECUTE-side helper: returns a callback that pops the next `(accepted_idx,
+    rejected_idx, action)` triple off `ticks`, in call order, one per invocation. Once `ticks` is
+    exhausted it falls back to accept-everything (`(range(len(items)), [], 'apply')`) — the
+    one-click Run path passes `ticks=()` and therefore accepts every item unchanged, which is
+    D-02's 'all ticked on the one-click path'."""
+    ticks = list(ticks)
+    i = 0
+
+    def decide(title, items, subtitle=''):
+        nonlocal i
+        if i < len(ticks):
+            acc, rej, action = ticks[i]
+            i += 1
+            return list(acc), list(rej), action
+        return list(range(len(items))), [], 'apply'
+    return decide
+
+
 # ---------------------------------------------------------------------- staleness (the tracer verb)
 def job_plan_staleness(lib_path, lib_uuid, ids, now_uuid=None, abort=None, log=None, notifications=None):
     """PLAN: which of the selected books' #status would change, per `staleness.compute()`?
 
     Empty selection (or a selection where nothing changes) is the D-04 empty result — no
-    library read beyond `_open`'s identity check (`compute()` is never called)."""
+    library read beyond `_open`'s identity check (`compute()` is never called).
+
+    Items are harvested by driving `staleness.step` itself with `_record_decide()`'s recorder
+    (D-02), rather than re-deriving the same `status_line`/payload shape here a second time —
+    `staleness.step` is called exactly ONCE (one entry in `calls`) since it reviews the whole
+    change-set as a single list, not per book."""
     def body(con, ids, ctx):
         from scourgify import staleness
-        from scourgify.common import titles as book_titles
         if not ids:
             return plan_result('staleness', [], [], '', {})
         status_label, rows = staleness.compute(books=ids)
         if not rows:
             return plan_result('staleness', [], [], '', {})
-        titles = book_titles(con, [r[0] for r in rows])
-        items = [(staleness.status_line(r, str(titles.get(r[0], ''))),
-                 {'book': r[0], 'title': titles.get(r[0], ''), 'field': status_label,
-                  'before': r[1], 'after': r[2]}) for r in rows]
+        decide, calls = _record_decide()
+        staleness.step(status_label, rows, decide=decide)
+        items = calls[0]['items'] if calls else []
         trans = collections.Counter('%s -> %s' % (o, n) for _, o, n, _ in rows)
         summary = ['%s: %d' % (k, c) for k, c in trans.most_common()]
         consequence = 'Re-derive status on %d book%s' % (len(rows), '' if len(rows) == 1 else 's')
@@ -400,21 +453,32 @@ def job_plan_staleness(lib_path, lib_uuid, ids, now_uuid=None, abort=None, log=N
                      abort=abort, log=log, notifications=notifications)
 
 
-def job_execute_staleness(lib_path, lib_uuid, ids, carry, api, now_uuid=None, abort=None, log=None,
-                          notifications=None):
-    """EXECUTE: write exactly the change-set the PLAN job carried forward — no recompute, so the
-    apply-time conflict filter (not a second `staleness.compute()`) is what decides whether a
-    book's since-changed status is skipped."""
+def job_execute_staleness(lib_path, lib_uuid, ids, carry, api, now_uuid=None, ticks=(), abort=None,
+                          log=None, notifications=None):
+    """EXECUTE: replay the reviewer's `ticks` through `staleness.step` (D-02) to narrow the PLAN
+    job's carried-forward rows, then write — no re-`compute()`, so the apply-time conflict filter
+    (not a second `staleness.compute()`) is still what decides whether a book's since-changed
+    status is skipped. `ticks=()` (the default, and every existing call site before this plan)
+    replays through `_replay_decide`'s own accept-everything fallback, so omitting `ticks`
+    reproduces this job's exact pre-D-02 behaviour — writing every row the PLAN job carried.
+
+    `ticks` deliberately stays AFTER `now_uuid` (not between `carry` and `api`, unlike wrangle's
+    own EXECUTE job below) so `plugin/action.py`'s existing generic `_EXECUTE_JOBS` dispatch —
+    which builds a fixed `(lib, uuid, ids, carry, api, now_uuid)` positional tuple for every verb
+    in that table — keeps working unchanged; `abort`/`log`/`notifications` are always injected by
+    Calibre's `ThreadedJob` as keywords, never positionally, so their position here doesn't
+    matter."""
     def body(con, ids, ctx):
         from scourgify import staleness
         writer = _Writer(ctx['api'])
-        status_label, rows = carry['status_label'], carry['rows']
+        status_label, carried_rows = carry['status_label'], carry['rows']
         titles = {}
         try:
             from scourgify.common import titles as book_titles
-            titles = book_titles(con, [r[0] for r in rows])
+            titles = book_titles(con, [r[0] for r in carried_rows])
         except Exception:
             pass
+        rows = staleness.step(status_label, carried_rows, decide=_replay_decide(ticks))
         staleness.write(status_label, rows, write=writer)
         wr = writer.result
         skipped_pairs = {(b, f) for b, f in wr.skipped}
@@ -429,6 +493,60 @@ def job_execute_staleness(lib_path, lib_uuid, ids, carry, api, now_uuid=None, ab
         return execute_result('staleness', out_rows, wr, touched=touched)
 
     return _ceremony('staleness', body, lib_path, lib_uuid, ids, now_uuid, api=api,
+                     abort=abort, log=log, notifications=notifications)
+
+
+# ---------------------------------------------------------------------- wrangle (the verb this
+# phase is named for — the deterministic pass with real data-loss guards, D-01..D-03)
+def job_plan_wrangle(lib_path, lib_uuid, ids, now_uuid=None, abort=None, log=None, notifications=None):
+    """PLAN: `wrangle.plan(cfg, m).restrict(ids)` — see `wrangle.Plan.restrict`'s own docstring
+    for why the COMPUTE stays library-wide (tagcanon majority spelling, known_chars) while only
+    the WRITE set narrows to the selection.
+
+    Order matters, and matches the plan's own contract:
+      1. Read the SAFETY numbers (and `n_books`) off the plan BEFORE any walk.
+      2. `p.guard(force=False)` BEFORE opening a dialog for a run that cannot proceed — a
+         data-loss-shaped change-set surfaces as a refused result (via `_ceremony`) carrying the
+         guard's own sentence, never a job failure.
+      3. Harvest the per-book review items with `p.step(decide=_record_decide()[0])`. The
+         recorder always answers 'skip' (see its own docstring), which as a SIDE EFFECT empties
+         `p.changes` for every book it walks — harmless here: the Plan itself is discarded at the
+         end of this job (never crosses the Dispatcher boundary), and every number this result
+         reports was already read in step 1, before step() ran.
+      4. When `p.changes` was empty to begin with, return the D-04 empty result — the same reason
+         a second identical run opens no dialog: the first run's write leaves nothing to change."""
+    def body(con, ids, ctx):
+        from scourgify import wrangle
+        from scourgify.common import load_config
+        if not ids:
+            return plan_result('wrangle', [], [], '', {})
+        cfg = load_config()
+        m = wrangle.load_maps(cfg)
+        p = wrangle.plan(cfg, m).restrict(ids)
+        if not p.changes:
+            return plan_result('wrangle', [], [], '', {})
+
+        summary = ['%s: %d book(s)' % (lab, len(ch)) for lab, ch in sorted(p.changes.items())]
+        safety = ('SAFETY  losing last fandom: %d | character: %d | tag assignments: %d -> %d'
+                 % (p.lostF, p.lostC, p.tagsB, p.tagsA))
+        n_books = p.n_books
+
+        p.guard(force=False)          # a GuardrailError here -> _ceremony's refused result
+
+        decide, calls = _record_decide()
+        p.step(decide=decide)                          # harvest only — see docstring above
+        items = [item for call in calls for item in call['items']]
+
+        consequence = 'Normalize fields on %d book%s' % (n_books, '' if n_books == 1 else 's')
+        carry = {'ids': list(ids), 'n_books': n_books}
+        result = plan_result('wrangle', summary, items, consequence, carry, safety=safety)
+        result['empty'] = False       # n_books > 0 here — `plan_result`'s own `not items` test
+                                      # would be wrong for wrangle: a mass-only change-set (no
+                                      # per-book unique edits to review) has real work to write
+                                      # and an empty `items` list at the same time.
+        return result
+
+    return _ceremony('wrangle', body, lib_path, lib_uuid, ids, now_uuid,
                      abort=abort, log=log, notifications=notifications)
 
 
