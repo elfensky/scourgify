@@ -446,11 +446,12 @@ review-map CSVs (in `data/`). Curated cross-library knowledge (e.g. franchise un
 ## Branching & releases
 
 Git-flow-lite (mirrors the sibling `lintle` repo):
-- **`develop`** — the integration branch and your everyday working branch. All work (features, fixes, docs, vocab)
-  lands here via PR; CI (`ci.yml` — tests on Python 3.10 + 3.13) runs on every push/PR to `develop` or `main`.
-  **`develop` history stays LINEAR** — land feature PRs with `gh pr merge --rebase` (or `git merge --ff-only`),
-  never a merge commit: history should read as if the commits were made on `develop` directly. Merge commits
-  are reserved for Release PRs into `main` (below), where the 2nd-parent arc is the point.
+- **`develop`** — the integration branch. All work (features, fixes, docs, vocab) is made in a worktree (see
+  **Worktrees — one lane, always** below) and lands here via PR; CI (`ci.yml` — tests on Python 3.10 + 3.13) runs
+  on every push/PR to `develop` or `main`. **`develop` history stays LINEAR** — land PRs with
+  `gh pr merge --rebase`, never a merge commit (the `develop` ruleset allows rebase only): history should read as
+  if the commits were made on `develop` directly. Merge commits are reserved for Release PRs into `main` (below),
+  where the 2nd-parent arc is the point.
 - **`main`** — release-only and **branch-protected**: PRs required (0 approvals, so you self-merge), both CI
   checks must pass, no force-push/deletion, **enforced for admins** — i.e. *no direct pushes, even for the owner*.
   Its **first-parent history is exactly one `Release vX.Y.Z` commit per release**; each is a `--no-ff` merge of
@@ -461,7 +462,8 @@ Git-flow-lite (mirrors the sibling `lintle` repo):
   new PR's base to `main` — **open feature PRs against `develop`**; only release PRs target `main`.
 
 **Cut a release** (all from `develop`; `main` is only ever reached through a PR merge):
-1. Bump `__version__` in `src/scourgify/__init__.py` — versions are immutable on PyPI, always bump. Commit + push `develop`.
+1. Bump `version` in `pyproject.toml` — versions are immutable on PyPI, always bump. Land the bump on `develop` by
+   PR from a worktree, like any other change.
 2. `gh pr create --base main --head develop --title "Release vX.Y.Z"`; let CI pass, then
    `gh pr merge --merge --subject "Release vX.Y.Z"` (a **merge commit** — not squash/rebase; the 2nd-parent arc is
    the point). The merge lands on `main` → `publish.yml` auto-publishes to **TestPyPI**.
@@ -472,7 +474,30 @@ Git-flow-lite (mirrors the sibling `lintle` repo):
 
 `main` was migrated to this shape once via a `git commit-tree` snapshot (tree = the released 1.0.0; parents =
 [repo root, develop tip]); `develop` kept the full granular history. To temporarily bypass protection for an
-emergency fix, edit the rule at *Settings → Branches* (or `gh api -X DELETE …/branches/main/protection`).
+emergency fix, edit both the classic rule at *Settings → Branches* (or `gh api -X DELETE …/branches/main/protection`)
+and the `main (release)` ruleset at *Settings → Rules* — neither has a bypass actor.
+
+## Worktrees — one lane, always
+
+Every session — feature, chore or one-line fix — works in its own worktree under `.worktrees/`
+(git-ignored), never in the main checkout. The main checkout stays on `develop` and moves only by
+`git pull --ff-only`: a branch parked there is how parallel sessions commit onto each other's work.
+Every change reaches `develop` by a PR. The why: vault `knowledge/developer/stack/git-and-prs.md`.
+
+```bash
+git status -sb && git pull --ff-only             # main checkout: sync only, never commit here
+git worktree prune && git fetch -q --prune origin
+git worktree add --lock --reason "$(hostname -s)" .worktrees/<slug> -b <type>/<slug> origin/develop
+cd .worktrees/<slug>                             # work and commit here
+git push -u origin HEAD && gh pr create --base develop --fill
+gh pr checks --watch --required && gh pr merge --rebase --delete-branch
+cd - && git pull --ff-only
+git worktree unlock .worktrees/<slug> && git worktree remove .worktrees/<slug> && git branch -D <type>/<slug>
+```
+
+A new worktree has no dependencies installed: run `uv sync` in it first. A locked worktree
+you did not create belongs to another session — leave it. `.claude/worktrees/` is Claude Code's own
+subagent isolation and is managed by the harness.
 
 ## Life cockpit
 
