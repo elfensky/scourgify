@@ -191,6 +191,43 @@ def test_run_accepts_injected_ask():
         assert row["book_id"] == 1 and row["proposed_new"] == ["Injected Tag"]
 
 
+def test_run_reports_progress_per_book_and_stops_when_asked():
+    """Plan.run(on_book=, stop=) — the plugin's progress/abort seam. `stop` is checked at the head
+    of each loop iteration; a truthy answer breaks the loop like Ctrl+C does: fewer books than
+    len(todo) are processed, self.cancelled is True, and the partial proposal is still written."""
+    books = [{"id": i, "added": f"2026-01-0{i} 10:00:00", "desc": DESC} for i in range(1, 6)]
+    with harness(books):
+        p = classify.plan(classify.default_opts())
+        assert len(p.todo) == 5
+        calls = []
+        seen = {"n": 0}
+
+        def stop():
+            seen["n"] += 1
+            return seen["n"] > 2                # flips true after two books have been processed
+
+        p.run(ask=lambda prompt: ('{"tags": [], "new": []}', ""),
+              on_book=lambda done, total, tagged, failed: calls.append((done, total, tagged, failed)),
+              stop=stop)
+        assert p.cancelled is True
+        assert 0 < len(calls) < len(p.todo)                     # on_book called per completed book, not all 5
+        assert [c[0] for c in calls] == list(range(1, len(calls) + 1))   # done increases 1, 2, ...
+        assert all(c[1] == len(p.todo) for c in calls)          # total is the fixed todo size
+        rows = {r["book_id"] for r in artifacts.read_proposal()}
+        assert rows and len(rows) == len(calls), "the partial proposal must have been written"
+
+
+def test_run_with_neither_on_book_nor_stop_is_unchanged():
+    """The CLI path (no on_book=, no stop=) stays byte-identical: every book runs, cancelled
+    stays False."""
+    books = [{"id": 1, "added": "2026-01-01 10:00:00", "desc": DESC}]
+    with harness(books):
+        p = classify.plan(classify.default_opts())
+        p.run(ask=lambda prompt: ('{"tags": [], "new": []}', ""))
+        assert p.cancelled is False
+        assert {r["book_id"] for r in artifacts.read_proposal()} == {1}
+
+
 def test_apply_proposal_skips_rows_for_deleted_books():
     """A proposal row can outlive its book (deleted / re-imported with a new id since the run).
     Shipping the dead id to Calibre dies with a foreign-key violation mid-write — stale rows are

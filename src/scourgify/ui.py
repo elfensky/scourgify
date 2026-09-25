@@ -122,14 +122,28 @@ def checklist(title, items, subtitle=""):
     """Numbered per-item review, all items pre-ticked (accepted). Returns
     (accepted_idx, rejected_idx, action) where action ∈ {'apply','skip','quit'} and the
     two index lists partition range(len(items)). A pure widget — no logging, no writing;
-    callers interpret the action. `items` is a list of display strings."""
+    callers interpret the action.
+
+    `items` is EITHER a list of plain display strings (the original shape) OR a list of
+    `(label, payload)` pairs (D-03). This is the ONE place that shape is normalized: only the
+    label half is ever read here, so the rendering and the (accepted_idx, rejected_idx, action)
+    return contract are byte-identical whichever shape a producer emits — no other code in this
+    module branches on it, and a producer never needs to know how a front door renders. A front
+    door that wants the structured data (a Qt review table, say) reads `payload` itself straight
+    out of the SAME `items` list it passed in; this function never returns it.
+
+    `payload` (when present) is a plain dict, JSON-serializable: `book` (int), `title` (str),
+    `field` (str — the column label as written, e.g. '#status', 'tags', 'comments'), `before`,
+    `after`. Wrangle's items additionally carry `kind` and `class`, the same values its reject
+    log already carries."""
     if not items:
         return [], [], "apply"
-    ticked = [True] * len(items)
+    labels = [it[0] if isinstance(it, tuple) else it for it in items]
+    ticked = [True] * len(labels)
     while True:
         t = Table(box=box.SIMPLE, show_header=False, pad_edge=False)
         t.add_column(justify="right", style="dim"); t.add_column(); t.add_column()
-        for i, s in enumerate(items):
+        for i, s in enumerate(labels):
             on = ticked[i]
             t.add_row(str(i + 1), "[green]☑[/]" if on else "[dim]☐[/]", s if on else f"[dim]{s}[/]")
         if subtitle: say(f"[dim]{subtitle}[/]")
@@ -144,11 +158,11 @@ def checklist(title, items, subtitle=""):
         else:
             raw = Prompt.ask("choose", default="", show_default=False, console=console)
         raw = raw.strip().lower()
-        if raw in ("q", "quit"): return [], list(range(len(items))), "quit"
-        if raw in ("s", "skip"): return [], list(range(len(items))), "skip"
-        if raw in ("a", "all"): return list(range(len(items))), [], "apply"
+        if raw in ("q", "quit"): return [], list(range(len(labels))), "quit"
+        if raw in ("s", "skip"): return [], list(range(len(labels))), "skip"
+        if raw in ("a", "all"): return list(range(len(labels))), [], "apply"
         if raw == "":
-            return ([i for i in range(len(items)) if ticked[i]],
-                    [i for i in range(len(items)) if not ticked[i]], "apply")
+            return ([i for i in range(len(labels)) if ticked[i]],
+                    [i for i in range(len(labels)) if not ticked[i]], "apply")
         for tok in re.split(r"[ ,]+", raw):
-            if tok.isdigit() and 1 <= int(tok) <= len(items): ticked[int(tok) - 1] ^= True
+            if tok.isdigit() and 1 <= int(tok) <= len(labels): ticked[int(tok) - 1] ^= True

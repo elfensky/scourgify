@@ -96,7 +96,41 @@ Plans:
   4. After any write the user sees a diff-after notice — counts, skipped conflicts by book, failures grouped by `failure_class()` with a "retry on <engine>" verb where a refusal occurred — the touched rows refresh in the library view, and the per-library `edits.jsonl` holds a run header, one before/after line per `(book, field)` and a footer in the same record shape as a CLI run (engine + model filled in for classify).
   5. `tests/test_plugin_source.py` still proves the plugin never calls `run_writer`, never spawns a second writer process, and dispatches every job through the ONE `action._run`; a write verb greys out, naming the running job, while another write-run holds the library's lock.
 
-**Plans**: TBD
+**Plans**: 8/8 plans executed
+
+Plans:
+**Wave 1**
+
+- [x] 02-01-PLAN.md — Tracer: `Re-derive status` end-to-end (menu → PLAN job → picker → EXECUTE job → `write_ops` → result dialog → row refresh), the Qt-free `plugin/jobs.py` split and the lock-greying mirror
+
+**Wave 2** *(blocked on Wave 1)*
+
+- [x] 02-02-PLAN.md — The injected `write=` transport on the five remaining write producers, and the dual-transport shadow-replay invariant
+
+**Wave 3** *(blocked on Wave 2)*
+
+- [x] 02-03-PLAN.md — The classify verb: scope step, PLAN job resolving the todo once, engine picker whose buttons ARE the run, progress/abort, cancelled footer, honest sub-cent pricing
+
+**Wave 4** *(blocked on Wave 3)*
+
+- [x] 02-04-PLAN.md — `(label, payload)` review items at every decision seam, the two missing `decide=` seams, and the picker's Review 1-by-1 control
+
+**Wave 5** *(blocked on Wave 4)*
+
+- [x] 02-05-PLAN.md — The wrangle verb end-to-end, with its SAFETY refusal and the shared record/replay review
+
+**Wave 6** *(blocked on Wave 5)*
+
+- [x] 02-06-PLAN.md — The synopsis verb: the FanFicFare guard as an explicit choice, the engine picker, and the per-book review before the write
+
+**Wave 7** *(blocked on Wave 6)*
+
+- [x] 02-07-PLAN.md — Promote and backfill verbs, and the one `(text, err)` ask envelope that carries failure classes to the ledger
+
+**Wave 8** *(blocked on Wave 7)*
+
+- [x] 02-08-PLAN.md — The grouped diff-after, the retry verbs on both surfaces, and one driven round trip per verb in `plugin/selftest.py`
+
 **UI hint**: yes
 
 ### Phase 3: In-plugin setup and onboarding
@@ -170,7 +204,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6. Phase 3's colu
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation — a hostable core | 6/6 | Complete    | 2026-09-08 |
-| 2. Write verbs on a selection | 0/TBD | Not started | - |
+| 2. Write verbs on a selection | 8/8 | In Progress|  |
 | 3. In-plugin setup and onboarding | 0/TBD | Not started | - |
 | 4. The dashboard | 0/TBD | Not started | - |
 | 5. Review in the library view and undo | 0/TBD | Not started | - |

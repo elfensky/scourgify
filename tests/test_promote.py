@@ -412,6 +412,103 @@ def test_backfill_plan_returns_the_before_tag_set():
     assert before == {1: ["Existing"]}                 # the book's tag set BEFORE the backfill
 
 
+def test_decide_transport_failure_carries_the_failure_class_into_the_reason():
+    """#73: ask/verify_ask's real shape is (text, err) — ask_retry's own contract. A transport
+    failure's err half is prefixed onto the error verdict's reason with its normalized class, so
+    engines.failure_class can read it back out exactly like it does for a classify failure —
+    the recovery a promote refusal now earns matches what a classify refusal already had."""
+    from scourgify import engines
+    from scourgify.promote import decide
+    cand = {"tag": "Ghost Bond", "count": 2, "examples": ["a haunting"]}
+    d = decide(cand, lambda p: ("", "refusal: blocked by policy"), existing=["Fluff"])
+    assert d["verdict"] == "error"
+    assert engines.failure_class(d["reason"]) == engines.REFUSAL
+
+
+def test_decide_bare_string_ask_still_works_unchanged():
+    """A test-supplied ask returning a bare string (the pre-#73 fixture shape used throughout
+    this file) still works unchanged — decide() normalizes it to (text, '') at its one
+    normalization point, so a bare-string transport failure's reason carries no class prefix."""
+    from scourgify.promote import decide
+    cand = {"tag": "Amoral Deity", "count": 1, "examples": ["a cruel god"]}
+    d = decide(cand, lambda p: '{"verdict":"promote","reason":"novel","confidence":"high"}',
+              existing=["Morality"])
+    assert d["verdict"] == "promote" and d["contested"] is False
+    d2 = decide(cand, lambda p: "", existing=["Morality"])
+    assert d2["verdict"] == "error"
+    assert d2["reason"] == "no usable response (transport failure or unparseable)"
+
+
+def test_decide_skeptic_response_as_a_tuple_refutes_a_promote():
+    """The skeptic call site unpacks the (text, err) tuple too — not just the advocate's."""
+    from scourgify.promote import decide
+    cand = {"tag": "Amoral Deity", "count": 1, "examples": ["a cruel god"]}
+    near = ["Morality"]
+    calls = iter([
+        lambda p: ('{"verdict":"promote","reason":"seems new"}', ""),
+        lambda p: ('{"verdict":"reject","reason":"too plot-specific"}', ""),
+    ])
+    ask = lambda p: next(calls)(p)
+    d = decide(cand, ask, existing=near)
+    assert d["verdict"] == "reject" and d["contested"] is True
+
+
+def test_run_stop_seam_leaves_already_decided_candidates_in_the_review():
+    """promote.run(on_cand=, stop=) — the plugin's progress/abort seam. `stop` is checked at the
+    head of each loop iteration; a truthy answer stops submitting new work and the review file
+    still gets whatever candidates were already decided before the stop fired."""
+    import csv, tempfile
+    from scourgify import promote
+    d = tempfile.mkdtemp()
+    ranked = os.path.join(d, "r.csv"); prop = os.path.join(d, "p.csv")
+    with open(ranked, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f); w.writerow(["proposed_tag", "count"])
+        for i in range(5):
+            w.writerow([f"Candidate {i}", "1"])
+    with open(prop, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f); w.writerow(["book_id", "title", "added_tags", "proposed_new"])
+    review = os.path.join(d, "promote_review.csv")
+    with _fixture_library_env(d, "uuid-promote-stop"):
+        a = promote.build_parser().parse_args(["--yes"])
+        seen = {"n": 0}
+
+        def stop():
+            seen["n"] += 1
+            return seen["n"] > 2                # flips true after two candidates were processed
+
+        calls = []
+        promote.run(a, ranked_path=ranked, proposal_path=prop, review_path=review,
+                    existing=["Time Travel"],
+                    ask=lambda p: ('{"verdict":"promote","reason":"novel","confidence":"high"}', ""),
+                    on_cand=lambda done, total, promoted, aliased, rejected: calls.append((done, total)),
+                    stop=stop)
+        rows = list(csv.DictReader(open(review, encoding="utf-8")))
+        assert 0 < len(rows) < 5, "the stop must have cut the run short"
+        assert len(calls) == len(rows), "on_cand must fire once per candidate actually decided"
+        assert [c[0] for c in calls] == list(range(1, len(calls) + 1))
+        assert all(c[1] == 5 for c in calls)     # total is the fixed candidate-set size
+
+
+def test_run_with_neither_on_cand_nor_stop_is_unchanged():
+    """The CLI path (no on_cand=, no stop=) stays byte-identical: every candidate is decided."""
+    import csv, tempfile
+    from scourgify import promote
+    d = tempfile.mkdtemp()
+    ranked = os.path.join(d, "r.csv"); prop = os.path.join(d, "p.csv")
+    with open(ranked, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f); w.writerow(["proposed_tag", "count"]); w.writerow(["Solo Candidate", "1"])
+    with open(prop, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f); w.writerow(["book_id", "title", "added_tags", "proposed_new"])
+    review = os.path.join(d, "promote_review.csv")
+    with _fixture_library_env(d, "uuid-promote-unchanged"):
+        a = promote.build_parser().parse_args(["--yes"])
+        promote.run(a, ranked_path=ranked, proposal_path=prop, review_path=review,
+                    existing=["Time Travel"],
+                    ask=lambda p: ('{"verdict":"promote","reason":"novel","confidence":"high"}', ""))
+        rows = list(csv.DictReader(open(review, encoding="utf-8")))
+        assert len(rows) == 1 and rows[0]["tag"] == "Solo Candidate"
+
+
 def test_backfill_drop_redundant_is_case_and_punctuation_insensitive():
     """The strip wrangle performs is norm()-based, so the guard has to match on norm too or the
     loop comes straight back for 'Sci-Fi' vs 'sci fi'."""

@@ -105,6 +105,58 @@ def test_classify_reads_semicolon_alias_file():
             classify.clear_caches()
 
 
+def test_step_pick_decide_seam_pairs_and_unticked_item_writes_nothing():
+    """(label, payload) pairs (D-03), and an unticked line must not reach build_overrides' write —
+    step_pick narrows the accepted {(file, line)} set the caller (overrides_cmd / the wizard)
+    passes as `only=`, so an unticked line is simply absent from what gets written."""
+    auto = {"fandoms.csv": ["A,A"], "tropes.csv": ["B,B,tag", "C,C,tag"]}
+    recorded = {}
+    def stub(title, items, subtitle=""):
+        recorded["items"] = items
+        return [0, 2], [1], "apply"          # untick tropes.csv's "B,B,tag" (index 1)
+    result = overrides.step_pick(auto, decide=stub)
+    pairs = [(fn, l) for fn in sorted(auto) for l in sorted(set(auto[fn]))]
+    assert [label for label, _ in recorded["items"]] == [f"[dim]{fn}[/]  {l}" for fn, l in pairs]
+    assert all(payload["class"] == "auto" and payload["kind"] == "override"
+              for _, payload in recorded["items"])
+    assert result == {pairs[0], pairs[2]}
+    assert ("tropes.csv", "B,B,tag") not in result       # the unticked line is excluded
+
+    # end-to-end: build_overrides(only=result) writes exactly the accepted lines, never the rejected one
+    td = tempfile.mkdtemp()
+    old = os.environ.get("SCOURGIFY_HOME"); os.environ["SCOURGIFY_HOME"] = td
+    try:
+        # a rejects.csv that would synthesize the same three auto lines
+        rejects = os.path.join(td, "rejects.csv")
+        with open(rejects, "w", encoding="utf-8") as f:
+            f.write("stage,book,title,kind,column,before,after,class\n"
+                    "wrangle,1,T,rename,fandoms,A,A,auto\n"
+                    "wrangle,2,T,rename,tags,B,B,auto\n"
+                    "wrangle,3,T,rename,tags,C,C,auto\n")
+        import unittest.mock
+        with unittest.mock.patch("scourgify.common.rejects_path", return_value=rejects):
+            written = overrides.build_overrides(True, master=False, only=result)
+        assert "A,A" in written.get("fandoms.csv", [])
+        assert "C,C,tag" in written.get("tropes.csv", [])
+        assert "B,B,tag" not in written.get("tropes.csv", [])       # the unticked line never lands
+        content = open(os.path.join(td, "overrides", "tropes.csv"), encoding="utf-8").read()
+        assert "B,B,tag" not in content
+    finally:
+        os.environ.pop("SCOURGIFY_HOME", None) if old is None else os.environ.__setitem__("SCOURGIFY_HOME", old)
+
+
+def test_edit_payload_matches_reject_row_kind_and_class():
+    """The payload's kind/class must be the SAME values `_reject_row` would log for the identical
+    edit — both now derive from `_edit_payload`'s one `synth_reject()` call, so they can't drift."""
+    lab2key = {"fandoms": "fandoms"}
+    payload = overrides._edit_payload(lab2key, 1, "Title", "rename", "fandoms", "OldF", "NewF")
+    row = overrides._reject_row(lab2key, 1, "Title", "rename", "fandoms", "OldF", "NewF")
+    assert payload["kind"] == row["kind"] == "rename"
+    assert payload["class"] == row["class"]
+    assert payload["field"] == row["column"]
+    assert payload["before"] == row["before"] and payload["after"] == row["after"]
+
+
 def test_merge_vocab_minus_semantics():
     """The overrides vocab format: a plain line appends (case-insensitive dedup), '-term' removes
     (later lines win), comments/blanks ignored. Owned next to the writer that appends to the file."""

@@ -18,8 +18,15 @@ import os
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLUGIN = os.path.join(ROOT, "plugin")
-MODULES = ["__init__.py", "action.py", "config.py", "selftest.py"]
-QT_MODULES = ["action.py", "config.py"]        # the ones a user's click reaches
+# Glob-derived (D-14/#72): a new plugin module is covered by every assertion below by EXISTING,
+# not by someone remembering to add it to a hand-kept list.
+MODULES = sorted(f for f in os.listdir(PLUGIN) if f.endswith(".py"))
+# Every module but __init__.py — the one module whose module-level package import (`import
+# scourgify`, inside `with self:`) is what puts the bundled core on sys.path in the first place,
+# so it is exempt from "no module-level core import" by construction, not oversight. `jobs.py` IS
+# in QT_MODULES despite importing no Qt of its own: action.py imports it at MODULE level, so a
+# module-level core import inside jobs.py would still run on the GUI thread at plugin load.
+QT_MODULES = [m for m in MODULES if m != "__init__.py"]
 
 BANNED = ["run_writer(", "subprocess", "multiprocessing", "ThreadPoolExecutor", "os.system"]
 
@@ -94,8 +101,14 @@ def test_no_core_import_can_run_on_the_gui_thread():
     # action.py is stricter: nothing there needs the core except a job, so an import anywhere else
     # is a library read one refactor away from the GUI thread. config.py legitimately reads
     # TRAITS/PRICING to build its rows, which is a dict lookup, not a library read.
+    #
+    # D-14: the private-helper exemption (`func.startswith("_")`) is gone. Before the D-12 split,
+    # only `_open()` used it; after the split every job body (and its helpers) lives in jobs.py,
+    # so action.py should hold ZERO core imports at all. If something in action.py ever needs the
+    # core again, that is the signal it belongs in jobs.py, not a reason to bring the exemption
+    # back.
     for module, func in _core_imports(_tree("action.py")):
-        assert func.startswith("job_") or func.startswith("_"), \
+        assert func is not None and func.startswith("job_"), \
             "%s imported in %s(): core imports belong in job_* functions" % (module, func)
 
     top = [m for m, f in _core_imports(_tree("__init__.py")) if f is None]
@@ -142,6 +155,21 @@ def test_job_functions_accept_abort_log_and_notifications():
             assert need in names, "%s() must accept %s" % (fn.name, need)
 
 
+def test_no_job_name_is_created_by_assignment():
+    """A `job_*` name created by a decorator or an alias (`job_x = something`) would not be an
+    `ast.FunctionDef`, so `test_job_functions_accept_abort_log_and_notifications` would silently
+    skip it — this closes that hole before the later verb plans add eight more job functions."""
+    for name in MODULES:
+        for node in ast.walk(_tree(name)):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for t in targets:
+                assert not (isinstance(t, ast.Name) and t.id.startswith("job_")), \
+                    "%s: %r is a job_* NAME created by assignment, not a function — the " \
+                    "abort/log/notifications check would silently miss it" % (name, t.id)
+
+
 def test_only_one_module_dispatches_jobs():
     """There is exactly ONE ThreadedJob call site, in action.py's `_run`, and every other module
     goes through it. That is what makes "every callback is Dispatcher-wrapped" a property of one
@@ -152,6 +180,29 @@ def test_only_one_module_dispatches_jobs():
             continue
         assert "ThreadedJob" not in _code(name), \
             "%s must dispatch through action._run, not build its own ThreadedJob" % name
+
+
+def test_every_write_verb_dispatches_a_plan_and_an_execute_job():
+    """Catches a verb wired to a dialog but never to a job (plan 02-08's own phase sweep): every
+    write verb this phase added must have a matching `job_plan_*`/`job_execute_*` pair defined in
+    `jobs.py` (or, for retry, the single `job_retry_*`) AND be referenced from `action.py` — a
+    dispatch site that got the dialog wired but forgot the job import."""
+    verbs = {
+        "staleness": ("job_plan_staleness", "job_execute_staleness"),
+        "wrangle": ("job_plan_wrangle", "job_execute_wrangle"),
+        "classify": ("job_plan_classify", "job_execute_classify"),
+        "synopsis": ("job_plan_synopsis", "job_execute_synopsis"),
+        "promote": ("job_plan_promote", "job_execute_promote"),
+        "backfill": ("job_plan_backfill", "job_execute_backfill"),
+        "retry": ("job_retry_classify",),
+    }
+    jobs_src = _src("jobs.py")
+    action_src = _src("action.py")
+    for verb, names in verbs.items():
+        for name in names:
+            assert "def %s(" % name in jobs_src, "%s: no job function for the %s verb" % (name, verb)
+            assert ("jobs.%s" % name) in action_src, \
+                "%s: never referenced from action.py — a verb wired to a dialog but not a job" % name
 
 
 def test_the_settings_dialog_hangs_off_the_plugin_base_and_imports_qt_lazily():
