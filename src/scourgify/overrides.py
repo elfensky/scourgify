@@ -149,8 +149,10 @@ def synth_reject(key: str, kind: str, before: str, after: str, dest: str | None 
     return "manual", [], reason
 
 
-def _reject_row(lab2key: dict, b: int, title: str, kind: str, where: str, before: str, after: str) -> dict:
-    """One rejects.csv row for a wrangle reject (class computed by the shared synth_reject)."""
+def _edit_payload(lab2key: dict, b: int, title: str, kind: str, where: str, before: str, after: str) -> dict:
+    """The payload half of a wrangle edit review item (D-03): `field`/`class` computed from the
+    SAME `synth_reject()` call `_reject_row` uses, so the review item and the eventual reject row
+    can never disagree about what column or class a rejected edit carries."""
     if "→" in where:
         src, dst = [x.strip() for x in where.split("→")]
         key, dest = lab2key.get(src, src), lab2key.get(dst, dst)
@@ -158,8 +160,16 @@ def _reject_row(lab2key: dict, b: int, title: str, kind: str, where: str, before
     else:
         key = lab2key.get(where, where); dest = None; col = key
     cls, _, _ = synth_reject(key, kind, before, after, dest)
-    return {"stage": "wrangle", "book": b, "title": title, "kind": kind,
-            "column": col, "before": before, "after": after, "class": cls}
+    return {"book": b, "title": title, "field": col, "before": before, "after": after,
+            "kind": kind, "class": cls}
+
+
+def _reject_row(lab2key: dict, b: int, title: str, kind: str, where: str, before: str, after: str) -> dict:
+    """One rejects.csv row for a wrangle reject (class computed by the shared synth_reject, via
+    `_edit_payload`)."""
+    p = _edit_payload(lab2key, b, title, kind, where, before, after)
+    return {"stage": "wrangle", "book": p["book"], "title": p["title"], "kind": p["kind"],
+            "column": p["field"], "before": p["before"], "after": p["after"], "class": p["class"]}
 
 
 def _step_walk(m: dict, beh: dict, cols: dict, perbook: dict, changes: dict,
@@ -169,7 +179,9 @@ def _step_walk(m: dict, beh: dict, cols: dict, perbook: dict, changes: dict,
     returns the rejects to log. rich-only — the caller guards with ui.interactive().
 
     `decide(title, items, subtitle=) -> (accepted_idx, rejected_idx, action)` defaults to
-    ui.checklist (D-11) — the lazy import of ui moves BEHIND that default."""
+    ui.checklist (D-11) — the lazy import of ui moves BEHIND that default. `items` are
+    `(label, payload)` pairs (D-03): `payload`'s `kind`/`class` are the SAME values the eventual
+    reject row carries (`_edit_payload`), so the two can't drift."""
     if decide is None:
         from scourgify import ui
         decide = ui.checklist
@@ -186,7 +198,7 @@ def _step_walk(m: dict, beh: dict, cols: dict, perbook: dict, changes: dict,
     for pos, b in enumerate(ids):
         edits = unique[b]
         title = str(titles.get(b, ""))
-        items = [_edit_label(*e) for e in edits]
+        items = [(_edit_label(*e), _edit_payload(lab2key, b, title, *e)) for e in edits]
         acc, rej, action = decide(f"[bold]#{b}[/]  {title[:64]}", items, subtitle=f"book {pos + 1}/{len(ids)}")
         if action == "quit":                                   # leave this + all remaining un-walked books untouched
             for bb in ids[pos:]:
@@ -233,15 +245,18 @@ def step_pick(auto: dict, decide=None) -> set | None:
     for "nothing decided". Shared by `overrides --apply --step` and the wizard stage.
 
     `decide(title, items) -> (accepted_idx, rejected_idx, action)` defaults to ui.checklist
-    (D-11) — the lazy import of ui moves BEHIND that default."""
+    (D-11) — the lazy import of ui moves BEHIND that default. `items` are `(label, payload)`
+    pairs (D-03) — every line here is auto-suppressible by construction (`build_overrides` only
+    ever hands `step_pick` the `cls == 'auto'` lines), so `payload['class']` is always `'auto'`."""
     if decide is None:
         from scourgify import ui
         if not ui.interactive():
             raise GuardrailError("--step needs an interactive terminal (omit it to write every line).")
         decide = ui.checklist
     pairs = [(fn, l) for fn in sorted(auto) for l in sorted(set(auto[fn]))]
-    acc, _, action = decide("override rules — untick one you don't want",
-                            [f"[dim]{fn}[/]  {l}" for fn, l in pairs])
+    items = [(f"[dim]{fn}[/]  {l}", {"book": None, "title": fn, "field": "override",
+              "before": "", "after": l, "kind": "override", "class": "auto"}) for fn, l in pairs]
+    acc, _, action = decide("override rules — untick one you don't want", items)
     if action in ("skip", "quit") or not acc: return None
     return {pairs[i] for i in acc}
 
@@ -272,7 +287,7 @@ def build_overrides(do_apply: bool = False, master: bool = False, only: set | No
         else:
             manual.append((r["kind"], col, r["before"], r["after"], reason))
     if only is not None:                       # 1-by-1 review kept only these lines
-        auto = {fn: [l for l in lines if (fn, l) in only] for fn in auto}
+        auto = {fn: [l for l in auto[fn] if (fn, l) in only] for fn in auto}
         auto = {fn: lines for fn, lines in auto.items() if lines}
     tgt = DEF if master else overrides_dir()
     where = "defaults/ (MASTER — checkout only; installed defaults are read-only)" if master else "overrides/"

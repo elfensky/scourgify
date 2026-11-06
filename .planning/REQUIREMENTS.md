@@ -33,25 +33,25 @@ authority for plugin behaviour; B-references below point at it.
 
 ### Write actions on a selection (spec phase 6, B1/B2/B4)
 
-- [ ] **WRITE-01**: User can run **wrangle** on the selected books: preview of per-book field
+- [x] **WRITE-01**: User can run **wrangle** on the selected books: preview of per-book field
       edits, then write through `common.write_ops` (snapshot + wipe guard + SAFETY guards apply)
-- [ ] **WRITE-02**: User can run **staleness** on the selected books, with the per-book
+- [x] **WRITE-02**: User can run **staleness** on the selected books, with the per-book
       `#status` change shown before writing
-- [ ] **WRITE-03**: User can run **classify** on a scope (selection / new-changed / never
+- [x] **WRITE-03**: User can run **classify** on a scope (selection / new-changed / never
       classified with a batch size / whole library) with an engine picker that shows, per
       usable engine, the per-run price over the exact resolved scope and its failure modes
       (from `engines.TRAITS`/`PRICING`, never hardcoded) — no confirmation dialog
-- [ ] **WRITE-04**: User can run **synopsis** on the selected books with any usable engine
+- [x] **WRITE-04**: User can run **synopsis** on the selected books with any usable engine
       (apple default where present), refusing to start unless FanFicFare's Comments "New Only"
       switch is on (or the degraded self-healing mode is chosen explicitly)
-- [ ] **WRITE-05**: User can run **promote** (adjudicate new-tag candidates) and **backfill**
+- [x] **WRITE-05**: User can run **promote** (adjudicate new-tag candidates) and **backfill**
       from the plugin, with the same verdict-per-candidate review the wizard offers
-- [ ] **WRITE-06**: Every write from the plugin appends per-op edit-log lines (run header,
+- [x] **WRITE-06**: Every write from the plugin appends per-op edit-log lines (run header,
       before/after per `(book, field)`, footer) — identical record shape to the CLI
-- [ ] **WRITE-07**: After a write, the user sees a diff-after notice: counts, skipped conflicts,
+- [x] **WRITE-07**: After a write, the user sees a diff-after notice: counts, skipped conflicts,
       failures classed by `failure_class()` with a "retry on <engine>" verb where a refusal
       occurred; the library view refreshes the touched rows
-- [ ] **WRITE-08**: The plugin never calls `run_writer`, never spawns a second writer process,
+- [x] **WRITE-08**: The plugin never calls `run_writer`, never spawns a second writer process,
       and dispatches every job through the ONE `action._run` — enforced by source-grep tests
 
 ### Setup & onboarding (B5/B6.5)
@@ -170,14 +170,14 @@ Which phases cover which requirements. Updated during roadmap creation.
 | FOUND-05 | Phase 1 | Complete |
 | FOUND-06 | Phase 1 | Complete |
 | FOUND-07 | Phase 1 | Complete |
-| WRITE-01 | Phase 2 | Pending |
-| WRITE-02 | Phase 2 | Pending |
-| WRITE-03 | Phase 2 | Pending |
-| WRITE-04 | Phase 2 | Pending |
-| WRITE-05 | Phase 2 | Pending |
-| WRITE-06 | Phase 2 | Pending |
-| WRITE-07 | Phase 2 | Pending |
-| WRITE-08 | Phase 2 | Pending |
+| WRITE-01 | Phase 2 | Complete |
+| WRITE-02 | Phase 2 | Complete |
+| WRITE-03 | Phase 2 | Complete |
+| WRITE-04 | Phase 2 | Complete |
+| WRITE-05 | Phase 2 | Complete |
+| WRITE-06 | Phase 2 | Complete |
+| WRITE-07 | Phase 2 | Complete |
+| WRITE-08 | Phase 2 | Complete |
 | SETUP-01 | Phase 3 | Pending |
 | SETUP-02 | Phase 3 | Pending |
 | SETUP-03 | Phase 3 | Pending |

@@ -1094,7 +1094,7 @@ def _release_write_lock(key: str, lock: threading.Lock) -> None:
 
 @contextlib.contextmanager
 def _write_run(ops, tool, scope, force, out, populated, read, is_multi, lib_uuid, lib_path,
-               engine=None, model=None):
+               engine=None, model=None, ok_outcome="ok"):
     """THE shared pre-write protocol both write_ops (in-process) and run_writer (CLI subprocess)
     call — issue #71's "closes the pre-write protocol half". In order, and no other (D-07/D-08,
     Codex agreed concern 4's pinned sequence, plan 01-06):
@@ -1135,7 +1135,14 @@ def _write_run(ops, tool, scope, force, out, populated, read, is_multi, lib_uuid
     yield — a set_library() from another thread mid-run must not be able to move the snapshot to
     a different library (REVIEW: Codex agreed concern 3). `lib_uuid`, when the caller supplied
     one (the in-process transport's live-handle identity), is used for the edit log header and
-    for the write-run lock's key (see _write_lock_key)."""
+    for the write-run lock's key (see _write_lock_key).
+
+    `ok_outcome` names the SUCCESS-path footer outcome ONLY — it defaults to the literal "ok" and
+    can never mask a failure: the `except`-free `finally` below still writes "failed" whenever the
+    caller's apply raises, and the all-conflicted branch above still writes "skipped" regardless
+    of this parameter. This is what lets a plugin classify run whose job was aborted mid-flight
+    close its footer as "cancelled" while its already-applied ops stay logged and undoable
+    (write_ops's own `outcome=` keyword threads here)."""
     from scourgify import editlog
     # Capture the run's library state ONCE, before anything else — see the docstring above.
     lib_path = lib_path or library()
@@ -1177,8 +1184,8 @@ def _write_run(ops, tool, scope, force, out, populated, read, is_multi, lib_uuid
                             engine=engine, model=model)
         outcome = "failed"
         try:
-            yield {"ops": filtered, "rec": rec, "backup": bak, "skipped": skipped, "outcome": "ok"}
-            outcome = "ok"
+            yield {"ops": filtered, "rec": rec, "backup": bak, "skipped": skipped, "outcome": ok_outcome}
+            outcome = ok_outcome
         finally:
             editlog.finish(rec, outcome, skipped=skipped)
     finally:
@@ -1186,7 +1193,7 @@ def _write_run(ops, tool, scope, force, out, populated, read, is_multi, lib_uuid
 
 
 def write_ops(api, ops: list[dict], force: bool = False, out=print,
-              tool: str = "plugin", scope=None, engine=None, model=None) -> WriteResult:
+              tool: str = "plugin", scope=None, engine=None, model=None, outcome=None) -> WriteResult:
     """Apply write-ops IN-PROCESS through Calibre's live handle — the plugin's write path.
 
     This is why a plugin never needs run_writer(), which shells out to a SECOND process writing a
@@ -1195,14 +1202,22 @@ def write_ops(api, ops: list[dict], force: bool = False, out=print,
 
     Same guards as the CLI, by construction — both funnel through the ONE shared pre-write
     protocol, _write_run(). calibre_open() is skipped BY DESIGN — in-process there is no second
-    writer to detect; we are the writer it exists to keep alone. Never calls run_writer()."""
+    writer to detect; we are the writer it exists to keep alone. Never calls run_writer().
+
+    `outcome=` names the footer outcome on the SUCCESS path only (default "ok") — threaded to
+    `_write_run`'s `ok_outcome`. This is what lets a cancelled classify run (D-08: the job was
+    aborted mid-flight but its partial proposal was still applied) close its footer as
+    "cancelled" instead of "ok", while its applied ops stay logged and undoable exactly like an
+    uninterrupted run's. `run_writer` (the CLI) grows no such parameter — the CLI has no abort."""
     from scourgify.ops import apply_ops
     lib_uuid = getattr(api, "library_id", None)
+    ok_outcome = outcome or "ok"
     with _write_run(ops, tool, scope, force, out,
                     populated=lambda f: populated_via_api(api, f),
                     read=lambda f, bs: values_via_api(api, f, bs),
                     is_multi=lambda f: field_is_multiple_via_api(api, f),
-                    lib_uuid=lib_uuid, lib_path=None, engine=engine, model=model) as state:
+                    lib_uuid=lib_uuid, lib_path=None, engine=engine, model=model,
+                    ok_outcome=ok_outcome) as state:
         if state is None:
             return WriteResult(run_id=None, backup=None, ops=0, books=0, skipped=[], outcome="noop")
         if state["outcome"] == "skipped":
@@ -1212,7 +1227,7 @@ def write_ops(api, ops: list[dict], force: bool = False, out=print,
         apply_ops(api, state["ops"], out=out)
     rec = state["rec"]
     return WriteResult(run_id=rec["run"], backup=state["backup"], ops=rec["ops"], books=rec["books"],
-                       skipped=state["skipped"], outcome="ok")
+                       skipped=state["skipped"], outcome=ok_outcome)
 
 
 def run_writer(ops: list[dict], force: bool = False, tool: str = "scourgify", scope=None) -> WriteResult:

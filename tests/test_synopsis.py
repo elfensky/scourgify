@@ -365,6 +365,48 @@ def test_named_books_are_re_settled_whatever_the_stamp_says():
         assert synopsis.plan(synopsis.default_opts(books="1")).todo == [1]
 
 
+def test_run_reports_progress_and_stops_between_books():
+    """Plan.run(on_book=, stop=) — the plugin's progress/abort seam, mirroring classify.Plan.run
+    (plan 02-03). `stop` is checked at the head of each loop iteration; a truthy answer breaks
+    the loop like Ctrl+C does: fewer books than len(todo) are processed, self.cancelled is True,
+    and the settled (kept) books are still written and the failure log is still rewritten."""
+    books3 = [dict(id=1, added="2026-01-01 10:00:00", title="Book1", desc=FAT),
+              dict(id=2, added="2026-01-02 10:00:00", title="Book2", desc=FAT),
+              dict(id=3, added="2026-01-03 10:00:00", title="Book3", desc=FAT)]
+    with lib(books3), recording_writer() as recorded:
+        p = synopsis.plan(synopsis.default_opts(apply=True))
+        assert len(p.todo) == 3
+        calls = []
+        seen = {"n": 0}
+
+        def stop():
+            seen["n"] += 1
+            return seen["n"] > 2                # flips true after two books have been processed
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            p.run(ask=FakeAsk(judge="YES"),
+                  on_book=lambda done, total, made, kept, failed: calls.append((done, total, made, kept, failed)),
+                  stop=stop)
+        from scourgify import artifacts
+        assert os.path.exists(artifacts.syn_fail()), "the failure log must still be rewritten"
+    assert p.cancelled is True
+    assert 0 < len(calls) < 3                                   # on_book called per processed book, not all 3
+    assert [c[0] for c in calls] == list(range(1, len(calls) + 1))   # done increases 1, 2, ...
+    assert all(c[1] == 3 for c in calls)                        # total is the fixed todo size
+    assert recorded, "the settled (kept) books must still have been written"
+
+
+def test_run_with_neither_on_book_nor_stop_is_unchanged():
+    """The CLI path (no on_book=, no stop=) stays byte-identical: every book runs, cancelled
+    stays False."""
+    with lib(), recording_writer() as recorded:
+        p = synopsis.plan(synopsis.default_opts(apply=True))
+        with contextlib.redirect_stdout(io.StringIO()):
+            p.run(ask=FakeAsk(judge="YES", back=BACK))
+    assert p.cancelled is False
+    assert recorded
+
+
 def test_the_guard_fires_before_any_work():
     off = {"std_cols_newonly": {"comments": False}, "custom_cols": {}}
     with lib(prefs=off):

@@ -288,19 +288,25 @@ def test_cost_estimate_is_identical_from_the_zip_and_from_the_package():
     routes through the SAME resolver either way."""
     from scourgify import classify
 
-    classify.clear_caches()
-    cost_package = classify.est_cost(10, "openai")
-    vocab_package = classify.load_vocab()
-    assert len(vocab_package) > 100
-
     with tempfile.TemporaryDirectory() as td:
         zp = _write_test_plugin_zip(os.path.join(td, "p.zip"),
                                     extra_defaults={"classify_vocab.txt": _real_defaults_file("classify_vocab.txt"),
                                                      "classify_vocab_ao3.txt": _real_defaults_file("classify_vocab_ao3.txt")})
-        with env(SCOURGIFY_HOME=os.path.join(td, "home")), _patched_archive(zp):
+        # BOTH branches run under the same empty SCOURGIFY_HOME. load_vocab() merges the user's
+        # overrides/classify_vocab.txt, so an un-isolated package branch reads the developer's real
+        # overrides while the zip branch reads an empty home — the two vocabs then differ for a
+        # reason that has nothing to do with the resolver this test exists to pin. CI has no
+        # overrides dir, so the leak only ever failed on a real user's machine.
+        with env(SCOURGIFY_HOME=os.path.join(td, "home")):
             classify.clear_caches()
-            cost_zip = classify.est_cost(10, "openai")
-            vocab_zip = classify.load_vocab()
+            cost_package = classify.est_cost(10, "openai")
+            vocab_package = classify.load_vocab()
+            assert len(vocab_package) > 100
+
+            with _patched_archive(zp):
+                classify.clear_caches()
+                cost_zip = classify.est_cost(10, "openai")
+                vocab_zip = classify.load_vocab()
     classify.clear_caches()
 
     assert vocab_zip == vocab_package

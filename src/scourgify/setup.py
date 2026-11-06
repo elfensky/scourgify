@@ -86,7 +86,19 @@ def _fff_installed() -> bool | None:
     return ("fanficfare" in out.lower()) if out else None
 
 
-def setup(cfg: dict, yes: bool = False, fff_probe=None) -> None:
+def setup(cfg: dict, yes: bool = False, fff_probe=None, *, write=None) -> None:
+    """Interactive health check + first-run configuration.
+
+    `write=` is the injected write transport (the phase-2 seam): omitting it resolves to
+    `write=run_writer` (the CLI's subprocess `calibre-debug` writer) at CALL time, not at def
+    time — the sentinel-default + late-lookup shape this module's `fff_probe=None` already uses,
+    not an eagerly-bound `write=run_writer` default, which would freeze a stale reference to
+    `run_writer` the moment this module loads (see wrangle.py's `write()` docstring for the full
+    rationale and the test seam this protects). The Calibre plugin passes a `write_ops`-bound
+    callable instead (`plugin/jobs.py::_Writer`) so the same compute logic writes in-process
+    against the live library, with the same guards."""
+    if write is None:
+        write = run_writer
     asking = interactive() and not yes
     def _ask(prompt: str, default: bool = True) -> bool:
         """y/n prompt; off a TTY (pipe / CI / --yes) take the recommended default instead of blocking."""
@@ -181,7 +193,7 @@ def setup(cfg: dict, yes: bool = False, fff_probe=None) -> None:
 
     if ops:
         print(f"\n[6] Applying {len(ops)} change(s) to Calibre (via calibre-debug)")
-        run_writer(ops, tool="setup", scope="columns + prefs")
+        write(ops, tool="setup", scope="columns + prefs")
     print("\n" + "-" * 64)
     print("Setup complete. Next:")
     print("  scourgify audit          # read-only dry-run of all passes")

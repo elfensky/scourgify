@@ -36,9 +36,40 @@ class Harness(object):
         self.lines = []
         self.beats = []
         self.captured = None
+        # Task 3 (plan 02-08): the PLAN/EXECUTE round trip a real click drives (picker, engine
+        # picker, scope dialog, result dialog, refusal dialog, retry chooser) is captured exactly
+        # like info_dialog already is below — `self.chain` collects every capture this run, in
+        # order; `self.chain_terminal` is set only by a TERMINAL one (result/refusal/info_dialog),
+        # which is what `_run_verb_chain`'s poll waits for.
+        self.chain = []
+        self.chain_terminal = None
+        # The TRUE whole-run worst gap (task 3a): `self.beats` itself is reset per-verb by the
+        # pre-existing `_run_verb`/`_menu` helpers (and now `_run_verb_chain`), so a max() over it
+        # only ever covers ONE step. Tracked independently, incrementally, from every heartbeat
+        # tick regardless of any reset — `finish()` reports it as the phase's own measured number
+        # for "GUI-thread portion of any dispatch < 100 ms", not a per-step approximation of it.
+        self._last_beat_time = None
+        self.worst_gap_ms = -1.0
         from calibre_plugins.scourgify import action as mod
+        from calibre_plugins.scourgify import picker as picker_mod
+        from calibre_plugins.scourgify import result_dialog as result_mod
         self.mod = mod
+        self._orig = {
+            'info_dialog': mod.info_dialog,
+            'show_picker': picker_mod.show_picker,
+            'show_scope_dialog': picker_mod.show_scope_dialog,
+            'show_engine_picker': picker_mod.show_engine_picker,
+            'show_refusal': picker_mod.show_refusal,
+            'show_retry_chooser': picker_mod.show_retry_chooser,
+            'show_result': result_mod.show_result,
+        }
         mod.info_dialog = self._capture          # the result dialog is modal; capture it instead
+        picker_mod.show_picker = self._capture_picker
+        picker_mod.show_scope_dialog = self._capture_scope_dialog
+        picker_mod.show_engine_picker = self._capture_engine_picker
+        picker_mod.show_refusal = self._capture_refusal
+        picker_mod.show_retry_chooser = self._capture_retry_chooser
+        result_mod.show_result = self._capture_result
 
     # ---- plumbing ----
     def say(self, s):
@@ -47,9 +78,106 @@ class Harness(object):
 
     def _capture(self, parent, title, msg, det_msg='', show=False, **kw):
         self.captured = (title, msg, det_msg)
+        self._chain_record('info_dialog', {'title': title, 'msg': msg}, terminal=True)
+
+    # ---- Task 3 (plan 02-08): the write-verb chain capture — see __init__'s docstring note ----
+    def _chain_record(self, kind, data, terminal=False):
+        self.chain.append((kind, data))
+        if terminal:
+            self.chain_terminal = (kind, data)
+
+    def _capture_picker(self, gui, result, on_run):
+        """The Review-1-by-1 picker: captured, then Run is simulated by calling `on_run` with the
+        PLAN result's own `carry` — deferred one event-loop tick (`QTimer.singleShot(0, ...)`)
+        because the real caller assigns its own `dlg = show_picker(...)` return value INTO the
+        very closure `on_run` is; calling it synchronously here (before that assignment completes)
+        would read `dlg` before it exists."""
+        self._chain_record('picker', {'verb': result.get('verb'), 'consequence': result.get('consequence'),
+                                      'items': len(result.get('items', ()))})
+        carry = result.get('carry', {})
+        QTimer.singleShot(0, lambda: on_run(carry))
+        return None
+
+    def _capture_scope_dialog(self, gui, scope_result, current_selection, on_choose):
+        mode = scope_result.get('default')
+        self._chain_record('scope_dialog', {'mode': mode})
+        QTimer.singleShot(0, lambda: on_choose({'mode': mode, 'batch': None, 'last': None}))
+        return None
+
+    def _capture_engine_picker(self, gui, result, on_engine):
+        """NEVER dispatches to a cloud engine (CLAUDE.md: no casual full cloud runs while testing)
+        — only ever chooses `apple`, and only when the PLAN result's own `usable` list actually
+        offers it (promote's judge-aware picker never does — apple cannot judge — so this always
+        skips there, which is correct: there is no on-device judge to test)."""
+        usable = set(result.get('usable') or ())
+        if 'apple' not in usable:
+            self._chain_record('engine_picker', {'skipped': 'no usable on-device engine'}, terminal=True)
+            return None
+        self._chain_record('engine_picker', {'engine': 'apple'})
+        QTimer.singleShot(0, lambda: on_engine('apple'))
+        return None
+
+    def _capture_refusal(self, gui, result, on_degraded=None):
+        """Terminal, and NEVER auto-clicks the degraded-mode control — that is a genuine decision
+        (synopsis's FanFicFare guard, T-02-21), not a one-click Run path."""
+        self._chain_record('refusal', {'msg': result.get('msg', '')}, terminal=True)
+        return None
+
+    def _capture_result(self, gui, result, on_retry=None):
+        self._chain_record('result', {'verb': result.get('verb'), 'written': result.get('written'),
+                                      'skipped': len(result.get('skipped', [])),
+                                      'failed': len(result.get('engine_failures', []))}, terminal=True)
+        return None
+
+    def _capture_retry_chooser(self, gui, groups, on_retry):
+        if not groups or not groups[0].get('targets'):
+            self._chain_record('retry_chooser', {'groups': len(groups)}, terminal=True)
+            return None
+        target = groups[0]['targets'][0]
+        self._chain_record('retry_chooser', {'groups': len(groups), 'engine': target.get('engine')})
+        engine_id, book_ids = target.get('engine'), list(groups[0].get('books', []))
+        QTimer.singleShot(0, lambda: on_retry(engine_id, book_ids))
+        return None
+
+    def _no_usable_engine(self):
+        """The lock the engine-spending verbs (classify/synopsis/promote/retry) share: apple is
+        the ONLY engine this harness will ever dispatch to (see `_capture_engine_picker`), so a
+        machine with no usable apple has nothing safe to drive — skip the whole step rather than
+        risk a cloud call via some other path."""
+        from scourgify.engines import usable_engines
+        return 'apple' not in usable_engines()
+
+    def _run_verb_chain(self, text, then):
+        """Like `_run_verb` (below), but for a verb whose flow is a CHAIN of dialogs (PLAN ->
+        picker/engine-picker/scope-dialog -> EXECUTE -> result), not one shot. Waits for
+        `self.chain_terminal`, which only a result/refusal/info_dialog capture ever sets — an
+        intermediate picker/engine-picker/scope-dialog capture keeps the poll running."""
+        self.chain = []
+        self.chain_terminal = None
+        hit = [a for a in self.action.menu.actions() if a.text().startswith(text)]
+        if not hit:
+            self.say('MISSING VERB: %s' % text)
+            return QTimer.singleShot(10, self.next)
+        self.beats = []
+        t0 = time.monotonic()
+        hit[0].trigger()
+        self.say('dispatch of %r returned in %.1f ms' % (text, (time.monotonic() - t0) * 1000))
+
+        def poll(n=[0]):
+            n[0] += 1
+            if self.chain_terminal is None and n[0] < 300:
+                return QTimer.singleShot(100, poll)
+            then(time.monotonic() - t0)
+        QTimer.singleShot(100, poll)
 
     def _beat(self):
-        self.beats.append(time.monotonic())
+        now = time.monotonic()
+        self.beats.append(now)
+        if self._last_beat_time is not None:
+            gap_ms = (now - self._last_beat_time) * 1000
+            if gap_ms > self.worst_gap_ms:
+                self.worst_gap_ms = gap_ms
+        self._last_beat_time = now
 
     def gap(self):
         """Longest interval between GUI-thread heartbeats, ms — the freeze detector."""
@@ -65,7 +193,12 @@ class Harness(object):
                       self.step_menu_1, self.step_menu_n, self.step_inspect,
                       self.step_identity, self.step_smoke,
                       self.step_settings, self.step_probe_guards, self.step_verify,
-                      self.step_no_key_leaked, self.finish]
+                      self.step_no_key_leaked,
+                      # Task 3 (plan 02-08): one driven round trip per write verb this phase built.
+                      self.step_staleness, self.step_wrangle, self.step_classify,
+                      self.step_synopsis, self.step_promote, self.step_backfill,
+                      self.step_retry,
+                      self.finish]
         QTimer.singleShot(2000, self.next)
 
     def next(self):
@@ -191,7 +324,7 @@ class Harness(object):
         # save a fake key through the real widget, exactly as clicking OK does
         w.rows['openai'][0].setText(self.FAKE)
         out = w.save_settings()
-        mode = oct(os.stat(config.prefs.file_path).st_mode & 0o777)
+        mode = oct(os.stat(config._prefs().file_path).st_mode & 0o777)
         self.say('saved: engines with a stored key = %s; config file mode %s' % (sorted(out), mode))
 
         stored = config.stored_keys()
@@ -264,11 +397,84 @@ class Harness(object):
         assert self.FAKE not in blob, 'a key reached the transcript'
         QTimer.singleShot(10, self.next)
 
+    # ---- Task 3 (plan 02-08): one driven round trip per write verb, under a real Calibre ----
+    def _prep(self, n):
+        """Select `n` books and rebuild the menu so it reflects that selection before a chain
+        step reads `self.action.menu.actions()` — mirrors `_menu()`'s own setup above."""
+        self.gui.library_view.select_rows(self.ids(n), using_ids=True)
+        self.action.build_menu()
+
+    def _chain_done(self, label):
+        def done(elapsed):
+            self.say('%s: %.2fs, %d capture(s), terminal=%r, longest GUI-thread gap %.1fms'
+                     % (label, elapsed, len(self.chain), self.chain_terminal, self.gap()))
+            QTimer.singleShot(10, self.next)
+        return done
+
+    def step_staleness(self):
+        self._prep(3)
+        self._run_verb_chain('Re-derive status', self._chain_done('staleness'))
+
+    def step_wrangle(self):
+        self._prep(3)
+        self._run_verb_chain('Normalize fields', self._chain_done('wrangle'))
+
+    def step_classify(self):
+        if self._no_usable_engine():
+            self.say('classify: skipped: no usable engine')
+            return QTimer.singleShot(10, self.next)
+        self._prep(2)
+        self._run_verb_chain('Classify the never-classified here', self._chain_done('classify'))
+
+    def step_synopsis(self):
+        if self._no_usable_engine():
+            self.say('synopsis: skipped: no usable engine')
+            return QTimer.singleShot(10, self.next)
+        self._prep(2)
+        self._run_verb_chain('Settle descriptions', self._chain_done('synopsis'))
+
+    def step_promote(self):
+        # apple can never judge (TRAITS['judge'] is False) — job_plan_promote's own `usable`
+        # therefore never includes it, so this always ends up skipped by _capture_engine_picker;
+        # dispatched anyway (PLAN is a read-only, engine-free job) so the read path is exercised.
+        self._run_verb_chain('Adjudicate new tags', self._chain_done('promote'))
+
+    def step_backfill(self):
+        self._run_verb_chain('Backfill promoted tags', self._chain_done('backfill'))
+
+    def step_retry(self):
+        if self._no_usable_engine():
+            self.say('retry: skipped: no usable engine')
+            return QTimer.singleShot(10, self.next)
+        self._prep(2)
+
+        def check(n=[0]):
+            n[0] += 1
+            self.action.build_menu()
+            hit = [a for a in self.action.menu.actions() if a.text().startswith('Retry on another engine')]
+            if hit and hit[0].isEnabled():
+                return self._run_verb_chain('Retry on another engine', self._chain_done('retry'))
+            if n[0] >= 30:
+                self.say('retry: skipped: nothing to retry')
+                return QTimer.singleShot(10, self.next)
+            QTimer.singleShot(200, check)
+        QTimer.singleShot(200, check)
+
     def finish(self):
         if getattr(self, 'cfg', None) is not None:
-            self.cfg.prefs['keys'] = self.saved_keys      # put the user's own keys back
+            self.cfg._prefs()['keys'] = self.saved_keys  # put the user's own keys back
             self.say('restored stored keys: %s' % sorted(self.saved_keys))
+        self.mod.info_dialog = self._orig['info_dialog']
+        from calibre_plugins.scourgify import picker as picker_mod
+        from calibre_plugins.scourgify import result_dialog as result_mod
+        picker_mod.show_picker = self._orig['show_picker']
+        picker_mod.show_scope_dialog = self._orig['show_scope_dialog']
+        picker_mod.show_engine_picker = self._orig['show_engine_picker']
+        picker_mod.show_refusal = self._orig['show_refusal']
+        picker_mod.show_retry_chooser = self._orig['show_retry_chooser']
+        result_mod.show_result = self._orig['show_result']
         self.heart.stop()
+        self.say('longest GUI-thread heartbeat gap for the WHOLE run: %.1f ms' % self.worst_gap_ms)
         open(OUT, 'w').write('\n'.join(self.lines) + '\n')
         self.say('wrote %s' % OUT)
         if not os.environ.get('SCOURGIFY_SMOKE_STAY'):

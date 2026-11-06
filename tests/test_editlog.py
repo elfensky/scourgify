@@ -181,6 +181,63 @@ def test_a_failed_apply_closes_the_run_as_failed():
     assert lines[-1]["kind"] == "end" and lines[-1]["outcome"] == "failed"
 
 
+# ---------------- WRITE-06: engine/model on the header (plugin phase 2) ----------------
+def test_write_ops_records_the_engine_and_model_on_the_run_header():
+    """The cheapest, highest-confidence assertion in phase 2 — the core half of WRITE-06 already
+    existed (`write_ops(..., engine=, model=)` reaches `editlog.start`); this pins it. D-05: the
+    edit-log header carries `engine`/`model` for a plugin classify run, and an ORDINARY run (no
+    engine/model passed) carries neither key at all — an ordinary header stays byte-identical."""
+    with _pointed_at(_lib()) as home:
+        common.write_ops(_Api(), [common.op_set_field("tags", {1: ["Harem", "Isekai"]})],
+                         engine="openai", model="gpt-4o-mini")
+        head = _read(home)[0]
+    assert head["engine"] == "openai" and head["model"] == "gpt-4o-mini"
+
+    with _pointed_at(_lib()) as home2:
+        common.write_ops(_Api(), [common.op_set_field("tags", {1: ["Harem", "Isekai"]})])
+        head2 = _read(home2)[0]
+    assert "engine" not in head2 and "model" not in head2
+
+
+# ---------------- the noop/skipped distinction the result dialog depends on ----------------
+def test_an_empty_change_set_writes_no_record_at_all():
+    """The `outcome == "noop"` half of the distinction plugin/jobs.py's `execute_result` renders:
+    a genuinely empty change-set (no ops at all) leaves the log untouched. The other half — an
+    ALL-CONFLICTING change-set still gets a header+footer with zero op lines and `outcome ==
+    "skipped"` — is already pinned by
+    `test_an_all_skipped_run_still_writes_a_header_and_a_footer_with_no_op_lines` below; asserted
+    together here rather than duplicated."""
+    with _pointed_at(_lib()) as home:
+        result = common.write_ops(_Api(), [common.op_set_field("tags", {})])
+        assert _read(home) == []
+    assert result.outcome == "noop"
+
+    with _pointed_at(_lib()) as home2:
+        result2 = common.write_ops(_Api(), [common.op_set_field(
+            "tags", {1: ["New"]}, expected={1: ["Different"]})])
+        lines = _read(home2)
+    assert result2.outcome == "skipped"
+    assert [l["kind"] for l in lines] == ["run", "end"]
+
+
+# ---------------- the write-run lock's log guarantee (sequential proof) ----------------
+def test_one_runs_lines_are_never_interleaved_with_anothers():
+    """Two SEQUENTIAL write_ops calls are enough to pin the shape: reading edits.jsonl and
+    grouping by run id yields, for each run, a header followed by its own op lines followed by at
+    most one footer — never a line from a second run in between. The guarantee itself comes from
+    the write-run lock spanning `editlog.start` through `editlog.finish`
+    (tests/test_write_path.py's threaded tests cover the concurrent case that makes this matter)."""
+    with _pointed_at(_lib()) as home:
+        common.write_ops(_Api(), [common.op_set_field("tags", {1: ["a"]})], tool="wrangle")
+        common.write_ops(_Api(), [common.op_set_field("#status", {1: "Hiatus"})], tool="classify")
+        lines = _read(home)
+    assert [l["kind"] for l in lines] == ["run", "op", "end", "run", "op", "end"]
+    run1, run2 = lines[0]["run"], lines[3]["run"]
+    assert run1 != run2
+    assert all(l["run"] == run1 for l in lines[0:3])
+    assert all(l["run"] == run2 for l in lines[3:6])
+
+
 def _stub_writer(rc=0):
     """Stub the calibre-debug subprocess AND the lookup that finds it — CI has no Calibre, and a
     stub that only replaces subprocess.run passes on a developer's machine and dies on the runner.
