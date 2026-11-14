@@ -15,7 +15,7 @@ import difflib
 from scourgify.artifacts import (prop, rank, ledger, review, applied_proposals,
                                  append_ledger, read_rows, split_tags, write_review, archive)
 from scourgify.classify import existing_terms
-from scourgify.engines import ENGINES, ask_retry, max_workers as engine_workers
+from scourgify.engines import ENGINES, ask_retry, failure_class, max_workers as engine_workers
 from scourgify.common import (GuardrailError, data_dir, library, norm, ro_connect, run_writer,
                               current_tags, titles as book_titles, op_set_field, interactive, confirm)
 from scourgify.overrides import ov_path, append_lines, append_rows   # overrides/ formats live there
@@ -116,19 +116,35 @@ def _finalize(base, dec, existing):
 
 
 def decide(cand: dict, ask, verify_ask=None, existing: list | None = None) -> dict:
+    """ask/verify_ask: prompt -> (text, err), ask_retry's own shape (#73) — or a bare string, the
+    pre-#73 test-fixture shape still used throughout tests/test_promote.py. Normalized HERE, at
+    the top of decide, the ONE place this happens (mirrors ui.checklist's own item-shape
+    normalization) — never re-derived per call site."""
+    def _text_err(resp):
+        return resp if isinstance(resp, tuple) else (resp, "")
+
     if existing is None: existing = existing_terms()
     near = shortlist(cand["tag"], existing)
     base = {"tag": cand["tag"], "count": cand.get("count", 0)}
-    adv = parse_decision(ask(advocate_prompt(cand, near)))
+    adv_text, adv_err = _text_err(ask(advocate_prompt(cand, near)))
+    adv = parse_decision(adv_text)
     if adv is None:
         # NOT a reject: ask_retry returns ("", err) on a transport failure, so a network hiccup would
         # otherwise become a durable verdict in the ledger and the tag would never be adjudicated again.
         # "error" isn't in VERDICTS, so apply_decisions skips it and the candidate re-runs next time.
+        # The reason is PREFIXED with the failure's normalized class (engines.failure_class reads it
+        # back) whenever the error half carries one — the same convention ask_retry's own reason
+        # already follows (#73), so a promote refusal can earn the same "retry on another engine"
+        # recovery a classify refusal does.
+        reason = "no usable response (transport failure or unparseable)"
+        if adv_err:
+            reason = f"{failure_class(adv_err)}: {reason}"
         return {**base, "verdict": "error", "target": "", "contested": False,
-                "reason": "no usable response (transport failure or unparseable)", "confidence": "low"}
+                "reason": reason, "confidence": "low"}
     if adv["verdict"] != "promote":
         return _finalize(base, {**adv, "contested": False}, existing)   # alias/reject (alias target validated)
-    sk = parse_decision((verify_ask or ask)(skeptic_prompt(cand, adv, near)))
+    sk_text, sk_err = _text_err((verify_ask or ask)(skeptic_prompt(cand, adv, near)))
+    sk = parse_decision(sk_text)
     if sk and sk["verdict"] in ("alias", "reject"):
         return _finalize(base, {**sk, "contested": True}, existing)     # skeptic refuted the promote
     if sk is None:
@@ -199,7 +215,9 @@ def apply_decisions_step(review_path: str | None = None, decide=None) -> dict:
     item, which is how the wrangle and classify reviews already work.
 
     `decide(title, items, subtitle=) -> (accepted_idx, rejected_idx, action)` defaults to
-    ui.checklist (D-11) — the lazy import of ui moves BEHIND that default."""
+    ui.checklist (D-11) — the lazy import of ui moves BEHIND that default. `items` are
+    `(label, payload)` pairs (D-03): `payload` carries `target`/`reason` too, so a Qt review
+    table can show why a verdict landed where it did."""
     from scourgify.artifacts import archive_rows
     review_path = review_path or review()
     if not os.path.exists(review_path):
@@ -214,8 +232,10 @@ def apply_decisions_step(review_path: str | None = None, decide=None) -> dict:
     other = [r for r in rows if r not in actionable]          # errors: never applicable, stay pending
     if not actionable:
         print("(no applicable verdicts — nothing to review.)"); return {}
-    acc, rej, action = decide("verdicts — untick any you disagree with",
-                              [verdict_line(r) for r in actionable],
+    items = [(verdict_line(r), {"book": None, "title": r.get("tag", ""), "field": "verdict",
+              "before": "", "after": r.get("verdict", ""), "target": r.get("target", ""),
+              "reason": r.get("reason", "")}) for r in actionable]
+    acc, rej, action = decide("verdicts — untick any you disagree with", items,
                               subtitle="ticked verdicts are applied; unticked ones stay undecided "
                                        "and are offered again")
     if action in ("skip", "quit") or not acc:
@@ -349,27 +369,44 @@ def backfill_step(chg: dict, adds: dict, titles: dict, decide=None) -> dict:
     `promote --backfill --step` and the wizard stage, per CLAUDE.md's same-engine-function rule.
 
     `decide(title, items) -> (accepted_idx, rejected_idx, action)` defaults to ui.checklist
-    (D-11) — the lazy import of ui moves BEHIND that default."""
+    (D-11) — the lazy import of ui moves BEHIND that default. `items` are `(label, payload)`
+    pairs (D-03): `payload`'s `before`/`after` are the book's tag set without/with this
+    backfill's additions."""
     if decide is None:
         from scourgify import ui
         decide = ui.checklist
     books = sorted(adds)
-    acc, _, action = decide("backfill — untick a book to leave it untagged",
-                            [f"[bold]#{b}[/] {str(titles.get(b, ''))[:44]}  + "
-                             f"[cyan]{', '.join(sorted(adds[b]))}[/]" for b in books])
+    items = [(f"[bold]#{b}[/] {str(titles.get(b, ''))[:44]}  + "
+              f"[cyan]{', '.join(sorted(adds[b]))}[/]",
+              {"book": b, "title": titles.get(b, ""), "field": "tags",
+               "before": sorted(set(chg.get(b, [])) - set(adds[b])),
+               "after": sorted(chg.get(b, []))}) for b in books]
+    acc, _, action = decide("backfill — untick a book to leave it untagged", items)
     if action in ("skip", "quit"): return {}
     keep = {books[i] for i in acc}
     return {b: v for b, v in chg.items() if b in keep}
 
 
-def backfill(yes: bool = False, step: bool = False, decide=None) -> int:
+def backfill(yes: bool = False, step: bool = False, decide=None, *, write=None) -> int:
     """THE backfill flow — plan, preview, decide, guarded write — for every front door.
 
     `decide(chg, adds) -> chg to write` (falsy aborts) is the only thing that varies between them:
     the CLI's confirm/--step by default, the wizard's menu when it injects one. Same seam as
     Plan.run(ask=)/run(verify_ask=). The wizard used to assemble its own run_writer call here,
     which silently dropped this function's per-book preview — a wizard user saw less before a
-    write than a CLI user, and any guard added here would have missed them entirely."""
+    write than a CLI user, and any guard added here would have missed them entirely.
+
+    `write=` is the injected write transport (the phase-2 seam): omitting it resolves to
+    `write=run_writer` (the CLI's subprocess `calibre-debug` writer) at CALL time, not at def
+    time — the sentinel-default + late-lookup shape `decide=None` above already uses, not an
+    eagerly-bound `write=run_writer` default, which would freeze a stale reference to
+    `run_writer` the moment this module loads and silently break a `promote.run_writer = fake`
+    monkeypatch seam the same way it broke wrangle/classify (see those modules' `write()` /
+    `apply_proposal()` docstrings). The Calibre plugin passes a `write_ops`-bound callable
+    instead (`plugin/jobs.py::_Writer`) so the same compute logic writes in-process against the
+    live library, with the same guards."""
+    if write is None:
+        write = run_writer
     chg, adds, before = backfill_plan()
     if not chg:
         print("backfill: nothing to do — source books already carry their promoted tags ✓"); return 0
@@ -400,16 +437,29 @@ def backfill(yes: bool = False, step: bool = False, decide=None) -> int:
     # `expected` (D-09) is built from `before` — the plan-time tag set — over exactly the books
     # `chg` still names after decide()/backfill_step() may have narrowed it.
     expected = {b: before[b] for b in chg if b in before}
-    run_writer([op_set_field("tags", chg, expected=expected)], tool="promote", scope=f"backfill, {len(chg)} books")
+    write([op_set_field("tags", chg, expected=expected)], tool="promote", scope=f"backfill, {len(chg)} books")
     print(f"backfilled promoted tags onto {len(chg)} book(s).")
     return len(chg)
 
 
 def run(a: argparse.Namespace, ranked_path: str | None = None, proposal_path: str | None = None,
         review_path: str | None = None, existing: list | None = None,
-        ask=None, verify_ask=None) -> None:
-    """ask/verify_ask: prompt -> response text. Default to the configured engines; tests pass
-    callables directly (the same seam decide() already has) instead of faking the registry."""
+        ask=None, verify_ask=None, *, on_cand=None, stop=None) -> None:
+    """ask/verify_ask: prompt -> (text, err) — ask_retry's own shape (#73), the same envelope
+    classify.Plan.run and synopsis.Plan.run's default ask already build. Tests pass callables
+    directly (the same seam decide() already has) instead of faking the registry; decide()
+    normalizes a bare-string-returning callable too, so the pre-#73 test fixtures still work.
+
+    `on_cand(done, total, promoted, aliased, rejected)` — the plugin's progress seam (mirrors
+    classify.Plan.run's on_book=): fires once per candidate as its future resolves.
+
+    `stop()` — checked at the head of each loop iteration, mirroring classify.Plan.run's own
+    abort seam: a truthy answer stops submitting new work and shuts the executor down with
+    `wait=False, cancel_futures=True`. The candidates already decided are still written to the
+    review file below — an aborted adjudication keeps whatever it settled, exactly like a
+    cancelled classify run keeps its partial proposal.
+
+    Both default to None, so the CLI path is byte-identical to before this seam existed."""
     review_path = review_path or review()
     if os.path.exists(review_path) and not getattr(a, "yes", False):
         raise GuardrailError(f"a pending review exists at {review_path} — apply it (scourgify promote --apply), "
@@ -421,15 +471,29 @@ def run(a: argparse.Namespace, ranked_path: str | None = None, proposal_path: st
         print("no undecided candidates — nothing to do."); return
     if ask is None:
         eng = ENGINES[a.engine](a.model, a.timeout)
-        ask = lambda p: ask_retry(eng, p)[0]
+        ask = lambda p: ask_retry(eng, p)
     if verify_ask is None and a.verify_with:
         veng = ENGINES[a.verify_with]("", a.timeout)
-        verify_ask = lambda p: ask_retry(veng, p)[0]
+        verify_ask = lambda p: ask_retry(veng, p)
     print(f"engine={a.engine}{'  verify-with=' + a.verify_with if a.verify_with else ''}  candidates: {len(cands)}")
-    rows = []
-    with ThreadPoolExecutor(max_workers=engine_workers(a.engine, a.workers)) as ex:
+    rows, cancelled = [], False
+    promoted = aliased = rejected = 0
+    ex = ThreadPoolExecutor(max_workers=engine_workers(a.engine, a.workers))
+    try:
         futs = [ex.submit(decide, c, ask, verify_ask, existing) for c in cands]
-        for fut in as_completed(futs): rows.append(fut.result())
+        for fut in as_completed(futs):
+            if stop is not None and stop():           # checked at the head of each iteration
+                cancelled = True
+                break
+            r = fut.result()
+            rows.append(r)
+            if r["verdict"] == "promote": promoted += 1
+            elif r["verdict"] == "alias": aliased += 1
+            elif r["verdict"] == "reject": rejected += 1
+            if on_cand is not None:
+                on_cand(len(rows), len(cands), promoted, aliased, rejected)
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True) if cancelled else ex.shutdown()
     rows.sort(key=lambda r: (r["verdict"] != "promote", -r["count"]))   # promotes first, by count
     os.makedirs(data_dir(), exist_ok=True)
     write_review(rows, review_path)

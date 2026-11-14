@@ -266,6 +266,25 @@ def _no_ui_import(fn):
             sys.modules["scourgify.ui"] = saved
 
 
+def test_checklist_renders_pairs_and_plain_strings_identically():
+    """ui.checklist is the ONE place the (label, payload) item shape (D-03) is normalized: a list
+    of `(label, payload)` pairs must render the same labels and return the same
+    (accepted_idx, rejected_idx, action) contract as the equivalent list of plain strings, for the
+    same keystrokes."""
+    from scourgify import ui
+    labels = ["alpha", "beta", "gamma"]
+    pairs = [(l, {"book": i, "title": l, "field": "x", "before": "", "after": l})
+            for i, l in enumerate(labels)]
+    with common.scripted_answers(["2", ""]):        # untick #2 (beta), then apply the rest
+        plain_result = ui.checklist("t", list(labels))
+    with common.scripted_answers(["2", ""]):
+        pair_result = ui.checklist("t", pairs)
+    assert plain_result == pair_result == ([0, 2], [1], "apply")
+    # a plain list stays untouched — checklist never returns payload, it only ever reads it
+    assert pairs == [(l, {"book": i, "title": l, "field": "x", "before": "", "after": l})
+                     for i, l in enumerate(labels)]
+
+
 def test_apply_proposal_step_decide_seam():
     with _fixture_env([{"id": 1, "added": "2026-01-01 10:00:00", "title": "Book One", "desc": "x"}]):
         artifacts.write_proposal([{"book_id": 1, "title": "Book One", "added_tags": ["Fluff"], "proposed_new": []}])
@@ -280,7 +299,13 @@ def test_apply_proposal_step_decide_seam():
             _no_ui_import(lambda: classify.apply_proposal_step(decide=stub))
         finally:
             classify.run_writer = saved_rw
-        assert recorded["items"] == ["Fluff"]                          # what the interactive path would see
+        # (label, payload) pairs (D-03) — label is the tag itself, unchanged
+        (label, payload), = recorded["items"]
+        assert label == "Fluff"
+        assert payload == {"book": 1, "title": "Book One", "field": "tags",
+                           "before": [], "after": ["Fluff"]}
+        import json
+        json.dumps(payload)
         assert "#1" in recorded["title"] and "Book One" in recorded["title"]
         (ops,) = recorded_ops
         assert any(o.get("op") == "set_field" and o.get("field") == "tags"
@@ -297,7 +322,12 @@ def test_step_walk_decide_seam():
         rejects = _no_ui_import(lambda: overrides._step_walk(
             {}, {}, {"fandoms": "fandoms"}, {}, {}, unique, set(), {}, decide=stub))
         assert rejects == []
-        assert recorded["items"] == [overrides._edit_label("rename", "fandoms", "OldF", "NewF")]
+        (label, payload), = recorded["items"]
+        assert label == overrides._edit_label("rename", "fandoms", "OldF", "NewF")
+        assert payload == overrides._edit_payload({"fandoms": "fandoms"}, 1, "Book One",
+                                                   "rename", "fandoms", "OldF", "NewF")
+        import json
+        json.dumps(payload)
         assert "#1" in recorded["title"] and "Book One" in recorded["title"]
 
 
@@ -309,7 +339,11 @@ def test_step_pick_decide_seam():
     auto = {"fandoms.csv": ["A,A"], "tropes.csv": ["B,B,tag"]}
     result = _no_ui_import(lambda: overrides.step_pick(auto, decide=stub))
     pairs = [(fn, l) for fn in sorted(auto) for l in sorted(set(auto[fn]))]
-    assert recorded["items"] == [f"[dim]{fn}[/]  {l}" for fn, l in pairs]
+    expected_labels = [f"[dim]{fn}[/]  {l}" for fn, l in pairs]
+    assert [label for label, _ in recorded["items"]] == expected_labels
+    payloads = [p for _, p in recorded["items"]]
+    assert payloads == [{"book": None, "title": fn, "field": "override", "before": "",
+                         "after": l, "kind": "override", "class": "auto"} for fn, l in pairs]
     assert result == {pairs[0]}
 
 
@@ -325,7 +359,14 @@ def test_apply_decisions_step_decide_seam():
             return [0], [], "apply"                        # accept the one verdict
         n = _no_ui_import(lambda: promote.apply_decisions_step(review_path, decide=stub))
         assert n["promote"] == 1
-        assert recorded["items"] == [promote.verdict_line(row)]
+        # (label, payload) pairs (D-03) — the label half is unchanged, payload carries
+        # book/title/field/before/after plus target/reason
+        (label, payload), = recorded["items"]
+        assert label == promote.verdict_line(row)
+        assert payload == {"book": None, "title": "Foo", "field": "verdict", "before": "",
+                           "after": "promote", "target": "", "reason": "r"}
+        import json
+        json.dumps(payload)                                        # payload is JSON-serializable
         assert not os.path.exists(review_path)                     # fully applied -> removed, not archived-with-leftover
 
 
@@ -339,9 +380,13 @@ def test_backfill_step_decide_seam():
     titles = {1: "Book One"}
     result = _no_ui_import(lambda: promote.backfill_step(chg, adds, titles, decide=stub))
     assert result == chg
-    expected_items = [f"[bold]#{b}[/] {str(titles.get(b, ''))[:44]}  + "
-                      f"[cyan]{', '.join(sorted(adds[b]))}[/]" for b in sorted(adds)]
-    assert recorded["items"] == expected_items
+    expected_labels = [f"[bold]#{b}[/] {str(titles.get(b, ''))[:44]}  + "
+                       f"[cyan]{', '.join(sorted(adds[b]))}[/]" for b in sorted(adds)]
+    assert [label for label, _ in recorded["items"]] == expected_labels
+    (label, payload), = recorded["items"]
+    assert payload == {"book": 1, "title": "Book One", "field": "tags", "before": ["A"], "after": ["A", "B"]}
+    import json
+    json.dumps(payload)
 
 
 def test_staleness_step_decide_seam():
@@ -353,7 +398,12 @@ def test_staleness_step_decide_seam():
         rows = [(1, "Hiatus", "Abandoned", 6.0)]
         result = _no_ui_import(lambda: staleness.step("#status", rows, decide=stub))
         assert result == rows
-        assert recorded["items"] == [staleness.status_line(rows[0], "Book One")]
+        (label, payload), = recorded["items"]
+        assert label == staleness.status_line(rows[0], "Book One")
+        assert payload == {"book": 1, "title": "Book One", "field": "#status",
+                           "before": "Hiatus", "after": "Abandoned"}
+        import json
+        json.dumps(payload)
 
 
 def test_synopsis_step_decide_seam():
@@ -363,10 +413,14 @@ def test_synopsis_step_decide_seam():
         return [0], [], "apply"
     made = {2: "A generated synopsis " * 3, 1: "Another one " * 3}
     titles = {1: "Book One", 2: "Book Two"}
-    result = _no_ui_import(lambda: synopsis.step(made, titles, decide=stub))
+    blurbs = {1: "old blurb one", 2: "old blurb two"}
+    result = _no_ui_import(lambda: synopsis.step(made, titles, decide=stub, blurbs=blurbs))
     ids = sorted(made)
-    expected_items = [f"[bold]#{b}[/] {str(titles.get(b, ''))[:36]:<36} [dim]{made[b][:120]}…[/]" for b in ids]
-    assert recorded["items"] == expected_items
+    expected_labels = [f"[bold]#{b}[/] {str(titles.get(b, ''))[:36]:<36} [dim]{made[b][:120]}…[/]" for b in ids]
+    assert [label for label, _ in recorded["items"]] == expected_labels
+    payloads = [p for _, p in recorded["items"]]
+    assert payloads == [{"book": b, "title": titles[b], "field": "comments",
+                         "before": blurbs[b], "after": made[b]} for b in ids]
     assert result == {ids[0]: made[ids[0]]}
 
 
@@ -376,6 +430,126 @@ def test_all_seven_decide_sites_carry_the_parameter():
     fns = [classify.apply_proposal_step, overrides._step_walk, overrides.step_pick,
           promote.apply_decisions_step, promote.backfill_step, staleness.step, synopsis.step]
     assert all("decide" in inspect.signature(f).parameters for f in fns)
+
+
+# ---------------- the two decide= gaps this plan closes (D-11's last two sites) ----------------
+def test_wrangle_step_and_synopsis_run_carry_decide():
+    """Acceptance criterion (Task 2): wrangle.Plan.step and synopsis.Plan.run both gain `decide`."""
+    import inspect
+    from scourgify import wrangle
+    assert "decide" in inspect.signature(wrangle.Plan.step).parameters
+    assert "decide" in inspect.signature(synopsis.Plan.run).parameters
+
+
+def test_wrangle_plan_step_decide_seam_needs_no_rich():
+    """Acceptance criterion: `wrangle.Plan.step(decide=<recorder>)` completes with rich BLOCKED
+    (not merely unimported) — driven in a subprocess the way tests/test_plugin_safety.py proves
+    the guarantee for a plugin job, so the plugin's picker can drive this review under Calibre's
+    rich-less bundled Python. A single-book fixture guarantees every edit is 'unique' (MASS_MIN=3
+    books share an edit before it counts as a mass fold), so the review actually has an item."""
+    import subprocess
+    src = SRC
+    tests_dir = os.path.dirname(os.path.abspath(__file__))
+    with tempfile.TemporaryDirectory() as td:
+        lib = os.path.join(td, "library"); home = os.path.join(td, "home")
+        os.makedirs(lib); os.makedirs(os.path.join(home, "overrides"))
+        with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as f:
+            f.write('[columns]\n[behavior]\n[overrides]\ndir = "overrides"\n')
+        script = f'''
+import sys
+sys.path.insert(0, {src!r})
+sys.path.insert(0, {tests_dir!r})
+for m in [m for m in sys.modules if m == "rich" or m.startswith("rich.")]:
+    del sys.modules[m]
+sys.modules["rich"] = None          # any `import rich` from here on raises ImportError
+import os
+os.environ["SCOURGIFY_HOME"] = {home!r}
+os.environ["CALIBRE_LIBRARY"] = {lib!r}
+import fixture_db
+fixture_db.build(os.path.join({lib!r}, "metadata.db"),
+                 [{{"id": 1, "title": "Fixture", "added": "2026-01-01 10:00:00",
+                    "tags": ["Oneshot", "Keeper"]}}],
+                 custom=[(c, {{}}) for c in ("fandoms", "characters", "relationships", "genres",
+                                            "status", "updated", "wrangled", "synopsized")]).close()
+from scourgify import wrangle, common
+p = wrangle.plan(common.load_config(), wrangle.load_maps(common.load_config()))
+recorded = []
+def stub(title, items, subtitle=""):
+    recorded.append(items)
+    return list(range(len(items))), [], "apply"
+p.step(decide=stub)
+assert "scourgify.ui" not in sys.modules, "an injected decide must not import the interactive module"
+print("ITEMS", len(recorded[0]) if recorded else 0)
+print("OK")
+'''
+        proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "OK" in proc.stdout, proc.stdout + proc.stderr
+    assert "ITEMS 1" in proc.stdout, proc.stdout        # the review actually ran with one item
+
+
+def test_synopsis_run_decide_seam_runs_review_without_step():
+    """D-13: `Plan.run(decide=)` runs the per-book review even without `--step`; with neither
+    `decide` nor `--step`, no review runs (CLI behaviour unchanged) — the whole generated batch
+    reaches the write untouched."""
+    import contextlib, io, json as _json, tempfile as _tmp, zipfile
+
+    FFF_KEY = "namespaced:FanFicFarePlugin:settings"
+    PREFS_ON = {"std_cols_newonly": {"comments": True}, "custom_cols": {}}
+    BACK = ("A generated back cover, long enough to be worth storing in a library, with a "
+           "premise and a hook. Themes: exile, duty, noir.")
+
+    class FakeAsk:
+        def __call__(self, prompt):
+            if "exactly one word" in prompt: return "NO", ""
+            if "Excerpt" in prompt: return "A note.", ""
+            return BACK, ""
+
+    @contextlib.contextmanager
+    def syn_lib():
+        with _tmp.TemporaryDirectory() as td:
+            root = os.path.join(td, "library"); os.makedirs(root)
+            con = fixture_db.build(os.path.join(root, "metadata.db"),
+                                   [{"id": 1, "added": "2026-01-01 10:00:00", "title": "Thin Blurb",
+                                     "desc": "see inside"}],
+                                   custom=[("updated", {}), ("synopsized", {})])
+            con.execute("INSERT INTO preferences VALUES(?,?)", (FFF_KEY, _json.dumps(PREFS_ON)))
+            os.makedirs(os.path.join(root, "b1"), exist_ok=True)
+            con.execute("UPDATE books SET path=? WHERE id=?", ("b1", 1))
+            con.execute("INSERT INTO data VALUES(?,?,?)", (1, "EPUB", "f"))
+            with zipfile.ZipFile(os.path.join(root, "b1", "f.epub"), "w") as z:
+                z.writestr("ch1.xhtml", "<html><body><p>%s</p></body></html>"
+                           % ("the story went on and on. " * 900))
+            con.commit(); con.close()
+            with _env(SCOURGIFY_HOME=os.path.join(td, "home"), CALIBRE_LIBRARY=root):
+                os.makedirs(common.data_dir(), exist_ok=True)
+                yield
+
+    # decide= WITHOUT --step: the review runs (rejecting everything -> nothing written)
+    recorded = []
+    def stub(title, items, subtitle=""):
+        recorded.append(items)
+        return [], [], "skip"
+    with syn_lib():
+        p = synopsis.plan(synopsis.default_opts(apply=True))
+        with contextlib.redirect_stdout(io.StringIO()):
+            p.run(ask=FakeAsk(), decide=stub)
+    assert recorded and len(recorded[0]) == 1, recorded            # the review DID run
+
+    # neither decide= nor --step: no review — the generated text reaches the write verbatim
+    with syn_lib():
+        p = synopsis.plan(synopsis.default_opts(apply=True))
+        saved = synopsis.run_writer
+        written = []
+        synopsis.run_writer = lambda ops, force=False, **kw: written.append(ops)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                p.run(ask=FakeAsk())
+        finally:
+            synopsis.run_writer = saved
+    (ops,) = written
+    (comments_op,) = [o for o in ops if o["op"] == "set_field" and o["field"] == "comments"]
+    assert comments_op["values"]["1"] == BACK, comments_op["values"]
 
 
 if __name__ == "__main__":

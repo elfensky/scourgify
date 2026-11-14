@@ -290,6 +290,20 @@ def test_an_untouched_settings_field_keeps_its_key_and_an_emptied_one_clears_it(
     assert engines.unmask("", "") == ""
 
 
+def test_a_sub_cent_estimate_never_reads_as_free():
+    """A real but tiny estimate (one book on a cheap cloud engine is fractions of a cent) must
+    not round down to `~$0.00`, which a user reads as free. Three cases: exactly 0.0 -> free;
+    (0.0, 0.005) -> a sub-cent label; >= 0.005 -> the usual two-decimal price."""
+    engs = [("x", True, "h")]
+    zero = engines.engine_options(engs, 1, lambda n, e: 0.0)[0][3]
+    sub_cent = engines.engine_options(engs, 1, lambda n, e: 0.004)[0][3]
+    ordinary = engines.engine_options(engs, 1, lambda n, e: 0.42)[0][3]
+    assert "free" in zero and "$" not in zero
+    assert "0.00" not in sub_cent and "free" not in sub_cent    # never reads as free or as exactly zero
+    assert "$" in sub_cent
+    assert "~$0.42" in ordinary
+
+
 def test_est_cost_prices_a_reasoning_engine_by_its_thinking_tokens():
     """A reasoning model bills hidden thinking as OUTPUT. Measured against real library books
     (2026-07-30): gemini-2.5-flash returns ~50 answer tokens on top of ~1061 thinking tokens, so a
