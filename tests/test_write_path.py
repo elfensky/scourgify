@@ -689,6 +689,274 @@ def test_run_writer_closes_its_read_connection_before_spawning_calibre_debug():
     assert opened and all(c._wr01_closed for c in opened), "a read connection was left open after the run"
 
 
+# ---------------- Task 2 (phase 2, plan 02-02): one producer, one ops list, two transports ----------------
+# Pins the promotion the shadow-replay test above proved for the pure ops loop: every one of the
+# six write-producing tool functions (wrangle, staleness, classify, promote, synopsis, setup) makes
+# its DECISION independently of which transport it was handed, and — unless a caller injects its
+# own — that decision still reaches the CLI's run_writer by default. A re-hardcoded transport, or a
+# producer whose ops list differs by transport, turns this file red.
+WRANGLE_MAPS = {"char": {}, "char_fd": {}, "fan": {}, "fanvals": set(), "trope": {}, "fan_block": set(),
+                "decompose": {}, "gsplit": {}, "gcanon": {}, "gallow": set(), "rating": set(),
+                "junk_exact": {"complete"}, "junk_rx": []}
+
+
+def _fresh_api(books=(1, 2)):
+    """One FakeApi shape wide enough for every producer's fields, fresh per call (no cross-producer
+    state leakage)."""
+    return FakeApi(books=books, fields=("tags", "#status", "#wrangled", "comments", "#synopsized"),
+                   multi=("tags",))
+
+
+@contextlib.contextmanager
+def _fake_calibre_utils_date():
+    """`ops.apply_ops`'s `stamp_now` branch lazily imports `calibre.utils.date.now` — real Calibre
+    always provides it, but classify's and synopsis's ops ALWAYS include a stamp op, so routing
+    them through the real `common.write_ops` (in-process transport) under plain CI Python (no
+    Calibre installed) needs a stand-in. Same sys.modules-injection technique
+    tests/test_backup.py's `test_calibre_open_from_inside_the_gui` already uses for
+    `calibre.gui2.ui`; restores whatever was there before (nothing, on a machine with no Calibre)."""
+    import types
+    names = ("calibre", "calibre.utils", "calibre.utils.date")
+    saved = {n: sys.modules.get(n) for n in names}
+    for n in names:
+        if n not in sys.modules:
+            sys.modules[n] = types.ModuleType(n)
+    sys.modules["calibre.utils.date"].now = lambda: "TS"
+    try:
+        yield
+    finally:
+        for n, mod in saved.items():
+            if mod is None: sys.modules.pop(n, None)
+            else: sys.modules[n] = mod
+
+
+def _recording_cli_transport(calls):
+    """Stand-in for the CLI writer (`run_writer`): records (ops, {tool, scope}) and returns without
+    touching a subprocess."""
+    def write(ops, force=False, tool="scourgify", scope=None):
+        calls.append((ops, {"tool": tool, "scope": scope}))
+        return common.WriteResult(run_id="stand-in", backup=None, ops=len(ops), books=0,
+                                  skipped=[], outcome="ok")
+    return write
+
+
+def _recording_in_process_transport(api, calls):
+    """The plugin-side transport's shape (`plugin/jobs.py::_Writer`): records (ops, {tool, scope}),
+    then delegates to the REAL common.write_ops against a FakeApi — the actual guarded write path,
+    not a second stand-in."""
+    def write(ops, force=False, tool="plugin", scope=None):
+        calls.append((ops, {"tool": tool, "scope": scope}))
+        return common.write_ops(api, ops, force=force, tool=tool, scope=scope)
+    return write
+
+
+def _assert_same_ops(calls_a, calls_b, label):
+    assert len(calls_a) == 1 and len(calls_b) == 1, \
+        f"{label}: expected exactly one write() call per transport, got {len(calls_a)}/{len(calls_b)}"
+    (ops_a, kw_a), (ops_b, kw_b) = calls_a[0], calls_b[0]
+    assert ops_a == ops_b, f"{label}: ops differ between transports:\n  a={ops_a}\n  b={ops_b}"
+    assert kw_a == kw_b, f"{label}: tool/scope differ between transports: {kw_a} vs {kw_b}"
+
+
+def test_every_write_producer_emits_one_ops_list_for_both_transports():
+    """For each of the six write producers, drive it once per transport (transport A: the CLI
+    stand-in; transport B: common.write_ops against a fresh FakeApi) and assert the captured ops +
+    tool/scope are identical — the producer's decision is transport-independent; only the apply
+    differs. No task in this test makes a real engine call (synopsis's `ask=` is a canned FakeAsk)."""
+    import datetime
+    from scourgify import classify, promote, staleness, synopsis, wrangle
+    from scourgify.artifacts import append_ledger, write_proposal
+    from scourgify.common import load_config as _load_config
+
+    # ---- wrangle.Plan.write ----
+    lib = tempfile.mkdtemp()
+    fixture_db.build(os.path.join(lib, "metadata.db"),
+                     [{"id": 1, "added": "2026-01-01", "tags": ["Complete", "Keeper"]}]).close()
+    with _pointed_at(lib):
+        cfg = _load_config(path="/nonexistent/config.toml")
+        p = wrangle.plan(cfg, WRANGLE_MAPS)
+        assert p.changes["tags"][1] == ["Keeper"], "fixture drifted — nothing for the write to send"
+        calls_a, calls_b = [], []
+        _quiet(p.write, write=_recording_cli_transport(calls_a))
+        _quiet(p.write, write=_recording_in_process_transport(_fresh_api(), calls_b))
+    _assert_same_ops(calls_a, calls_b, "wrangle.Plan.write")
+
+    # ---- staleness.write ----
+    lib = tempfile.mkdtemp()
+    long_ago = (datetime.date.today() - datetime.timedelta(days=8 * 365)).isoformat()
+    fixture_db.build(os.path.join(lib, "metadata.db"), [{"id": 1, "added": "2026-01-01"}],
+                     custom=[("status", {1: "In-Progress"}), ("updated", {1: long_ago})]).close()
+    with _pointed_at(lib):
+        label, rows = staleness.compute()
+        assert rows and rows[0][2] == "Abandoned", "fixture drifted — nothing for the write to send"
+        calls_a, calls_b = [], []
+        _quiet(staleness.write, label, rows, write=_recording_cli_transport(calls_a))
+        _quiet(staleness.write, label, rows, write=_recording_in_process_transport(_fresh_api(), calls_b))
+    _assert_same_ops(calls_a, calls_b, "staleness.write")
+
+    # ---- classify.apply_proposal ----
+    lib = tempfile.mkdtemp()
+    fixture_db.build(os.path.join(lib, "metadata.db"), [{"id": 1, "tags": ["Existing"]}],
+                     custom=[("wrangled", {})]).close()
+    with _pointed_at(lib):
+        rows = [{"book_id": 1, "added_tags": ["New"]}]
+        calls_a, calls_b = [], []
+        _quiet(classify.apply_proposal, rows=list(rows), write=_recording_cli_transport(calls_a))
+        with _fake_calibre_utils_date():          # classify's ops always include a stamp_now
+            _quiet(classify.apply_proposal, rows=list(rows),
+                  write=_recording_in_process_transport(_fresh_api(), calls_b))
+    _assert_same_ops(calls_a, calls_b, "classify.apply_proposal")
+
+    # ---- promote.backfill ----
+    lib = tempfile.mkdtemp()
+    fixture_db.build(os.path.join(lib, "metadata.db"), [{"id": 1}]).close()
+    with _pointed_at(lib):
+        os.makedirs(common.data_dir(), exist_ok=True)
+        append_ledger("BrandNewTropeXyz123", "promote", "")
+        write_proposal([{"book_id": 1, "title": "", "added_tags": [], "proposed_new": ["BrandNewTropeXyz123"]}])
+        calls_a, calls_b = [], []
+        _quiet(promote.backfill, yes=True, write=_recording_cli_transport(calls_a))
+        _quiet(promote.backfill, yes=True, write=_recording_in_process_transport(_fresh_api(), calls_b))
+    _assert_same_ops(calls_a, calls_b, "promote.backfill")
+
+    # ---- synopsis.Plan.run ---- (no engine call: ask= is a canned FakeAsk, per tests/test_synopsis.py)
+    import test_synopsis as _ts
+    with _ts.lib():
+        p = synopsis.plan(synopsis.default_opts(apply=True))
+        calls_a, calls_b = [], []
+        _quiet(p.run, ask=_ts.FakeAsk(judge="YES", back=_ts.BACK), write=_recording_cli_transport(calls_a))
+        with _fake_calibre_utils_date():           # synopsis's ops always include a stamp_now
+            _quiet(p.run, ask=_ts.FakeAsk(judge="YES", back=_ts.BACK),
+                  write=_recording_in_process_transport(_fresh_api(books=(1, 2)), calls_b))
+    _assert_same_ops(calls_a, calls_b, "synopsis.Plan.run")
+
+    # ---- setup's write call ----
+    from scourgify import setup as setup_mod
+    lib = tempfile.mkdtemp()
+    rec_labels = ("fandoms", "characters", "relationships", "genres", "status", "updated",
+                 "wrangled", "synopsized")
+    con = fixture_db.build(os.path.join(lib, "metadata.db"), [{"id": 1}],
+                           custom=[(lbl, {}) for lbl in rec_labels])
+    fff = {"custom_cols": {"#fandoms": "series"}, "personal.ini": "",
+          "custom_cols_newonly": {}, "std_cols_newonly": {}}
+    con.execute("INSERT INTO preferences VALUES (?, ?)",
+               ("namespaced:FanFicFarePlugin:settings", json.dumps(fff)))
+    con.commit(); con.close()
+    with _pointed_at(lib):
+        cfg = _load_config(path="/nonexistent/config.toml")
+        calls_a, calls_b = [], []
+        _quiet(setup_mod.setup, cfg, yes=True, fff_probe=lambda: True,
+              write=_recording_cli_transport(calls_a))
+        _quiet(setup_mod.setup, cfg, yes=True, fff_probe=lambda: True,
+              write=_recording_in_process_transport(_fresh_api(), calls_b))
+    _assert_same_ops(calls_a, calls_b, "setup.setup")
+
+
+def _fake_run_writer(calls):
+    """A `run_writer`-shaped recorder to monkeypatch onto a producer module — the established seam
+    this repo's tests already use (tests/test_wizard_flow.py's `wrangle.run_writer`,
+    tests/test_wizard.py's `classify.run_writer`, tests/test_synopsis.py's `synopsis.run_writer`)."""
+    def fake(ops, force=False, tool="scourgify", scope=None):
+        calls.append((ops, {"tool": tool, "scope": scope}))
+        return common.WriteResult(run_id="fake", backup=None, ops=len(ops), books=0,
+                                  skipped=[], outcome="ok")
+    return fake
+
+
+def test_the_default_transport_is_still_the_cli_writer():
+    """No `write=` argument still resolves to `run_writer` (the CLI writer) at CALL time — the
+    regression this phase's PUB-05 promise exists to catch. Monkeypatches each producer MODULE's
+    OWN `run_writer` attribute, not `common.run_writer` — each producer module already imported the
+    name into its own namespace at import time, so patching `common.run_writer` alone would not be
+    observed by a caller with no `write=` argument. Same seam every one of these six producer
+    modules already resolves through: `if write is None: write = run_writer` (a bare-name lookup in
+    the module's own globals at call time)."""
+    import datetime
+    from scourgify import classify, promote, staleness, synopsis, wrangle
+    from scourgify.common import load_config as _load_config
+
+    # ---- wrangle.Plan.write ----
+    lib = tempfile.mkdtemp()
+    fixture_db.build(os.path.join(lib, "metadata.db"),
+                     [{"id": 1, "added": "2026-01-01", "tags": ["Complete", "Keeper"]}]).close()
+    with _pointed_at(lib):
+        cfg = _load_config(path="/nonexistent/config.toml")
+        p = wrangle.plan(cfg, WRANGLE_MAPS)
+        calls, saved = [], wrangle.run_writer
+        wrangle.run_writer = _fake_run_writer(calls)
+        try: _quiet(p.write)
+        finally: wrangle.run_writer = saved
+    assert len(calls) == 1 and calls[0][1]["tool"] == "wrangle", calls
+
+    # ---- staleness.write ----
+    lib = tempfile.mkdtemp()
+    long_ago = (datetime.date.today() - datetime.timedelta(days=8 * 365)).isoformat()
+    fixture_db.build(os.path.join(lib, "metadata.db"), [{"id": 1, "added": "2026-01-01"}],
+                     custom=[("status", {1: "In-Progress"}), ("updated", {1: long_ago})]).close()
+    with _pointed_at(lib):
+        label, rows = staleness.compute()
+        calls, saved = [], staleness.run_writer
+        staleness.run_writer = _fake_run_writer(calls)
+        try: _quiet(staleness.write, label, rows)
+        finally: staleness.run_writer = saved
+    assert len(calls) == 1 and calls[0][1]["tool"] == "staleness", calls
+
+    # ---- classify.apply_proposal ----
+    lib = tempfile.mkdtemp()
+    fixture_db.build(os.path.join(lib, "metadata.db"), [{"id": 1, "tags": ["Existing"]}],
+                     custom=[("wrangled", {})]).close()
+    with _pointed_at(lib):
+        calls, saved = [], classify.run_writer
+        classify.run_writer = _fake_run_writer(calls)
+        try: _quiet(classify.apply_proposal, rows=[{"book_id": 1, "added_tags": ["New"]}])
+        finally: classify.run_writer = saved
+    assert len(calls) == 1 and calls[0][1]["tool"] == "classify", calls
+
+    # ---- promote.backfill ----
+    from scourgify.artifacts import append_ledger, write_proposal
+    lib = tempfile.mkdtemp()
+    fixture_db.build(os.path.join(lib, "metadata.db"), [{"id": 1}]).close()
+    with _pointed_at(lib):
+        os.makedirs(common.data_dir(), exist_ok=True)
+        append_ledger("BrandNewTropeXyz123", "promote", "")
+        write_proposal([{"book_id": 1, "title": "", "added_tags": [], "proposed_new": ["BrandNewTropeXyz123"]}])
+        calls, saved = [], promote.run_writer
+        promote.run_writer = _fake_run_writer(calls)
+        try: _quiet(promote.backfill, yes=True)
+        finally: promote.run_writer = saved
+    assert len(calls) == 1 and calls[0][1]["tool"] == "promote", calls
+
+    # ---- synopsis.Plan.run ---- (no engine call: ask= is a canned FakeAsk)
+    import test_synopsis as _ts
+    with _ts.lib():
+        p = synopsis.plan(synopsis.default_opts(apply=True))
+        calls, saved = [], synopsis.run_writer
+        synopsis.run_writer = _fake_run_writer(calls)
+        try: _quiet(p.run, ask=_ts.FakeAsk(judge="YES", back=_ts.BACK))
+        finally: synopsis.run_writer = saved
+    assert len(calls) == 1 and calls[0][1]["tool"] == "synopsis", calls
+
+    # ---- setup's write call ----
+    from scourgify import setup as setup_mod
+    lib = tempfile.mkdtemp()
+    rec_labels = ("fandoms", "characters", "relationships", "genres", "status", "updated",
+                 "wrangled", "synopsized")
+    con = fixture_db.build(os.path.join(lib, "metadata.db"), [{"id": 1}],
+                           custom=[(lbl, {}) for lbl in rec_labels])
+    fff = {"custom_cols": {"#fandoms": "series"}, "personal.ini": "",
+          "custom_cols_newonly": {}, "std_cols_newonly": {}}
+    con.execute("INSERT INTO preferences VALUES (?, ?)",
+               ("namespaced:FanFicFarePlugin:settings", json.dumps(fff)))
+    con.commit(); con.close()
+    with _pointed_at(lib):
+        cfg = _load_config(path="/nonexistent/config.toml")
+        calls, saved = [], setup_mod.run_writer
+        setup_mod.run_writer = _fake_run_writer(calls)
+        try: _quiet(setup_mod.setup, cfg, yes=True, fff_probe=lambda: True)
+        finally: setup_mod.run_writer = saved
+    assert len(calls) == 1 and calls[0][1]["tool"] == "setup", calls
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for n, f in fns:

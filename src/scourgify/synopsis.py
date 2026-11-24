@@ -200,6 +200,7 @@ class Plan:
             self.titles = book_titles(con)
             self.have_stamp = custom_column_id(con, STAMP) is not None
         self.todo = ids[:a.batch] if a.batch else ids
+        self.cancelled = False        # set True only by a stop=/on the run() abort path below
 
     def preview(self) -> None:
         """What a run WOULD do, without doing any of it. Unlike classify there is nothing to send
@@ -215,8 +216,38 @@ class Plan:
         report.say("\nDry run — nothing sent, nothing written. To run it: "
                    "scourgify synopsis --apply   (Calibre closed)")
 
-    def run(self, ask=None) -> None:
-        """Execute. Without --apply this is preview() and stops — see the module docstring."""
+    def run(self, ask=None, *, write=None, decide=None, on_book=None, stop=None) -> None:
+        """Execute. Without --apply this is preview() and stops — see the module docstring.
+
+        `write=` is the injected write transport (the phase-2 seam): omitting it resolves to
+        `write=run_writer` (the CLI's subprocess `calibre-debug` writer) at CALL time, not at def
+        time — the sentinel-default + late-lookup shape `ask=None` (this same method) already
+        uses, not an eagerly-bound `write=run_writer` default, which would freeze a stale
+        reference to `run_writer` the moment this module loads and silently break
+        `tests/test_synopsis.py`'s existing `synopsis.run_writer = fake` monkeypatch seam (that
+        test may not be edited — PUB-05). The Calibre plugin passes a `write_ops`-bound callable
+        instead (`plugin/jobs.py::_Writer`) so the same compute logic writes in-process against
+        the live library, with the same guards.
+
+        `decide=` (D-13) threads to the internal per-book review (`step()`): the synopsis verb
+        gets the same 1-by-1 review every other write verb offers, extending CLAUDE.md's review
+        invariant to synopsis. This SUPERSEDES 02-RESEARCH.md's Open Question #1 — written before
+        CONTEXT.md's D-13 settled the question the other way — which had recommended skipping the
+        review here like classify does; do not resurrect that recommendation. CLI behaviour is
+        unchanged: with `decide=None` and `--step` unset, no review runs.
+
+        `on_book(done, total, made, kept, failed)` / `stop()` mirror `classify.Plan.run`'s own
+        progress/abort seam (plan 02-03) exactly, so both engine passes are steerable the same
+        way. `on_book` is called after each processed book — `done` is the 1-based index,
+        `total` is `len(self.todo)`, and `made`/`kept`/`failed` are RUNNING COUNTS. `stop()` is
+        checked at the head of each loop iteration; a truthy answer breaks the loop, sets
+        `self.cancelled = True`, and falls through to the existing failure-log rewrite and write
+        of whatever was settled so far — a cancelled sweep still records what it did, keeping the
+        queue's three exits finite. `stop` is a plain zero-argument callable returning a bool —
+        the core must not learn a Calibre type. Both default to `None`, so the CLI path (which
+        passes neither) is byte-identical to before this seam existed."""
+        if write is None:
+            write = run_writer
         from scourgify import report
         a = self.opts
         if not a.apply:
@@ -230,6 +261,9 @@ class Plan:
                    f"({'free, on-device — slow is fine' if a.engine == 'apple' else 'billed per book'})")
         made, kept, failures = {}, [], []
         for i, b in enumerate(self.todo, 1):
+            if stop is not None and stop():           # checked at the head of each iteration
+                self.cancelled = True
+                break
             title = str(self.titles.get(b, ""))
             out, err = settle(title, self.blurbs.get(b, ""), self.files.get(b), ask)
             if err:
@@ -239,6 +273,8 @@ class Plan:
             else:
                 kept.append(b); mark = "kept the existing blurb"
             report.say(f"  [{i}/{len(self.todo)}] #{b} {title[:40]:<40} {mark}")
+            if on_book is not None:
+                on_book(i, len(self.todo), len(made), len(kept), len(failures))
         # The log is rewritten every run, not only when this one failed: a book recovered on
         # another engine has to LEAVE the list or it reads as blocked forever — and stays out of
         # the queue with it. Books outside this run's scope are carried through untouched.
@@ -247,8 +283,8 @@ class Plan:
         if failures:
             report.say(f"  {len(failures)} failed -> {os.path.basename(syn_fail())}  "
                        "(retry on another engine: scourgify synopsis --apply --engine openai)")
-        if a.step and made:
-            made = step(made, self.titles)
+        if made and (decide is not None or a.step):
+            made = step(made, self.titles, decide=decide, blurbs=self.blurbs)
         if not (made or kept):
             report.say("(nothing settled — nothing written.)"); return
         ops = []
@@ -265,7 +301,7 @@ class Plan:
         # classify apply_proposal comment for the identical trade-off) and visible via the
         # skipped list on the footer/WriteResult/CLI output.
         ops.append(op_stamp_now(STAMP, sorted(set(made) | set(kept))))
-        run_writer(ops, tool="synopsis", scope=f"{len(made)} written, {len(kept)} kept")
+        write(ops, tool="synopsis", scope=f"{len(made)} written, {len(kept)} kept")
         report.say(f"settled {len(made) + len(kept)} book(s): {len(made)} new synopses, "
                    f"{len(kept)} existing blurbs kept.")
 
@@ -284,7 +320,7 @@ def options(n: int) -> list:
     ]
 
 
-def step(made: dict, titles: dict, decide=None) -> dict:
+def step(made: dict, titles: dict, decide=None, blurbs: dict | None = None) -> dict:
     """1-by-1 review of the generated synopses -> the ACCEPTED subset ({} = nothing decided).
 
     Lives here, not in the wizard: CLAUDE.md's rule is that a wizard stage calls the same engine
@@ -293,16 +329,22 @@ def step(made: dict, titles: dict, decide=None) -> dict:
     the point of rejecting it.
 
     `decide(title, items) -> (accepted_idx, rejected_idx, action)` defaults to ui.checklist
-    (D-11) — the lazy import of ui moves BEHIND that default."""
+    (D-11) — the lazy import of ui moves BEHIND that default. `items` are `(label, payload)`
+    pairs (D-03): `payload`'s `before` is `blurbs[b]` — the existing description the CALLER
+    already read (`Plan.run`'s `self.blurbs`), never a fresh `ro_connect()` read here, since
+    `step()` has no library connection of its own."""
     if decide is None:
         from scourgify import ui
         if not ui.interactive():
             raise GuardrailError("--step needs an interactive terminal (omit it to write every synopsis).")
         decide = ui.checklist
+    blurbs = blurbs or {}
     ids = sorted(made)
+    items = [(f"[bold]#{b}[/] {str(titles.get(b, ''))[:36]:<36} [dim]{made[b][:120]}…[/]",
+             {"book": b, "title": str(titles.get(b, "")), "field": "comments",
+              "before": blurbs.get(b, ""), "after": made[b]}) for b in ids]
     acc, _, action = decide(
-        "new synopses — untick one to leave that book's description alone",
-        [f"[bold]#{b}[/] {str(titles.get(b, ''))[:36]:<36} [dim]{made[b][:120]}…[/]" for b in ids])
+        "new synopses — untick one to leave that book's description alone", items)
     if action in ("skip", "quit"): return {}
     return {ids[i]: made[ids[i]] for i in acc}
 

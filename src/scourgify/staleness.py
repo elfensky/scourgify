@@ -67,7 +67,9 @@ def step(status_label: str, rows: list, decide=None) -> list:
     function the subcommand does, so `staleness --apply --step` and the wizard share one path.
 
     `decide(title, items) -> (accepted_idx, rejected_idx, action)` defaults to ui.checklist
-    (D-11) — the lazy import of ui moves BEHIND that default."""
+    (D-11) — the lazy import of ui moves BEHIND that default. `items` are `(label, payload)`
+    pairs (D-03): `payload` carries `book`/`title`/`field`/`before`/`after` so a Qt review table
+    can render a before -> after column; `ui.checklist` reads only the label."""
     if decide is None:
         from scourgify import ui
         if not ui.interactive():
@@ -75,18 +77,30 @@ def step(status_label: str, rows: list, decide=None) -> list:
         decide = ui.checklist
     with contextlib.closing(ro_connect()) as con:
         titles = book_titles(con)
-    acc, _, action = decide(f"{status_label} changes — untick to leave a book alone",
-                            [status_line(r, str(titles.get(r[0], ""))) for r in rows])
+    items = [(status_line(r, str(titles.get(r[0], ""))),
+             {"book": r[0], "title": str(titles.get(r[0], "")), "field": status_label,
+              "before": r[1], "after": r[2]}) for r in rows]
+    acc, _, action = decide(f"{status_label} changes — untick to leave a book alone", items)
     return [] if action in ("skip", "quit") else [rows[i] for i in acc]
 
 
-def write(status_label: str, rows: list) -> None:
-    # `expected` (D-09) is the `old` value compute() already read when it built this change-set —
-    # no fresh read at write time, so a book whose status was hand-edited in between is skipped,
-    # not clobbered.
-    run_writer([op_set_field(status_label, {b: n for b, o, n, _ in rows},
-                             expected={b: o for b, o, n, _ in rows})],
-               tool="staleness", scope=f"{len(rows)} books")
+def write(status_label: str, rows: list, *, write=None) -> None:
+    """`expected` (D-09) is the `old` value compute() already read when it built this change-set —
+    no fresh read at write time, so a book whose status was hand-edited in between is skipped,
+    not clobbered.
+
+    `write=` is the injected write transport (the phase-2 seam): omitting it resolves to
+    `write=run_writer` (the CLI's subprocess `calibre-debug` writer) at CALL time, not at def
+    time (plan 02-02 deviation — see wrangle.py's `write()` docstring for the full rationale and
+    the `module.run_writer = fake` monkeypatch seam an eagerly-bound default would silently
+    break). The Calibre plugin passes a `write_ops`-bound callable instead
+    (`plugin/jobs.py::_Writer`) so the same compute logic writes in-process against the live
+    library, with the same guards."""
+    if write is None:
+        write = run_writer
+    write([op_set_field(status_label, {b: n for b, o, n, _ in rows},
+                        expected={b: o for b, o, n, _ in rows})],
+         tool="staleness", scope=f"{len(rows)} books")
 
 
 def show(label: str, rows: list) -> None:

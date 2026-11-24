@@ -223,10 +223,22 @@ def annotate_new(ranked, cutoff: float = DEDUP_CUTOFF, existing: list | None = N
 
 
 # ---- apply: 'added_tags' + stamp #wrangled — standalone, no LLM calls ----
-def apply_proposal(rows: list | None = None) -> None:
+def apply_proposal(rows: list | None = None, *, write=None) -> None:
     """rows=None (the --apply path): read the live proposal, apply + stamp it, archive it on
     success. Explicit rows (the --step path): apply + stamp exactly those; the proposal file is
-    the CALLER's to archive/rewrite — it is never touched here, so a writer refusal loses nothing."""
+    the CALLER's to archive/rewrite — it is never touched here, so a writer refusal loses nothing.
+
+    `write=` is the injected write transport (the phase-2 seam): omitting it resolves to
+    `write=run_writer` (the CLI's subprocess `calibre-debug` writer) at CALL time, not at def
+    time — the sentinel-default + late-lookup shape `ask=None`/`decide=None` already use
+    elsewhere in this codebase, not an eagerly-bound `write=run_writer` default, which would
+    freeze a stale reference to `run_writer` the moment this module loads and silently break
+    `tests/test_wizard.py`'s existing `classify.run_writer = fake` monkeypatch seam (that test
+    may not be edited — PUB-05). The Calibre plugin passes a `write_ops`-bound callable instead
+    (`plugin/jobs.py::_Writer`) so the same compute logic writes in-process against the live
+    library, with the same guards."""
+    if write is None:
+        write = run_writer
     from_file = rows is None
     if from_file:
         if not os.path.exists(prop()):
@@ -267,9 +279,13 @@ def apply_proposal(rows: list | None = None) -> None:
     # stamp EVERY processed book, tagged or not — an unstamped no-tag book would be re-sent to the LLM forever
     ops.append(op_stamp_now("#wrangled", processed))
     # engine/model stay unset here: --apply is its own invocation and the proposal CSV does not
-    # carry the engine that produced it. The plugin's classify verb runs the pass and the write in
-    # one job and passes both (write_ops(engine=…, model=…)).
-    run_writer(ops, tool="classify", scope=f"{len(processed)} books")
+    # carry the engine that produced it. This function grows no `engine=`/`model=` parameter — the
+    # CLI transport (`run_writer`) has none, so threading them through the generic `write` callable
+    # would break the default transport for every existing caller. The plugin's classify verb runs
+    # the pass and the write in one job and passes engine/model through the INJECTED TRANSPORT it
+    # builds (`plugin/jobs.py::_Writer`, which captures them in its closure), not through this
+    # function's parameters.
+    write(ops, tool="classify", scope=f"{len(processed)} books")
     tail = ""
     if from_file:
         # archive so a later --apply can't re-add tags you've since hand-removed (stale rows never re-apply)
@@ -284,7 +300,9 @@ def apply_proposal_step(decide=None) -> None:
 
     `decide(title, items, subtitle=) -> (accepted_idx, rejected_idx, action)` defaults to
     ui.checklist (D-11) — the lazy import of ui moves BEHIND that default, so a front door
-    injecting its own callback never imports the interactive module."""
+    injecting its own callback never imports the interactive module. `items` are
+    `(label, payload)` pairs (D-03), one per proposed tag: `label` is the tag itself (unchanged);
+    `payload`'s `before`/`after` are this book's current tags without/with that one tag."""
     if not os.path.exists(prop()):
         raise GuardrailError(f"no proposal to apply ({os.path.basename(prop())} not found — run a classify pass first).")
     if decide is None:
@@ -296,13 +314,17 @@ def apply_proposal_step(decide=None) -> None:
     with contextlib.closing(ro_connect()) as con:
         desc = {b: strip_html(t) for b, t in con.execute("SELECT book, text FROM comments")}
         titles = book_titles(con)
+        cur = current_tags(con)
     decided, pending, rejects, quit_ = [], [], [], False
     for r in read_proposal():
         tags = r["added_tags"]
         if quit_: pending.append(r); continue
         if not tags: decided.append(r); continue               # no-tag book: stamp only (else re-sent forever)
         b = r["book_id"]; title = str(r.get("title") or titles.get(b, ""))
-        acc, rej, action = decide(f"[bold]#{b}[/]  {title[:64]}", tags, subtitle=(desc.get(b, "")[:280] or "(no description)"))
+        before = sorted(cur.get(b, set()))
+        items = [(tag, {"book": b, "title": title, "field": "tags",
+                        "before": before, "after": sorted(set(before) | {tag})}) for tag in tags]
+        acc, rej, action = decide(f"[bold]#{b}[/]  {title[:64]}", items, subtitle=(desc.get(b, "")[:280] or "(no description)"))
         if action == "quit": quit_ = True; pending.append(r); continue
         if action == "skip": pending.append(r); continue
         for i in rej:
@@ -392,10 +414,27 @@ class Plan:
                     self.done.add(bid)
         self.todo = [(b, d) for b, d in self.targets if b not in self.done]
         if a.batch: self.todo = self.todo[:a.batch]
+        self.cancelled = False        # set True only by a stop=/on the run() abort path below
 
-    def run(self, ask=None) -> None:
+    def run(self, ask=None, *, on_book=None, stop=None) -> None:
         """Execute the plan. `ask`: prompt -> (text, err) — tests inject a callable (the same
-        seam promote.run has); default builds the configured engine and goes through ask_retry."""
+        seam promote.run has); default builds the configured engine and goes through ask_retry.
+
+        `on_book(done, total, tagged, failed)` — when not None, called after each future
+        resolves (and after the dashboard's own update): `done` is the number of books this run
+        has finished (tagged or failed), `total` is `len(self.todo)`, `tagged`/`failed` are the
+        running counts. This is the plugin's progress seam (`notifications.put`) — the core
+        never learns Calibre's job-list shape, only calls a plain callback.
+
+        `stop()` — a plain zero-argument callable returning a bool, checked at the head of each
+        loop iteration; a truthy answer breaks the loop exactly like the existing
+        `KeyboardInterrupt` branch does: the executor is shut down with `wait=False,
+        cancel_futures=True`, the partial proposal is dumped, and `self.cancelled` is set True.
+        `stop` is deliberately NOT Calibre's abort object — the core must not learn a Calibre
+        type; the plugin wraps its abort flag in a zero-arg lambda instead.
+
+        Both `on_book` and `stop` default to None, so the CLI path (which passes neither) is
+        byte-identical to before this seam existed."""
         a, titles, proposal = self.opts, self.titles, self.proposal
         print(f"engine={a.engine}  candidate books: {len(self.targets)}", flush=True)
         if self.done: print(f"  resuming: {len(self.done)} already in proposal (pass --fresh to restart)", flush=True)
@@ -419,13 +458,22 @@ class Plan:
         try:
             with _Dashboard(len(self.todo), len(self.done), len(self.targets)) as dash:
                 futs = [ex.submit(work, b, d) for b, d in self.todo]
+                done_n = tagged_n = 0
                 for fut in as_completed(futs):
+                    if stop is not None and stop():         # checked at the head of each iteration
+                        self.cancelled = True
+                        break
                     b, err, vt, nt = fut.result()
+                    done_n += 1
                     if err: failures.append((b, err))
-                    else: proposal[b] = (vt, nt)      # record EVERY non-errored book, even a no-match (vt=nt=[]):
-                                                      # --apply stamps every proposal row, so it isn't re-sent forever.
-                                                      # errors are excluded on purpose — they retry (e.g. --engine apple).
+                    else:
+                        proposal[b] = (vt, nt)      # record EVERY non-errored book, even a no-match (vt=nt=[]):
+                                                    # --apply stamps every proposal row, so it isn't re-sent forever.
+                                                    # errors are excluded on purpose — they retry (e.g. --engine apple).
+                        if vt: tagged_n += 1
                     dash.update(vt, nt, err)
+                    if on_book is not None:
+                        on_book(done_n, len(self.todo), tagged_n, len(failures))
                     if dash.n % 50 == 0: dump()       # checkpoint regardless of UI
         except KeyboardInterrupt:
             # Ctrl+C: never start queued work, don't wait for in-flight requests (they're
@@ -433,7 +481,9 @@ class Plan:
             interrupted = True
             ex.shutdown(wait=False, cancel_futures=True)
         else:
-            ex.shutdown()
+            # A stop()-driven cancel behaves exactly like Ctrl+C's shutdown, minus setting
+            # `interrupted` (that flag is CLI-only UX text — see below).
+            ex.shutdown(wait=False, cancel_futures=True) if self.cancelled else ex.shutdown()
         dump()
         if interrupted:
             print(f"\n  interrupted — {len(proposal)} results saved to the proposal; re-run to resume where you left off.")

@@ -18,7 +18,14 @@ Two things happen here and nothing else:
 `version` is stamped from pyproject.toml by build_plugin.py — the zip and the wheel are cut from
 one source tree and one version, so a GUI and a CLI can never claim different cores.
 """
-from calibre.customize import InterfaceActionBase
+try:
+    from calibre.customize import InterfaceActionBase
+except ImportError:              # pragma: no cover — Calibre always provides this at runtime.
+    # Lets `plugin/jobs.py` (and friends) import as plain modules under CI's Python, which has no
+    # Calibre on it (D-12) — e.g. `python -c "import plugin.jobs"` would otherwise fail here,
+    # inside the PACKAGE's own __init__.py, before ever reaching jobs.py. Real Calibre always
+    # provides calibre.customize, so ScourgifyPlugin is never actually built on this fallback.
+    InterfaceActionBase = object
 
 __version__ = (0, 0, 0)         # stamped by build_plugin.py from pyproject.toml
 
