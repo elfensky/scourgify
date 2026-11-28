@@ -96,7 +96,7 @@ jobs:
 
       - name: Cache Calibre installer
         id: cache-installer
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: calibre-installer
           key: calibre-installer-${{ runner.os }}-${{ env.CALIBRE_VERSION }}
